@@ -1,0 +1,7 @@
+# Replace with your actual GCP Project ID
+
+project_id= 
+region= 
+zone= 
+machine_type= 
+my_ip=
