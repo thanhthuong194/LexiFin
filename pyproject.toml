@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "pandas>=2.3.3",
     "polars>=1.44.1",
     "requests>=2.34.2",
     "sec-edgar-downloader>=5.1.0",

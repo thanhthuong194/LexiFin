@@ -453,6 +453,7 @@ name = "lexifin"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "pandas" },
     { name = "polars" },
     { name = "requests" },
     { name = "sec-edgar-downloader" },
@@ -461,6 +462,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "pandas", specifier = ">=2.3.3" },
     { name = "polars", specifier = ">=1.44.1" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "sec-edgar-downloader", specifier = ">=5.1.0" },
