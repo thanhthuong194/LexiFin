@@ -7,7 +7,30 @@ requires-python = ">=3.13"
 dependencies = [
     "pandas>=2.3.3",
     "polars>=1.44.1",
+    "pytest>=9.1.1",
     "requests>=2.34.2",
     "sec-edgar-downloader>=5.1.0",
+    "structlog>=26.1.0",
     "vnstock>=4.0.7",
+]
+
+[tool.pytest]
+minversion = "9.0"
+addopts = [
+    "-ra",
+    "-q",
+    "--strict-markers",
+    "--cov=src",
+    "--cov-report=term-missing"
+]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "unit: Fast isolated unit tests",
+    "integration: Integration tests requiring local I/O or network",
+]
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.1.0",
 ]

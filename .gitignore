@@ -7,3 +7,8 @@
 **/*.tfstate.lock.info
 **/.terraform/
 !**/.terraform.lock.hcl
+logs
+
+**/__pycache__/
+**/.pytest_cache/
+**/.coverage
