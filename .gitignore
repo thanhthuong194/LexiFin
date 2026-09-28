@@ -8,7 +8,9 @@
 **/.terraform/
 !**/.terraform.lock.hcl
 logs
+/data/
 
 **/__pycache__/
 **/.pytest_cache/
 **/.coverage
+**/.ruff_cache/

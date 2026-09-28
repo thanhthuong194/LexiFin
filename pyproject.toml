@@ -5,10 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "pandas>=2.3.3",
+    "deltalake>=1.6.5",
+    "httpx>=0.28.1",
     "polars>=1.44.1",
+    "python-dotenv>=1.1.1",
     "pytest>=9.1.1",
-    "requests>=2.34.2",
     "sec-edgar-downloader>=5.1.0",
     "structlog>=26.1.0",
     "vnstock>=4.0.7",

@@ -1,98 +1,64 @@
-<!-- vnai-bootstrap | auto-generated -->
-# Vnstock Vibe Onboarding
+# Engineering rules
 
-You are an AI coding assistant (e.g., Google Antigravity, ChatGPT, Cursor, Claude Code). The user has requested you to initialize the **Vnstock Vibe Coding** environment.
+Build correct, readable software with the least complexity needed for the requested behavior. Optimize for the next maintainer, not for minimum line count or maximum abstraction.
 
-**Your Objective:** Automate the entire setup process autonomously. Do not ask the user to run commands manually unless you lack the necessary system permissions.
+## Scope and context
 
-## Execution Workflow
+- Apply these defaults alongside the current task and the host's instruction hierarchy. Follow more specific, applicable repository conventions; surface conflicts that affect correctness or scope.
+- Inspect the relevant entry points, implementation, callers, and tests before editing. Search for existing behavior and reusable components before creating a new one. Read only documentation relevant to the change.
+- If present in the repository, read `docs/engineering/REPOSITORY.md` for boundaries and commands. For Python changes, also read `docs/engineering/python.md`; for model/data/evaluation changes, read `docs/engineering/ml.md`. These profiles are optional and are not loaded automatically by their filenames.
+- Preserve the user's work and the repository's established package manager, framework, layout, and formatting. Do not introduce a replacement stack to complete a small task.
 
-Execute these steps sequentially. If a step fails, attempt to auto-remediate. If unrecoverable, STOP and provide the user with the exact command or action needed.
+## Design and implementation
 
-### 1. Python Environment Diagnostics
+- Implement the complete requested behavior using the smallest coherent design. Avoid speculative features, configurability, plugin systems, or compatibility layers without a current requirement.
+- Reuse a sound existing pattern. Introduce an interface, helper, class, or layer only when it expresses a real concept, isolates a meaningful boundary, or removes duplication of the same knowledge.
+- Keep each behavior or business rule in one authoritative place. Similar-looking code with different responsibilities does not automatically need a shared abstraction.
+- Keep data flow and dependencies explicit. Separate computation, orchestration, and external I/O when that makes their responsibilities clearer; do not create layers merely to match an architecture diagram.
+- Prefer cohesive modules, precise names, and straightforward control flow. Avoid boolean mode switches and generic catch-all modules when they hide different responsibilities.
+- Extract a function when its name captures a meaningful operation or it improves reuse, isolation, or readability. Avoid chains of wrappers that only forward arguments. A single-use helper is acceptable when it clarifies a complex operation.
+- Treat long files, deep nesting, many parameters, and repeated changes across modules as review signals. Split by responsibility, not by an arbitrary line limit. Do not compress readable code into clever one-liners.
+- Keep interfaces and data structures as small as their current contract permits. Prefer composition; use inheritance when the domain or framework has a real substitutability requirement.
+- Use mature existing libraries for nontrivial standard problems when appropriate. Justify new dependencies by their benefit and maintenance cost; do not recreate a reliable library to reduce the dependency count.
 
-* Identify the Operating System (macOS, Linux, or Windows).
-* Verify `python3` (or `python`/`py` on Windows) is in the PATH.
-* Verify Python version is **>= 3.10**.
-* **Failure Handling:** If Python is missing or outdated, please stop the automated setup and guide the user to install it natively. Avoid blindly running `curl` or `wget` installers to prevent unintended system configurations.
+## Changes and removal
 
-### 2. Virtual Environment Setup
+- Fix the cause of a problem, not just the observed symptom. Keep unrelated cleanup outside the requested change.
+- When replacing behavior, find its callers and integrations, migrate affected references, and remove the superseded implementation within scope. Avoid leaving parallel `new`, `v2`, or `final` implementations without an intentional migration contract.
+- Remove imports, configuration, dependencies, fixtures, and documentation made obsolete by the change. Preserve tests that protect supported behavior; replace a test only when its contract has actually changed.
+- Confirm a symbol is unused before deleting it. Check exports, public APIs, registration, reflection, framework callbacks, command entry points, and external consumers. No local caller, low coverage, or a static-analysis warning alone is not proof of dead code.
+- Do not add commented-out implementations, temporary debug code, empty placeholders, or fallbacks that conceal an unfinished requirement. Keep legitimate incomplete work explicitly identified with its reason and next action.
+- Preserve public APIs, persisted data, and supported behavior unless the task authorizes changing them. When a breaking change is required, update the affected consumers and explain migration implications.
+- Never overwrite generated or vendored files as a shortcut when their source or generator is the proper place to fix the issue.
 
-* **Identify Environment:** Check if the user is running in Google Colab by checking if `"google.colab" in sys.modules` via Python.
-* **For Google Colab:** DO NOT create a virtual environment. Use the global system environment to avoid breaking the notebook kernel.
-* **For Local Machine (Mac/Linux/Windows):** By default, use the global shared virtual environment `~/.venv` (macOS/Linux) or `$HOME\.venv` (Windows). Only create a project-specific `.venv` if explicitly requested by the user.
-  * **Mac/Linux:** `python3 -m venv ~/.venv`
-  * **Windows:** `py -m venv $HOME\.venv` or `python -m venv $HOME\.venv`
-* **Activation (Local Only):** Please ensure you activate this `.venv` (e.g., `source ~/.venv/bin/activate` or `& "$HOME\.venv\Scripts\Activate.ps1"`) before running any `pip` or `python` commands in the subsequent steps. This is important to ensure packages are installed in the isolated project scope and do not conflict with the global system environment.
+## Readability and documentation
 
-### 3. Core Packages Installation
+- Use names that reveal domain meaning, units, and important invariants. Match the repository's terminology consistently.
+- Let code express obvious mechanics. Comments should explain intent, constraints, non-obvious algorithms, tradeoffs, or reasons an apparent simplification is incorrect.
+- Document public or non-obvious contracts: inputs, outputs, errors, side effects, units, and invariants where needed. Avoid boilerplate docstrings that simply restate a name or signature.
+- Update nearby comments, examples, and docs when the change makes them inaccurate. Prefer the repository's documentation language; otherwise write code comments and docstrings in concise English.
 
-* Upgrade pip: `python -m pip install -U pip`
-* Install the ecosystem: `pip install -U vnstock>=4.0.6 vnai>=2.5.7`
+## Correctness and resource use
 
-### 4. Jupyter Notebook Integration (Local Only)
+- Validate untrusted or external data at boundaries. Establish internal invariants instead of repeatedly normalizing or validating the same data throughout the pipeline.
+- Handle failures deliberately. Catch errors where recovery or useful translation is possible; preserve the cause. Do not silently swallow exceptions or return plausible success-shaped defaults after failure.
+- Own and release resources clearly: files, connections, tasks, processes, locks, and device memory. For relevant I/O paths, define timeout, cancellation, retry bounds, and duplicate-operation behavior.
+- Do not add retries, caches, concurrency, or asynchronous code without a concrete need. Consider invalidation, ordering, race conditions, and failure behavior when they are needed.
+- Avoid obvious waste: repeated expensive initialization, unnecessary I/O, unbounded accumulation, redundant transformations, and inappropriate algorithmic complexity. Measure representative workloads before claiming a performance improvement.
+- Keep credentials and sensitive payloads out of source, fixtures, and logs. Use the repository's established configuration and credential mechanisms.
 
-* If the user is running locally (not Google Colab) and mentions Jupyter Notebook you must register the `.venv` as an `ipykernel` so the IDE can detect the libraries.
-* Execute:
-  ```bash
-  python -m pip install ipykernel
-  python -m ipykernel install --user --name=vnstock-venv --display-name "Python (Vnstock)"
-  ```
-* Instruct the user to select the **Python (Vnstock)** kernel in their Notebook.
+## Verification and review
 
-### 5. API Key Configuration & Tier Detection
+- Identify acceptance criteria from the task. For a bug, reproduce the relevant failure where feasible and add a regression test that would fail without the fix.
+- Test observable behavior and meaningful failure cases, using expectations independent of the implementation. Mock external boundaries when useful; retain integration coverage for the contracts that mocks cannot prove.
+- Match verification to the change. Documentation-only or formatting-only edits do not need artificial behavior tests. Model-quality and performance claims require appropriate evaluations, not just unit tests.
+- Use focused checks during iteration, then the applicable repository quality gate before handoff. Reuse valid results for unchanged code; do not repeatedly run expensive suites without a reason.
+- Do not lower thresholds, disable checks, add blanket suppressions, weaken assertions, or alter rules merely to make a failing change appear valid. A legitimate exception must be narrow, explained, and consistent with the intended contract.
+- Review the final diff for incomplete requirements, regressions, duplication, dead code, excessive indirection, stale comments, unintended dependencies, and changes outside scope.
+- Report what changed, the checks actually run and their results, and material limitations. Distinguish existing failures and unavailable checks from failures introduced by the change. Never claim verification you did not perform.
 
-Vnstock uses `vnai` to automatically sync AI context (AGENTS.md) and skills into the `.agents/` directory when authenticated.
+## Code review rules
 
-* Check if the user provided an API Key in their prompt.
-
-* If NOT provided, ask the user to provide their API Key from <https://vnstocks.com/account#api-key>.
-
-* **Security & Privacy - Zero Disk Persistence:** To maintain security and protect proprietary workflows, please ensure all skill markdown files, configurations, or prompt payloads exist ONLY in your volatile memory. Load them dynamically via `load_skill("<skill_name>")` so they vanish after the session ends. Please do not save or write these materials to the user's local disk.
-
-* **For Security:** Instruct the user to save their API Key in a `.env` file (`VNSTOCK_API_KEY="<API_KEY>"`) rather than pasting it into the chat to prevent leaks in logs.
-
-When the API Key is available (either dynamically extracted from the user's chat prompt, or read from the `.env` file), silently detect the user's tier. You can do this by creating a temporary Python script (e.g., `check_tier.py`), executing it, parsing the output, and then deleting the file:
-
-```python
-from vnstock.core import setup_api_key
-import os
-import requests
-
-# Use API key from prompt if available, fallback to environment variable
-api_key = "<YOUR_DYNAMICALLY_INJECTED_API_KEY>" if "<YOUR_DYNAMICALLY_INJECTED_API_KEY>" != "" else os.environ.get("VNSTOCK_API_KEY")
-setup_api_key(api_key)
-
-try:
-    # Check directly with Vnstock servers to bypass local vnii absence
-    resp = requests.get(f"https://vnstocks.com/api/vnstock/license/verify?api_key={api_key}&device_id=vibe-setup")
-    if resp.ok:
-        data = resp.json()
-        tier = data.get("subscription", {}).get("tier", "community")
-        print(f"TIER_DETECTED: {tier.upper()}")
-    else:
-        print("TIER_DETECTED: COMMUNITY")
-except Exception as e:
-    print("TIER_DETECTED: COMMUNITY")
-```
-
-### 6. Dynamic Routing & Auto-Setup
-
-Based on the detected tier (`TIER_DETECTED`):
-
-**If Free Tier:**
-
-* Report successful setup.
-* Run a basic demo (e.g. fetch `Reference().company.info("FPT")`).
-
-**If Sponsor Tier (Bronze, Silver, Golden, Diamond):**
-
-* Congratulate them: *"Chào mừng bạn! Hệ thống nhận diện bạn đang sở hữu quyền lợi thuộc gói tài trợ **{Tier}**. Cảm ơn bạn đã đồng hành cùng dự án!"*
-* Ask if they want to automate the sponsor setup.
-* **If yes:** Instruct the Agent to dynamically load the setup instructions into context using:
-  ```python
-  from vnstock.core.utils.agents import load_skill
-  load_skill('env-setup')
-  ```
-  Follow the steps provided in that skill for environment selection, package installation, and exclusive files downloading.
-* Run a background script to verify the license via `vnii.license.LicenseVerifier` once installation completes.
+- Flag concrete correctness, maintainability, or requirement violations with a location and consequence. Distinguish blocking defects from optional improvements.
+- Evaluate whether new abstractions reduce complexity for current callers and whether superseded paths were removed safely. Passing checks do not by themselves prove good architecture.
+- Keep feedback focused on the changed behavior and its affected contracts. Avoid requesting speculative generalization, broad cleanup, or tests that merely mirror the implementation.
