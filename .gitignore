@@ -9,6 +9,7 @@
 !**/.terraform.lock.hcl
 logs
 /data/
+/reports/sec_structure/
 
 **/__pycache__/
 **/.pytest_cache/
