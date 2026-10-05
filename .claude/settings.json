@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/agent_stop_gate.py\"",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}

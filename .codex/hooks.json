@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/scripts/agent_stop_gate.py\"",
+            "timeout": 300,
+            "statusMessage": "Running quality gate"
+          }
+        ]
+      }
+    ]
+  }
+}
