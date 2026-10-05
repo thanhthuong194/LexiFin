@@ -10,7 +10,7 @@ from typing import Protocol
 
 import httpx
 import polars as pl
-from sec_edgar_downloader import Downloader
+from sec_edgar_downloader import Downloader  # type: ignore[attr-defined]  # no __all__
 
 from src.data_pipeline.contracts.ingestion import FormType, RawArtifact
 from src.data_pipeline.storage.bronze import artifact_for_path
@@ -25,7 +25,8 @@ FILING_DATE_PATTERNS = (
 class FilingDownloader(Protocol):
     """Small protocol implemented by sec-edgar-downloader and test fakes."""
 
-    def get(
+    # The signature mirrors sec_edgar_downloader.Downloader.get.
+    def get(  # noqa: PLR0913
         self,
         form: str,
         ticker_or_cik: str,
@@ -85,7 +86,9 @@ def parse_company_tickers(raw_json: bytes) -> pl.DataFrame:
         raise ValueError("SEC company ticker mapping is not valid JSON") from error
 
     if not isinstance(payload, dict):
-        raise ValueError("SEC company ticker mapping must be a JSON object")
+        # Malformed SEC response, not a caller type error; callers handle
+        # ValueError for every kind of invalid mapping.
+        raise ValueError("SEC company ticker mapping must be a JSON object")  # noqa: TRY004
 
     records: list[dict[str, str]] = []
     for item in payload.values():
@@ -117,22 +120,29 @@ def create_downloader(
     return Downloader(company_name, email, download_root)
 
 
+@dataclass(frozen=True)
+class FormDownloadRequest:
+    """One company's filings of one form within an inclusive filing-date range."""
+
+    cik: str
+    form: FormType
+    after: date
+    before: date
+
+
 def download_form(
     downloader: FilingDownloader,
+    request: FormDownloadRequest,
     *,
-    cik: str,
-    form: FormType,
-    after: date,
-    before: date,
     accession_numbers_to_skip: set[str],
 ) -> int:
     """Download one SEC form with the verified 5.1.x API semantics."""
 
     return downloader.get(
-        form,
-        cik,
-        after=after,
-        before=before,
+        request.form,
+        request.cik,
+        after=request.after,
+        before=request.before,
         include_amends=False,
         download_details=True,
         accession_numbers_to_skip=accession_numbers_to_skip,

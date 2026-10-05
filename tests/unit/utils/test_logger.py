@@ -32,11 +32,7 @@ def read_json_events(capsys) -> list[dict]:
 
     output = capsys.readouterr().out.strip()
 
-    return [
-        json.loads(line)
-        for line in output.splitlines()
-        if line
-    ]
+    return [json.loads(line) for line in output.splitlines() if line]
 
 
 def test_logger_outputs_structured_json(capsys):

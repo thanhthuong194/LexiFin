@@ -37,7 +37,11 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
+    "ruff>=0.16.10",
+    "vulture>=2.16",
 ]
 
 [[tool.uv.index]]
@@ -48,3 +52,47 @@ explicit = true
 [tool.uv.sources]
 vnai = { index = "vnstock" }
 vnstock = { index = "vnstock" }
+
+[tool.ruff.lint]
+extend-select = [
+  "B",      # likely bugs
+  "UP",     # outdated syntax
+  "SIM",    # needlessly complex code
+  "RET",    # redundant return patterns
+  "ARG",    # unused arguments
+  "C90",    # cyclomatic complexity
+  "PL",     # too many arguments, branches, statements, returns
+  "FBT",    # boolean mode parameters
+  "ERA",    # commented-out code
+  "T20",    # print statements
+  "BLE",    # blind `except Exception`
+  "S110",   # try / except / pass
+  "PGH",    # blanket `type: ignore` and `noqa`
+  "RUF100", # unused `noqa`
+]
+ignore = [
+  "PLR2004", # magic values in comparisons: too noisy
+  "PLC0415", # imports inside functions: legitimate for heavy optional libraries
+  "FBT003",  # boolean literals in calls: too noisy
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-branches = 12
+max-statements = 50
+max-returns = 6
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ARG", "FBT", "PLR0913"]
+"scripts/**" = ["T20"]
+"vulture_whitelist.py" = ["F821", "B018"]  # generated list of bare names
+
+[tool.mypy]
+strict = true
+
+[tool.vulture]
+min_confidence = 60
+ignore_decorators = ["@app.*", "@router.*", "@pytest.fixture"]

@@ -9,7 +9,6 @@ from typing import Any
 
 from .logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -80,10 +79,7 @@ def timed(
         function: Callable[..., Any],
     ) -> Callable[..., Any]:
         function_fields = {
-            "function": (
-                f"{function.__module__}."
-                f"{function.__qualname__}"
-            ),
+            "function": (f"{function.__module__}.{function.__qualname__}"),
             **fields,
         }
 

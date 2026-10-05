@@ -9,7 +9,7 @@ import pytest
 
 from scripts.ingest_sec_edgar import REPOSITORY_ROOT, parse_args
 from src.data_pipeline.contracts.ingestion import IngestionRequest
-from src.data_pipeline.pipelines.sec_edgar import run_sec_edgar
+from src.data_pipeline.pipelines.sec_edgar import SourceAdapters, run_sec_edgar
 from src.data_pipeline.pipelines.sec_state import load_manifest
 from src.data_pipeline.quality.sec_bronze import manifest_entry_is_complete
 from src.data_pipeline.storage.bronze import sha256_file
@@ -77,9 +77,11 @@ def _run(
         data_dir,
         "LexiFin",
         "test@example.com",
-        ivv_fetcher=lambda: holdings,
-        ticker_fetcher=lambda _company, _email: TICKERS,
-        downloader_factory=lambda _company, _email, root: FakeDownloader(root),
+        sources=SourceAdapters(
+            ivv_fetcher=lambda: holdings,
+            ticker_fetcher=lambda _company, _email: TICKERS,
+            downloader_factory=lambda _company, _email, root: FakeDownloader(root),
+        ),
     )
 
 

@@ -5,7 +5,6 @@ from .logger import (
     get_logger,
     log_context,
 )
-
 from .timer import timed, timed_operation
 
 __all__ = [

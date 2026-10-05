@@ -1,0 +1,9 @@
+{
+  "path": ["."],
+  "gitignore": true,
+  "format": ["python", "typescript", "tsx", "javascript", "jsx", "go", "rust", "java", "kotlin", "csharp", "php", "ruby"],
+  "ignore": ["**/tests/**", "**/test/**", "**/__tests__/**", "**/migrations/**", "**/node_modules/**", "**/.venv/**", "**/dist/**", "**/build/**"],
+  "minTokens": 60,
+  "threshold": 3,
+  "reporters": ["console"]
+}

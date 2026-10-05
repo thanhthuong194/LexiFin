@@ -76,7 +76,8 @@ def _parse_holdings_date(rows: list[list[str]]) -> date:
                 cleaned = candidate.strip()
                 for date_format in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d"):
                     try:
-                        return datetime.strptime(cleaned, date_format).date()
+                        # Only the calendar date is kept, so no timezone applies.
+                        return datetime.strptime(cleaned, date_format).date()  # noqa: DTZ007
                     except ValueError:
                         continue
     raise ValueError("Could not parse 'Fund Holdings as of' from IVV CSV")

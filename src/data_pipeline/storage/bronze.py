@@ -151,7 +151,9 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
             except json.JSONDecodeError as error:
                 raise ValueError(f"Invalid JSONL at {path}:{line_number}") from error
             if not isinstance(value, dict):
-                raise ValueError(f"Expected JSON object at {path}:{line_number}")
+                # Malformed file content, not a caller type error; callers
+                # handle ValueError for every kind of invalid JSONL.
+                raise ValueError(f"Expected JSON object at {path}:{line_number}")  # noqa: TRY004
             records.append(value)
     return records
 

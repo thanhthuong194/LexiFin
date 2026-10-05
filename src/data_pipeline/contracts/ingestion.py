@@ -5,7 +5,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 FormType = Literal["10-K", "10-Q", "8-K"]
 
 ArtifactRole = Literal[

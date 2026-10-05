@@ -9,11 +9,11 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from dotenv import load_dotenv  
+from dotenv import load_dotenv
 
-from src.data_pipeline.contracts.ingestion import IngestionRequest  
-from src.data_pipeline.pipelines.sec_edgar import run_sec_edgar  
-from src.utils.logger import configure_logging, get_logger  
+from src.data_pipeline.contracts.ingestion import IngestionRequest
+from src.data_pipeline.pipelines.sec_edgar import run_sec_edgar
+from src.utils.logger import configure_logging, get_logger
 
 
 def _company_limit(value: str) -> int:
