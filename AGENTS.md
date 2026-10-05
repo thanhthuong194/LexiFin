@@ -1,64 +1,49 @@
-# Engineering rules
+# LexiFin
 
-Build correct, readable software with the least complexity needed for the requested behavior. Optimize for the next maintainer, not for minimum line count or maximum abstraction.
+Hiện chỉ có SEC 10-K/10-Q/8-K của top-N công ty trong quỹ IVV (S&P 500). Không được phá: tính bất biến của Bronze và `filing_manifest.jsonl`, vì manifest quyết định filing nào được tải lại.
 
-## Scope and context
+## Commands
 
-- Apply these defaults alongside the current task and the host's instruction hierarchy. Follow more specific, applicable repository conventions; surface conflicts that affect correctness or scope.
-- Inspect the relevant entry points, implementation, callers, and tests before editing. Search for existing behavior and reusable components before creating a new one. Read only documentation relevant to the change.
-- If present in the repository, read `docs/engineering/REPOSITORY.md` for boundaries and commands. For Python changes, also read `docs/engineering/python.md`; for model/data/evaluation changes, read `docs/engineering/ml.md`. These profiles are optional and are not loaded automatically by their filenames.
-- Preserve the user's work and the repository's established package manager, framework, layout, and formatting. Do not introduce a replacement stack to complete a small task.
+- Cài: `uv sync --locked` (Python 3.13; `vnstock`/`vnai` lấy từ index riêng `vnstocks.com`).
+- Test toàn bộ: `uv run pytest` (17 test, ~2 s, không gọi mạng; coverage bật sẵn trong `addopts`).
+- Một test: `uv run pytest tests/unit/utils/test_timer.py::<tên_test> --no-cov`.
+- Chạy ingest SEC (entry point duy nhất):
+  `uv run python scripts/ingest_sec_edgar.py --data-dir <thư_mục_tạm> --company-limit 1 --lookback-years 1`
+  Cần `SEC_COMPANY_NAME`, `SEC_EMAIL` trong `.env` (mẫu: `.env.example`). Bỏ `--data-dir` thì ghi vào `./data`.
 
-## Design and implementation
+## Domain terms
 
-- Implement the complete requested behavior using the smallest coherent design. Avoid speculative features, configurability, plugin systems, or compatibility layers without a current requirement.
-- Reuse a sound existing pattern. Introduce an interface, helper, class, or layer only when it expresses a real concept, isolates a meaningful boundary, or removes duplication of the same knowledge.
-- Keep each behavior or business rule in one authoritative place. Similar-looking code with different responsibilities does not automatically need a shared abstraction.
-- Keep data flow and dependencies explicit. Separate computation, orchestration, and external I/O when that makes their responsibilities clearer; do not create layers merely to match an architecture diagram.
-- Prefer cohesive modules, precise names, and straightforward control flow. Avoid boolean mode switches and generic catch-all modules when they hide different responsibilities.
-- Extract a function when its name captures a meaningful operation or it improves reuse, isolation, or readability. Avoid chains of wrappers that only forward arguments. A single-use helper is acceptable when it clarifies a complex operation.
-- Treat long files, deep nesting, many parameters, and repeated changes across modules as review signals. Split by responsibility, not by an arbitrary line limit. Do not compress readable code into clever one-liners.
-- Keep interfaces and data structures as small as their current contract permits. Prefer composition; use inheritance when the domain or framework has a real substitutability requirement.
-- Use mature existing libraries for nontrivial standard problems when appropriate. Justify new dependencies by their benefit and maintenance cost; do not recreate a reliable library to reduce the dependency count.
+Tên dễ hiểu nhầm:
 
-## Changes and removal
+- universe: top-N theo tổng `Weight (%)` của IVV, gộp theo CIK (GOOGL + GOOG tính là một công ty). Đây không phải danh sách S&P 500 chính thức.
+- `company_limit` (N, 1–500): state incremental được tách theo N. `load_usable_runs` chỉ đọc các run có cùng N, nên khi đổi N mọi công ty bị coi là `new` và quét lại toàn bộ `lookback_years`. Filing đã có trong manifest vẫn được bỏ qua, nhưng vẫn phải gọi SEC để liệt kê.
+- `snapshot_id`: hash SHA-256 của hai file nguồn, không phải ngày. Thư mục `snapshot_date_<ts>` mang thời điểm bắt đầu run (UTC), không phải `holdings_as_of_date`.
+- `cik`: chuỗi 10 chữ số, có số 0 ở đầu (`0000320193`), không phải int.
+- `status="partial"`: có filing bị lỗi, nhưng script vẫn trả exit 0. `exited` chỉ được ghi ở run ngay sau khi công ty rời universe.
+- `connectors/sec_filings/` chứa cả `ishares.py`, dù iShares không phải nguồn SEC.
+- Marker `integration` không có nghĩa là test gọi mạng; các test này dùng fetcher/downloader giả. Test trong `tests/unit/utils/` không gắn marker, nên chạy `-m unit` sẽ bỏ sót chúng.
+- File rỗng, không phải entry point: `main.py`, `Makefile`, `Dockerfile`, `src/data_pipeline/runner.py`, `connectors/registry.py`, `pipelines/{bronze,silver,gold}.py`, `contracts/{silver,gold}.py`, `quality/{silver,gold}.py`.
+- `bronze-silver.md` gọi các bảng là "Delta table", nhưng dependency lại là `pyiceberg` + `duckdb`. Silver và Gold chưa có code. [?]
 
-- Fix the cause of a problem, not just the observed symptom. Keep unrelated cleanup outside the requested change.
-- When replacing behavior, find its callers and integrations, migrate affected references, and remove the superseded implementation within scope. Avoid leaving parallel `new`, `v2`, or `final` implementations without an intentional migration contract.
-- Remove imports, configuration, dependencies, fixtures, and documentation made obsolete by the change. Preserve tests that protect supported behavior; replace a test only when its contract has actually changed.
-- Confirm a symbol is unused before deleting it. Check exports, public APIs, registration, reflection, framework callbacks, command entry points, and external consumers. No local caller, low coverage, or a static-analysis warning alone is not proof of dead code.
-- Do not add commented-out implementations, temporary debug code, empty placeholders, or fallbacks that conceal an unfinished requirement. Keep legitimate incomplete work explicitly identified with its reason and next action.
-- Preserve public APIs, persisted data, and supported behavior unless the task authorizes changing them. When a breaking change is required, update the affected consumers and explain migration implications.
-- Never overwrite generated or vendored files as a shortcut when their source or generator is the proper place to fix the issue.
+## Do not touch
 
-## Readability and documentation
+- `data/` (gitignored; khoảng 1,7 GB, 343 filing): không sửa hay xoá bằng tay.
+  - `filing_manifest.jsonl` chỉ được append. Xoá file filing thì lần chạy sau sẽ tải lại.
+  - `_metadata/runs/run_*.json` là state incremental. Một file hỏng làm mọi run sau báo `Invalid SEC run metadata`.
+  - Test và chạy thử thì dùng `tmp_path` hoặc `--data-dir` tạm.
+- `.env`: chứa tên và email thật, được gửi tới SEC trong User-Agent. Không in ra, không commit.
+- `uv.lock`: chỉ thay đổi qua `uv add` / `uv lock`.
+- `infrastructure/gcp_vm/.terraform.lock.hcl`: sinh ra từ `terraform init`.
+- `src/data_pipeline/erd/conceptual_erd/*.{png,svg,html}`: xuất từ `conceptual_erd.drawio`, nên sửa file `.drawio` rồi xuất lại. [?] Không rõ `Untitled Diagram.drawio` dùng để làm gì. [?]
+- `logs/lexifin.jsonl`: log JSON của các run trước. Code chỉ ghi ra stdout, nên file này chắc được tạo bằng redirect. [?]
 
-- Use names that reveal domain meaning, units, and important invariants. Match the repository's terminology consistently.
-- Let code express obvious mechanics. Comments should explain intent, constraints, non-obvious algorithms, tradeoffs, or reasons an apparent simplification is incorrect.
-- Document public or non-obvious contracts: inputs, outputs, errors, side effects, units, and invariants where needed. Avoid boilerplate docstrings that simply restate a name or signature.
-- Update nearby comments, examples, and docs when the change makes them inaccurate. Prefer the repository's documentation language; otherwise write code comments and docstrings in concise English.
+## Known traps
 
-## Correctness and resource use
+Những thứ nguy hiểm hoặc tốn tiền khi chạy:
 
-- Validate untrusted or external data at boundaries. Establish internal invariants instead of repeatedly normalizing or validating the same data throughout the pipeline.
-- Handle failures deliberately. Catch errors where recovery or useful translation is possible; preserve the cause. Do not silently swallow exceptions or return plausible success-shaped defaults after failure.
-- Own and release resources clearly: files, connections, tasks, processes, locks, and device memory. For relevant I/O paths, define timeout, cancellation, retry bounds, and duplicate-operation behavior.
-- Do not add retries, caches, concurrency, or asynchronous code without a concrete need. Consider invalidation, ordering, race conditions, and failure behavior when they are needed.
-- Avoid obvious waste: repeated expensive initialization, unnecessary I/O, unbounded accumulation, redundant transformations, and inappropriate algorithmic complexity. Measure representative workloads before claiming a performance improvement.
-- Keep credentials and sensitive payloads out of source, fixtures, and logs. Use the repository's established configuration and credential mechanisms.
-
-## Verification and review
-
-- Identify acceptance criteria from the task. For a bug, reproduce the relevant failure where feasible and add a regression test that would fail without the fix.
-- Test observable behavior and meaningful failure cases, using expectations independent of the implementation. Mock external boundaries when useful; retain integration coverage for the contracts that mocks cannot prove.
-- Match verification to the change. Documentation-only or formatting-only edits do not need artificial behavior tests. Model-quality and performance claims require appropriate evaluations, not just unit tests.
-- Use focused checks during iteration, then the applicable repository quality gate before handoff. Reuse valid results for unchanged code; do not repeatedly run expensive suites without a reason.
-- Do not lower thresholds, disable checks, add blanket suppressions, weaken assertions, or alter rules merely to make a failing change appear valid. A legitimate exception must be narrow, explained, and consistent with the intended contract.
-- Review the final diff for incomplete requirements, regressions, duplication, dead code, excessive indirection, stale comments, unintended dependencies, and changes outside scope.
-- Report what changed, the checks actually run and their results, and material limitations. Distinguish existing failures and unavailable checks from failures introduced by the change. Never claim verification you did not perform.
-
-## Code review rules
-
-- Flag concrete correctness, maintainability, or requirement violations with a location and consequence. Distinguish blocking defects from optional improvements.
-- Evaluate whether new abstractions reduce complexity for current callers and whether superseded paths were removed safely. Passing checks do not by themselves prove good architecture.
-- Keep feedback focused on the changed behavior and its affected contracts. Avoid requesting speculative generalization, broad cleanup, or tests that merely mirror the implementation.
+- Ingest gọi SEC EDGAR và iShares thật, và tốn dung lượng: 5 công ty × 5 năm ≈ 1,7 GB, mất khoảng 8 phút (theo `logs/`). Ước lượng 500 công ty ≈ 170 GB, vượt đĩa 50 GB của VM Terraform. [?] Luôn thử với N=1, 1 năm, và `--data-dir` tạm.
+- `sec-edgar-downloader` gọi `requests.get` không có timeout, nên có thể treo vô hạn. Ngày 2026-10-04 đã gặp: kẹt ở SYN-SENT qua IPv6 tới sec.gov. Khi chạy hãy đặt timeout từ bên ngoài.
+- Không chạy hai tiến trình ingest cùng `--data-dir`: không có lock, và cả hai cùng append vào manifest. Rate limiter 10 req/s của SEC chỉ áp dụng trong một process. Vượt rate có thể bị SEC chặn IP. [?]
+- `terraform apply` trong `infrastructure/gcp_vm/` sẽ tạo VM `e2-standard-4` với đĩa 50 GB ở `asia-southeast1`, tính tiền liên tục cho tới khi destroy. Không chạy `apply`/`destroy` khi chưa được yêu cầu. tfstate bị gitignore nên state chỉ nằm ở máy người đã chạy. [?]
+- `my_ip` mặc định là `0.0.0.0/0`, nghĩa là firewall mở các port 22, 6333, 7474, 7687, 8501 ra toàn Internet.
+- `docker-compose.yml` hard-code mật khẩu Neo4j và dùng image `qdrant:latest`. Dữ liệu ghi vào `qdrant_data/`, `neo4j_data/` cạnh file compose; hai thư mục này không bị gitignore nên `git add -A` sẽ add cả dữ liệu DB.
