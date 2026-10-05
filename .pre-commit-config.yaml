@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: quality-gate
+        name: quality gate (scripts/check.sh staged)
+        entry: scripts/check.sh staged
+        language: system
+        pass_filenames: false
+        always_run: true
