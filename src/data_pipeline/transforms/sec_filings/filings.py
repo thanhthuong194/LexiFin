@@ -13,7 +13,7 @@ from src.data_pipeline.storage.bronze import relative_to_root, sha256_file
 
 # Header lines look like "ACCESSION NUMBER:\t\t0000320193-24-000123", indented
 # under FILER/SUBJECT COMPANY blocks for per-entity keys such as the CIK.
-_HEADER_FIELD = re.compile(r"^\s*([A-Z][A-Z0-9 -]*?):\s*(.*?)\s*$")
+SEC_HEADER_FIELD = re.compile(r"^\s*([A-Z][A-Z0-9 -]*?):\s*(.*?)\s*$")
 _ACCEPTANCE_DATETIME = re.compile(r"^<ACCEPTANCE-DATETIME>\s*(\d{14})\s*$")
 
 ManifestIndex = Mapping[str, tuple[FilingManifestEntry, ...]]
@@ -32,29 +32,61 @@ class SecHeader:
     public_document_count: int | None
 
 
-def read_sec_header(full_submission: Path) -> str:
-    """Return the text between `<SEC-HEADER>` and `</SEC-HEADER>`.
+@dataclass(frozen=True)
+class RawSecHeader:
+    """The raw bytes between the `<SEC-HEADER>` and `</SEC-HEADER>` lines.
+
+    `start_byte` is the offset of `raw[0]` in the full submission, so positions
+    inside the header map back to the Bronze file.
+    """
+
+    start_byte: int
+    raw: bytes
+
+    @property
+    def end_byte(self) -> int:
+        """Offset of the `</SEC-HEADER>` line: the exclusive end of the header."""
+
+        return self.start_byte + len(self.raw)
+
+
+def read_raw_sec_header(full_submission: Path) -> RawSecHeader:
+    """Read the SEC header of a full submission as raw bytes with its offset.
 
     Reads line by line and stops at the end tag, so the (large) documents that
-    follow the header are never loaded. EDGAR headers are ASCII; any other byte
-    is replaced rather than failing the whole filing.
+    follow the header are never loaded.
     """
 
     lines: list[bytes] = []
     started = False
+    offset = start_byte = 0
     with full_submission.open("rb") as file_handle:
         for line in file_handle:
             if line.startswith(b"<SEC-HEADER>"):
+                if started:
+                    raise ValueError("SEC header has more than one <SEC-HEADER> line")
                 started = True
+                start_byte = offset + len(line)
             elif line.startswith(b"</SEC-HEADER>"):
                 if not started:
                     break
-                return b"".join(lines).decode("utf-8", errors="replace")
+                return RawSecHeader(start_byte=start_byte, raw=b"".join(lines))
             elif line.startswith(b"<DOCUMENT>"):
                 break
             elif started:
                 lines.append(line)
+            offset += len(line)
     raise ValueError("SEC header block <SEC-HEADER>...</SEC-HEADER> not found")
+
+
+def read_sec_header(full_submission: Path) -> str:
+    """Return the SEC header text of a full submission.
+
+    EDGAR headers are ASCII; any other byte is replaced rather than failing
+    the whole filing.
+    """
+
+    return read_raw_sec_header(full_submission).raw.decode("utf-8", errors="replace")
 
 
 def _single(fields: Mapping[str, list[str]], key: str) -> str | None:
@@ -94,7 +126,7 @@ def parse_sec_header(header: str) -> SecHeader:
     for line in header.splitlines():
         if match := _ACCEPTANCE_DATETIME.match(line):
             acceptance.add(match.group(1))
-        elif (match := _HEADER_FIELD.match(line)) and match.group(2):
+        elif (match := SEC_HEADER_FIELD.match(line)) and match.group(2):
             fields.setdefault(match.group(1), []).append(match.group(2))
 
     if len(acceptance) > 1:

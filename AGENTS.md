@@ -5,15 +5,15 @@ Hiện chỉ có SEC 10-K/10-Q/8-K của top-N công ty trong quỹ IVV (S&P 500
 ## Commands
 
 - Cài: `uv sync --locked` (Python 3.13; `vnstock`/`vnai` lấy từ index riêng `vnstocks.com`).
-- Test toàn bộ: `uv run pytest` (92 test, ~4 s, không gọi mạng; coverage bật sẵn trong `addopts`).
+- Test toàn bộ: `uv run pytest` (123 test, ~6 s, không gọi mạng; coverage bật sẵn trong `addopts`).
 - Một test: `uv run pytest tests/unit/utils/test_timer.py::<tên_test> --no-cov`.
 - Chạy ingest SEC (Bronze):
   `uv run python scripts/ingest_sec_edgar.py --data-dir <thư_mục_tạm> --company-limit 1 --lookback-years 1`
   Cần `SEC_COMPANY_NAME`, `SEC_EMAIL` trong `.env` (mẫu: `.env.example`). Bỏ `--data-dir` thì ghi vào `./data`.
-- Dựng Silver (Iceberg) từ toàn bộ SEC Bronze, không gọi mạng: stage `sec_filings.filings` rồi `sec_filings.documents` (mỗi `<DOCUMENT>` block của `full-submission.txt` là một row; documents đọc parent từ bảng filings, không quét lại Bronze):
+- Dựng Silver (Iceberg) từ toàn bộ SEC Bronze, không gọi mạng, theo thứ tự stage `sec_filings.filings` → `sec_filings.documents` (mỗi `<DOCUMENT>` block của `full-submission.txt` là một row) → `sec_filings.filing_entities` (mỗi entity-role block như `FILER:` trong SEC header là một row). Hai stage sau đọc parent từ bảng filings, không quét lại Bronze; `bronze_to_silver.py` chỉ điều phối, mỗi stage nằm trong `pipelines/sec_filings/<table>.py`:
   `uv run python scripts/sec_filings/build_silver.py --data-dir <data_dir>`
   Lần đầu ~16 s cho 343 filing / 12.809 document; chạy lại ~4 s vì filing và document đã có đều được skip.
-  Exit 1 khi một stage bị reject (filing lỗi, checksum conflict, document group thiếu); stage đó không ghi gì, và documents không chạy nếu filings bị reject.
+  Exit 1 khi một stage bị reject (filing lỗi, checksum conflict, document/entity group thiếu hoặc khác); stage đó không ghi gì và các stage sau không chạy.
 
 ## Domain terms
 
@@ -27,7 +27,7 @@ Tên dễ hiểu nhầm:
 - `connectors/sec_filings/` chứa cả `ishares.py`, dù iShares không phải nguồn SEC.
 - Marker `integration` không có nghĩa là test gọi mạng; các test này dùng fetcher/downloader giả. Test trong `tests/unit/utils/` không gắn marker, nên chạy `-m unit` sẽ bỏ sót chúng.
 - File rỗng, không phải entry point: `main.py`, `Makefile`, `Dockerfile`, `src/data_pipeline/runner.py`, `connectors/registry.py`, `pipelines/{bronze,silver,gold}.py`, `contracts/{silver,gold}.py`, `quality/{silver,gold}.py`.
-- `bronze-silver.md` gọi các bảng là "Delta table", nhưng dependency lại là `pyiceberg` + `duckdb`. Silver mới có bảng Iceberg `sec_filings.filings` và `sec_filings.documents`; Gold chưa có code.
+- `bronze-silver.md` gọi các bảng là "Delta table", nhưng dependency lại là `pyiceberg` + `duckdb`. Silver mới có các bảng Iceberg `sec_filings.filings`, `sec_filings.documents` và `sec_filings.filing_entities` (không partition); Gold chưa có code.
 - `public_document_count` (header `PUBLIC DOCUMENT COUNT`) không đáng tin: filing nộp từ 2024-01-30 đến 2026-03-13 có header lớn hơn số `<DOCUMENT>` block thật 1–2 (149/343 filing). Documents stage chỉ log `submission_document_count_mismatch`, không fail.
 
 ## Do not touch
