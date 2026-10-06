@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 from pydantic import BaseModel
 from pyiceberg.catalog import Catalog
 from pyiceberg.catalog.sql import SqlCatalog
@@ -283,3 +284,44 @@ def verify_written_groups(
         }
         if found != rows:
             raise ValueError(f"{table.name()} rows of {group} differ after commit")
+
+
+def read_rows_by_key(
+    table: Table, keys: Collection[str], *, key_column: str, columns: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """The `columns` of the stored rows whose `key_column` is one of `keys`, by key.
+
+    Only the named columns are read, and filtered before leaving Arrow.
+    """
+
+    if not keys:
+        return {}
+    rows = table.scan(selected_fields=(key_column, *columns)).to_arrow()
+    rows = rows.filter(pc.is_in(rows[key_column], value_set=pa.array(list(keys))))
+    return {row.pop(key_column): row for row in rows.to_pylist()}
+
+
+def verify_written_values(
+    table: Table,
+    written: Sequence[BaseModel],
+    *,
+    key_column: str,
+    columns: Sequence[str],
+) -> None:
+    """Check that every row written now is stored with the same `columns` values.
+
+    Run after `verify_append` on tables too large to re-read whole; choose
+    columns, such as content hashes, that pin down the rest of the row.
+    """
+
+    stored = read_rows_by_key(
+        table,
+        [getattr(row, key_column) for row in written],
+        key_column=key_column,
+        columns=columns,
+    )
+    for row in written:
+        key = getattr(row, key_column)
+        found = stored.get(key, {})
+        if any(found.get(column) != getattr(row, column) for column in columns):
+            raise ValueError(f"{table.name()} row {key} differs after commit")

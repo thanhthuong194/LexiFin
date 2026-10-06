@@ -17,6 +17,13 @@ from src.data_pipeline.transforms.sec_filings.xbrl_model_enrichment import (
     read_dimensions,
     read_footnotes,
 )
+from src.data_pipeline.transforms.sec_filings.xbrl_model_linkbases import (
+    LoadedArc,
+    LoadedLabel,
+    read_arcs,
+    read_labels,
+    read_role_definitions,
+)
 from src.data_pipeline.transforms.sec_filings.xbrl_model_reader import (
     LoadedConcept,
     LoadedFact,
@@ -74,6 +81,9 @@ class LoadedInstance:
     Inline target holds only those its facts use) to their `context_hash`;
     `dimensions` are those reported in these contexts, and `footnotes` the
     fact-footnote relationships, which name facts by their position in `facts`.
+    `labels` and `arcs` are the DTS's effective label, presentation,
+    calculation and definition relationships, and `role_definitions` the
+    definitions of the arcs' link roles.
     """
 
     concepts: list[LoadedConcept]
@@ -82,6 +92,9 @@ class LoadedInstance:
     context_hashes: dict[str, str]
     dimensions: list[LoadedDimension]
     footnotes: list[LoadedFootnote]
+    labels: list[LoadedLabel]
+    arcs: list[LoadedArc]
+    role_definitions: dict[str, str | None]
     downloaded_uris: list[str]
 
 
@@ -170,14 +183,21 @@ def load_instance(
                 facts, totals, fact_objects = read_facts(
                     model, entries, inline=is_inline
                 )
-                documents = {path: document_id for document_id, path in entries}
+                entry_paths = {path: document_id for document_id, path in entries}
+                file_paths = {path: document_id for document_id, path in paths.items()}
+                arcs = read_arcs(model, file_paths)
                 return LoadedInstance(
                     concepts=read_concepts(model, directory),
                     facts=facts,
                     inline_fact_totals=totals if is_inline else {},
                     context_hashes=read_context_hashes(model),
                     dimensions=read_dimensions(model),
-                    footnotes=read_footnotes(model, fact_objects, documents),
+                    footnotes=read_footnotes(model, fact_objects, entry_paths),
+                    labels=read_labels(model, file_paths),
+                    arcs=arcs,
+                    role_definitions=read_role_definitions(
+                        model, {arc.role_uri for arc in arcs}
+                    ),
                     downloaded_uris=[
                         str(m.get("msg", "")).removeprefix("Downloaded ")
                         for m in messages

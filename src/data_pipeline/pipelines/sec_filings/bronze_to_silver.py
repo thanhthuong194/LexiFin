@@ -42,6 +42,10 @@ from src.data_pipeline.pipelines.sec_filings.xbrl_facts import (
     XbrlFactsStageSummary,
     run_xbrl_facts_stage,
 )
+from src.data_pipeline.pipelines.sec_filings.xbrl_linkbases import (
+    XbrlLinkbasesStageSummary,
+    run_xbrl_linkbases_stage,
+)
 from src.data_pipeline.transforms.sec_filings.xbrl_processor import ProcessorSettings
 from src.utils.logger import get_logger
 from src.utils.timer import timed_operation
@@ -67,6 +71,7 @@ class SilverRunResult:
     xbrl_core: XbrlCoreStageSummary | None
     xbrl_facts: XbrlFactsStageSummary | None
     xbrl_enrichment: XbrlEnrichmentStageSummary | None
+    xbrl_linkbases: XbrlLinkbasesStageSummary | None
 
     @property
     def completed(self) -> bool:
@@ -84,6 +89,7 @@ class SilverRunResult:
                 self.xbrl_core,
                 self.xbrl_facts,
                 self.xbrl_enrichment,
+                self.xbrl_linkbases,
             )
         )
 
@@ -106,8 +112,9 @@ def run_sec_filings_silver(
     every committed HTML document, then the XBRL core tables
     (`xbrl_instances`, `xbrl_contexts`, `xbrl_units`) from the filings' Inline
     XBRL and XML instance documents, then `xbrl_concepts` and `xbrl_facts`
-    from those instances, and last `xbrl_dimensions` and
-    `xbrl_fact_footnotes` from their contexts and facts. The XBRL processor
+    from those instances, then `xbrl_dimensions` and `xbrl_fact_footnotes`
+    from their contexts and facts, and last `xbrl_labels`, `xbrl_networks`
+    and `xbrl_relationships` from their DTSs. The XBRL processor
     resolves taxonomies from `taxonomy_cache_dir` (default
     `<data_dir>/_cache/arelle`) and downloads missing ones, identifying
     itself with `http_user_agent`, only when `allow_taxonomy_network` is set. Each stage validates its whole batch
@@ -137,6 +144,10 @@ def run_sec_filings_silver(
         (
             "xbrl_enrichment",
             lambda: run_xbrl_enrichment_stage(data_dir, processed_at, taxonomy),
+        ),
+        (
+            "xbrl_linkbases",
+            lambda: run_xbrl_linkbases_stage(data_dir, processed_at, taxonomy),
         ),
     ]
     summaries: dict[str, Any] = dict.fromkeys(name for name, _ in stages)

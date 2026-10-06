@@ -82,16 +82,102 @@ _CONCEPTS = (
      'abstract="true"'),
     ("RegionAxis", "xbrli:stringItemType", "duration", "xbrldt:dimensionItem",
      'abstract="true" xbrldt:typedDomainRef="#ex_Region"'),
+    ("StatementAbstract", "xbrli:stringItemType", "duration", "xbrli:item",
+     'abstract="true"'),
+    ("ProductTable", "xbrli:stringItemType", "duration", "xbrldt:hypercubeItem",
+     'abstract="true"'),
 )  # fmt: skip
-# The filing's extension schema. It imports only the XBRL 2.1 and dimension
-# schemas, which the XBRL processor ships with, so facts load offline.
+STATEMENT_ROLE = "http://example.com/role/Statement"
+
+
+def _loc(name: str) -> str:
+    return (
+        f'<link:loc xlink:type="locator" xlink:href="#ex_{name}" xlink:label="{name}"/>'
+    )
+
+
+def _arc(
+    kind: str, arcrole: str, source: str, target: str, attributes: str = ""
+) -> str:
+    return (
+        f'<link:{kind}Arc xlink:type="arc" xlink:arcrole="{arcrole}" '
+        f'xlink:from="{source}" xlink:to="{target}" {attributes}/>'
+    )
+
+
+def _label(name: str, role: str, language: str, text: str) -> str:
+    return (
+        f'<link:label xlink:type="resource" xlink:label="{name}" '
+        f'xlink:role="http://www.xbrl.org/2003/role/{role}" xml:lang="{language}">'
+        f"{text}</link:label>"
+    )
+
+
+_DIMENSION_ARCROLE = "http://xbrl.org/int/dim/arcrole/"
+# Linkbases embedded in the extension schema: Revenue's standard, terse and
+# French labels, and one statement role with a presentation, a calculation
+# and a definition network (a closed hypercube on ProductAxis).
+_LINKBASES = (
+    "<xs:annotation><xs:appinfo>"
+    f'<link:roleType roleURI="{STATEMENT_ROLE}" id="Statement">'
+    "<link:definition>100 - Statement - Revenue</link:definition>"
+    "<link:usedOn>link:presentationLink</link:usedOn>"
+    "<link:usedOn>link:calculationLink</link:usedOn>"
+    "<link:usedOn>link:definitionLink</link:usedOn></link:roleType>"
+    "<link:linkbase>"
+    '<link:labelLink xlink:type="extended" '
+    'xlink:role="http://www.xbrl.org/2003/role/link">'
+    + _loc("Revenue")
+    + _label("revenue_standard", "label", "en-US", "Revenue")
+    + _label("revenue_terse", "terseLabel", "en-US", "Revenues")
+    + _label("revenue_french", "label", "fr", "Chiffre d&#8217;affaires")
+    + "".join(
+        _arc("label", "http://www.xbrl.org/2003/arcrole/concept-label", "Revenue", label)
+        for label in ("revenue_standard", "revenue_terse", "revenue_french")
+    )
+    + "</link:labelLink>"
+    f'<link:presentationLink xlink:type="extended" xlink:role="{STATEMENT_ROLE}">'
+    + _loc("StatementAbstract")
+    + _loc("Revenue")
+    + _loc("ProductTable")
+    + _arc("presentation", "http://www.xbrl.org/2003/arcrole/parent-child",
+           "StatementAbstract", "Revenue",
+           'order="1" preferredLabel="http://www.xbrl.org/2003/role/terseLabel"')
+    + _arc("presentation", "http://www.xbrl.org/2003/arcrole/parent-child",
+           "StatementAbstract", "ProductTable", 'order="2"')
+    + "</link:presentationLink>"
+    f'<link:calculationLink xlink:type="extended" xlink:role="{STATEMENT_ROLE}">'
+    + _loc("Revenue")
+    + _loc("Cash")
+    + _arc("calculation", "http://www.xbrl.org/2003/arcrole/summation-item",
+           "Revenue", "Cash", 'order="1" weight="1.000"')
+    + "</link:calculationLink>"
+    f'<link:definitionLink xlink:type="extended" xlink:role="{STATEMENT_ROLE}">'
+    + _loc("Revenue")
+    + _loc("ProductTable")
+    + _loc("ProductAxis")
+    + _loc("WidgetsMember")
+    + _arc("definition", f"{_DIMENSION_ARCROLE}all", "Revenue", "ProductTable",
+           'xbrldt:closed="true" xbrldt:contextElement="segment"')
+    + _arc("definition", f"{_DIMENSION_ARCROLE}hypercube-dimension",
+           "ProductTable", "ProductAxis")
+    + _arc("definition", f"{_DIMENSION_ARCROLE}dimension-domain",
+           "ProductAxis", "WidgetsMember")
+    + "</link:definitionLink></link:linkbase></xs:appinfo></xs:annotation>"
+)  # fmt: skip
+# The filing's extension schema, with its linkbases embedded. It imports only
+# the XBRL 2.1 and dimension schemas, which the XBRL processor ships with, so
+# instances load offline.
 EXTENSION_SCHEMA = (
     '<?xml version="1.0" encoding="utf-8"?>\n'
     '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
     'xmlns:xbrli="http://www.xbrl.org/2003/instance" '
     'xmlns:xbrldt="http://xbrl.org/2005/xbrldt" '
+    'xmlns:link="http://www.xbrl.org/2003/linkbase" '
+    'xmlns:xlink="http://www.w3.org/1999/xlink" '
     'targetNamespace="http://example.com/2024" elementFormDefault="qualified">'
-    '<xs:import namespace="http://www.xbrl.org/2003/instance" '
+    + _LINKBASES
+    + '<xs:import namespace="http://www.xbrl.org/2003/instance" '
     'schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>'
     '<xs:import namespace="http://xbrl.org/2005/xbrldt" '
     'schemaLocation="http://www.xbrl.org/2005/xbrldt-2005.xsd"/>'

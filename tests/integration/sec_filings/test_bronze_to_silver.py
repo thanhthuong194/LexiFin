@@ -1512,12 +1512,12 @@ def test_filing_without_xbrl_gets_no_instance_and_reruns_quietly(
 CONCEPTS = "sec_filings.xbrl_concepts"
 FACTS = "sec_filings.xbrl_facts"
 EX = "http://example.com/2024"
-# The fixture's extension schema defines ten items and the typed domain
+# The fixture's extension schema defines twelve items and the typed domain
 # ex:Region, and imports the dimension schema, whose two abstract items are
 # standard concepts. The 10-K has four hidden facts, its product in a
 # paragraph and its revenue again in a table cell; the 10-Q and 8-K have two
 # hidden facts each.
-EXTENSION_CONCEPTS, STANDARD_CONCEPTS, FACT_ROWS = 11, 2, 10
+EXTENSION_CONCEPTS, STANDARD_CONCEPTS, FACT_ROWS = 13, 2, 10
 DEI_SCHEMA_URL = "https://xbrl.sec.gov/dei/2024/dei-2024.xsd"
 # A standard taxonomy schema as the processor caches it after a download.
 DEI_SCHEMA = (
@@ -1621,7 +1621,7 @@ def test_xbrl_facts_build_concepts_and_fact_occurrences_and_reruns_skip(
     contexts = {row["context_key"] for row in _rows(tmp_path, CONTEXTS)}
     units = {row["unit_key"] for row in _rows(tmp_path, UNITS)}
     # Every instance loaded the same extension schema; each concept is stored once.
-    assert len(concepts) == len(concepts_table.scan().to_arrow()) == 13
+    assert len(concepts) == len(concepts_table.scan().to_arrow()) == 15
     assert Counter(fact["instance_id"] for fact in facts) == {
         instance_id: row["fact_count"] for instance_id, row in instances.items()
     }
@@ -1804,10 +1804,10 @@ def test_concepts_only_commit_is_recovered_without_new_concepts(
     assert resumed.completed
     assert summary is not None
     assert (summary.instances_recovered, summary.instances_inserted) == (3, 0)
-    assert (summary.concepts_inserted, summary.concepts_skipped) == (0, 13)
+    assert (summary.concepts_inserted, summary.concepts_skipped) == (0, 15)
     assert summary.facts_inserted == FACT_ROWS
     assert _snapshot(tmp_path, CONCEPTS) == concepts_snapshot
-    assert len(_rows(tmp_path, CONCEPTS)) == 13
+    assert len(_rows(tmp_path, CONCEPTS)) == 15
 
     # A later filing of the same extension taxonomy is new, not recovered.
     _write_new_year_filing(tmp_path, write_sec_filing)
