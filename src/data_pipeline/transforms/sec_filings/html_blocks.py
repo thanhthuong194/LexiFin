@@ -73,7 +73,9 @@ class _OpenContainer:
     link_pieces: list[str] = field(default_factory=list)
 
 
-def _is_container(tag: str) -> bool:
+def is_block_container(tag: str) -> bool:
+    """Whether an element of this tag owns the text runs written directly in it."""
+
     return tag in _BLOCK_TYPE_BY_TAG or tag in _OTHER_CONTAINERS
 
 
@@ -138,7 +140,7 @@ class _BlockWalk:
             self.empty_tables += 1
         if self.open_tables:
             return False
-        if _is_container(tag):
+        if is_block_container(tag):
             self.open(element, tag)
         self.link_depth += is_link(element, tag)
         self.add(" " if tag == "br" else element.text)
@@ -155,7 +157,7 @@ class _BlockWalk:
         # tail, which follows it in the parent, is visible.
         elif not is_hidden(element, tag):
             self.link_depth -= is_link(element, tag)
-            if _is_container(tag):
+            if is_block_container(tag):
                 self.close()
         self.add(element.tail)
 

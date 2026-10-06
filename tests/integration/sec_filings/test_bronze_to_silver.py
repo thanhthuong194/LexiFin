@@ -4,7 +4,8 @@ import hashlib
 import json
 import sys
 from collections import Counter
-from datetime import date, datetime
+from dataclasses import asdict, fields
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pyarrow as pa
@@ -36,11 +37,22 @@ from src.data_pipeline.contracts.sec_filings.filing_entities import (
 )
 from src.data_pipeline.contracts.sec_filings.filings import FILINGS_ARROW_SCHEMA
 from src.data_pipeline.contracts.sec_filings.sections import SECTIONS_ARROW_SCHEMA
+from src.data_pipeline.contracts.sec_filings.xbrl_concepts import (
+    XBRL_CONCEPTS_ARROW_SCHEMA,
+    ConceptDefinition,
+    XbrlConceptRecord,
+    concept_id_for,
+)
 from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
+from src.data_pipeline.contracts.sec_filings.xbrl_facts import (
+    XBRL_FACTS_ARROW_SCHEMA,
+    XbrlFactRecord,
+)
 from src.data_pipeline.pipelines.sec_filings import (
     document_link_extraction,
     document_table_extraction,
     xbrl_core_extraction,
+    xbrl_facts_extraction,
 )
 from src.data_pipeline.pipelines.sec_filings import (
     document_tables as document_tables_stage,
@@ -48,6 +60,7 @@ from src.data_pipeline.pipelines.sec_filings import (
 from src.data_pipeline.pipelines.sec_filings import documents as documents_stage
 from src.data_pipeline.pipelines.sec_filings import narrative as narrative_stage
 from src.data_pipeline.pipelines.sec_filings import xbrl_core as xbrl_core_stage
+from src.data_pipeline.pipelines.sec_filings import xbrl_facts as xbrl_facts_stage
 from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
     run_sec_filings_silver,
 )
@@ -57,6 +70,7 @@ from src.data_pipeline.storage.sec_filings.filing_entities import (
     read_filing_entity_groups,
 )
 from src.data_pipeline.storage.sec_filings.xbrl_core import XBRL_CORE_SCHEMAS
+from src.data_pipeline.transforms.sec_filings.xbrl_processor import ProcessorSettings
 
 pytestmark = pytest.mark.integration
 
@@ -100,7 +114,7 @@ UNITS = "sec_filings.xbrl_units"
 # target, merged with EDGAR's XML rendering (document 4): the 10-K keeps an
 # unused EUR unit that the rendering leaves out; the 8-K has no unit.
 XBRL_COUNTS = {
-    TEN_K_DOCUMENT: (5, 3, 4),
+    TEN_K_DOCUMENT: (6, 3, 4),
     TEN_Q_DOCUMENT: (2, 2, 1),
     EIGHT_K_DOCUMENT: (2, 1, 0),
 }
@@ -711,12 +725,16 @@ def test_changed_entity_with_the_same_id_is_a_conflict(
     assert table.scan().to_arrow().num_rows == 4
 
 
-def test_cli_default_data_dir_is_repository_relative(
+def test_cli_defaults_to_the_repository_data_dir_offline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(sys, "argv", ["build_silver.py"])
 
-    assert parse_args().data_dir == REPOSITORY_ROOT / "data"
+    args = parse_args()
+
+    assert args.data_dir == REPOSITORY_ROOT / "data"
+    # The taxonomy cache defaults to <data-dir>/_cache/arelle, never downloaded.
+    assert (args.taxonomy_cache_dir, args.allow_taxonomy_network) == (None, False)
 
 
 def test_narrative_builds_sections_and_blocks_and_reruns_skip(
@@ -1377,7 +1395,7 @@ def test_xbrl_core_recovers_child_groups_after_a_failed_commit(
     assert _table(tmp_path, UNITS).scan().to_arrow().num_rows == 5
 
 
-def _replace_instance(data_dir: Path, document: str, **changes: str) -> None:
+def _replace_instance(data_dir: Path, document: str, **changes: object) -> None:
     with open_silver_catalog(data_dir) as catalog:
         table = catalog.load_table(INSTANCES)
         instance_id = _instance_id(document)
@@ -1473,3 +1491,424 @@ def test_filing_without_xbrl_gets_no_instance_and_reruns_quietly(
     assert _xbrl_snapshots(tmp_path)[0] == first.xbrl_core.instances_snapshot_after
     stored = _table(tmp_path, INSTANCES).scan().to_arrow()["filing_id"].to_pylist()
     assert "sec:0000320193-26-000001" not in stored
+
+
+CONCEPTS = "sec_filings.xbrl_concepts"
+FACTS = "sec_filings.xbrl_facts"
+EX = "http://example.com/2024"
+# The fixture's extension schema defines ten items and the typed domain
+# ex:Region, and imports the dimension schema, whose two abstract items are
+# standard concepts. The 10-K has four hidden facts, its product in a
+# paragraph and its revenue again in a table cell; the 10-Q and 8-K have two
+# hidden facts each.
+EXTENSION_CONCEPTS, STANDARD_CONCEPTS, FACT_ROWS = 11, 2, 10
+DEI_SCHEMA_URL = "https://xbrl.sec.gov/dei/2024/dei-2024.xsd"
+# A standard taxonomy schema as the processor caches it after a download.
+DEI_SCHEMA = (
+    '<?xml version="1.0" encoding="utf-8"?>\n'
+    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+    'xmlns:xbrli="http://www.xbrl.org/2003/instance" '
+    'targetNamespace="http://xbrl.sec.gov/dei/2024" elementFormDefault="qualified">'
+    '<xs:import namespace="http://www.xbrl.org/2003/instance" '
+    'schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>'
+    '<xs:element id="dei_DocumentType" name="DocumentType" '
+    'type="xbrli:stringItemType" substitutionGroup="xbrli:item" '
+    'xbrli:periodType="duration" nillable="true"/></xs:schema>\n'
+)
+
+
+def _inline_primary(schema_href: str, body: str) -> str:
+    """An 8-K primary document with one context and no unit."""
+
+    return (
+        "\n<XBRL>\n<?xml version='1.0' encoding='ASCII'?>\n"
+        '<html xmlns="http://www.w3.org/1999/xhtml" '
+        'xmlns:ix="http://www.xbrl.org/2013/inlineXBRL" '
+        'xmlns:xbrli="http://www.xbrl.org/2003/instance" '
+        'xmlns:link="http://www.xbrl.org/2003/linkbase" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink" '
+        'xmlns:dei="http://xbrl.sec.gov/dei/2024"><head><title>8-K</title></head>'
+        '<body><div style="display: none"><ix:header><ix:references>'
+        f'<link:schemaRef xlink:type="simple" xlink:href="{schema_href}"/>'
+        '</ix:references><ix:resources><xbrli:context id="D"><xbrli:entity>'
+        '<xbrli:identifier scheme="http://www.sec.gov/CIK">0000320193'
+        "</xbrli:identifier></xbrli:entity><xbrli:period><xbrli:startDate>"
+        "2026-01-05</xbrli:startDate><xbrli:endDate>2026-01-05</xbrli:endDate>"
+        "</xbrli:period></xbrli:context></ix:resources></ix:header></div>"
+        f"<div>Item 2.02 Results of Operations.</div>{body}</body></html>\n</XBRL>\n"
+    )
+
+
+def _write_dei_filing(data_dir: Path, write_sec_filing) -> None:
+    """A new 8-K whose one fact is defined only by the standard dei taxonomy."""
+
+    write_sec_filing(
+        data_dir,
+        cik=CIK,
+        form="8-K",
+        accession="0000320193-26-000001",
+        filed="20260105",
+        primary_text=_inline_primary(
+            DEI_SCHEMA_URL,
+            '<div>Form <ix:nonNumeric name="dei:DocumentType" contextRef="D">'
+            "8-K</ix:nonNumeric>.</div>",
+        ),
+        xbrl_instance=False,
+    )
+
+
+def _warm_dei_cache(data_dir: Path) -> None:
+    cached = data_dir / "_cache" / "arelle" / "https" / "xbrl.sec.gov" / "dei"
+    cached.mkdir(parents=True)
+    (cached / "2024" / "dei-2024.xsd").parent.mkdir()
+    (cached / "2024" / "dei-2024.xsd").write_text(DEI_SCHEMA)
+
+
+def _facts_snapshots(data_dir: Path) -> tuple[int | None, int | None]:
+    return _snapshot(data_dir, CONCEPTS), _snapshot(data_dir, FACTS)
+
+
+def _rows(data_dir: Path, identifier: str) -> list[dict]:
+    return _table(data_dir, identifier).scan().to_arrow().to_pylist()
+
+
+def test_xbrl_facts_build_concepts_and_fact_occurrences_and_reruns_skip(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+
+    first = run_sec_filings_silver(tmp_path)
+
+    summary = first.xbrl_facts
+    assert first.completed
+    assert summary is not None
+    assert {key: asdict(summary)[key] for key in EXPECTED_FIRST_FACTS_RUN} == (
+        EXPECTED_FIRST_FACTS_RUN
+    )
+    concepts_table, facts_table = _table(tmp_path, CONCEPTS), _table(tmp_path, FACTS)
+    for table, schema in (
+        (concepts_table, XBRL_CONCEPTS_ARROW_SCHEMA),
+        (facts_table, XBRL_FACTS_ARROW_SCHEMA),
+    ):
+        assert table.location() == str(
+            tmp_path / "silver" / "sec_filings" / table.name()[-1]
+        )
+        assert table.scan().to_arrow().schema.equals(schema)
+    assert _partition_columns(concepts_table) == []
+    assert _partition_columns(facts_table) == [
+        ("instance_bucket", "bucket[32]", "instance_id")
+    ]
+
+    instances = {row["instance_id"]: row for row in _rows(tmp_path, INSTANCES)}
+    concepts = {row["concept_id"]: row for row in _rows(tmp_path, CONCEPTS)}
+    facts = _rows(tmp_path, FACTS)
+    contexts = {row["context_key"] for row in _rows(tmp_path, CONTEXTS)}
+    units = {row["unit_key"] for row in _rows(tmp_path, UNITS)}
+    # Every instance loaded the same extension schema; each concept is stored once.
+    assert len(concepts) == len(concepts_table.scan().to_arrow()) == 13
+    assert Counter(fact["instance_id"] for fact in facts) == {
+        instance_id: row["fact_count"] for instance_id, row in instances.items()
+    }
+    assert len({fact["fact_id"] for fact in facts}) == len(facts) == FACT_ROWS
+    for fact in facts:
+        XbrlFactRecord.model_validate(fact)  # recomputes the fact hash
+        assert fact["concept_id"] in concepts
+        assert fact["context_key"] in contexts
+        if fact["fact_kind"] == "non_numeric":
+            assert fact["unit_key"] is None
+        else:
+            assert fact["unit_key"] in units
+    revenue = concepts[concept_id_for(EX, "Revenue")]
+    assert (revenue["is_extension"], revenue["source_schema_uri"]) == (
+        True,
+        "ex-2024.xsd",
+    )
+    assert (revenue["data_type"], revenue["balance"]) == (
+        "{http://www.xbrl.org/2003/instance}monetaryItemType",
+        "credit",
+    )
+
+    # The hidden revenue fact and its formatted repetition in a table cell stay
+    # two occurrences; the visible facts point at their cell and block.
+    ten_k = sorted(
+        (f for f in facts if f["instance_id"] == _instance_id(TEN_K_DOCUMENT)),
+        key=lambda f: f["fact_order"],
+    )
+    revenues = [f for f in ten_k if f["concept_id"] == revenue["concept_id"]]
+    assert [
+        (f["is_hidden"], f["raw_value"], f["numeric_value"], f["block_id"])
+        for f in revenues
+    ] == [(True, "1000", "1000", None), (False, "1,000", "1000", None)]
+    cell = next(
+        row
+        for row in _rows(tmp_path, CELLS)
+        if row["cell_id"] == revenues[1]["cell_id"]
+    )
+    assert (cell["document_id"], cell["text"]) == (TEN_K_DOCUMENT, "$1,000")
+    product = next(f for f in ten_k if f["concept_id"] == concept_id_for(EX, "Product"))
+    block = next(
+        row for row in _rows(tmp_path, BLOCKS) if row["block_id"] == product["block_id"]
+    )
+    assert (block["document_id"], block["text"]) == (TEN_K_DOCUMENT, "We make widgets.")
+    assert product["cell_id"] is None
+
+    def reload(*_: object) -> None:
+        raise AssertionError("complete fact groups must not reload XBRL")
+
+    monkeypatch.setattr(xbrl_facts_extraction, "load_instance", reload)
+    rerun = run_sec_filings_silver(tmp_path)
+
+    assert rerun.completed
+    assert rerun.xbrl_facts is not None
+    assert (rerun.xbrl_facts.instances_skipped, rerun.xbrl_facts.facts_inserted) == (
+        3,
+        0,
+    )
+    assert _facts_snapshots(tmp_path) == (
+        summary.concepts_snapshot_after,
+        summary.facts_snapshot_after,
+    )
+    assert len(_rows(tmp_path, FACTS)) == FACT_ROWS
+
+
+EXPECTED_FIRST_FACTS_RUN = {
+    "status": "completed",
+    "instances_considered": 3,
+    "instances_inserted": 3,
+    "instances_skipped": 0,
+    "instances_recovered": 0,
+    "concepts_discovered": EXTENSION_CONCEPTS + STANDARD_CONCEPTS,
+    "concepts_inserted": EXTENSION_CONCEPTS + STANDARD_CONCEPTS,
+    "standard_concepts": STANDARD_CONCEPTS,
+    "extension_concepts": EXTENSION_CONCEPTS,
+    "facts_inserted": FACT_ROWS,
+    "numeric_facts": 5,
+    "nonnumeric_facts": 5,
+    "fraction_facts": 0,
+    "nil_facts": 0,
+    "hidden_facts": 8,
+    "continued_facts": 0,
+    "aligned_block_facts": 1,
+    "aligned_cell_facts": 1,
+    "unaligned_facts": 8,
+    "normalization_warnings": 0,
+}
+
+
+def test_new_instance_appends_only_its_new_concepts_and_fact_group(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    first = run_sec_filings_silver(tmp_path).xbrl_facts
+    stored = {row["fact_id"]: row for row in _rows(tmp_path, FACTS)}
+    _write_dei_filing(tmp_path, write_sec_filing)
+    _warm_dei_cache(tmp_path)
+
+    result = run_sec_filings_silver(tmp_path)
+
+    summary = result.xbrl_facts
+    assert result.completed
+    assert first is not None and summary is not None
+    assert (summary.instances_inserted, summary.instances_skipped) == (1, 3)
+    assert (summary.concepts_inserted, summary.standard_concepts) == (1, 1)
+    assert summary.facts_inserted == 1
+    for table, before in (
+        (CONCEPTS, first.concepts_snapshot_after),
+        (FACTS, first.facts_snapshot_after),
+    ):
+        assert _table(tmp_path, table).current_snapshot().parent_snapshot_id == before
+    facts = {row["fact_id"]: row for row in _rows(tmp_path, FACTS)}
+    assert {i: facts[i] for i in stored} == stored
+    [new_fact] = [row for i, row in facts.items() if i not in stored]
+    dei = next(
+        row
+        for row in _rows(tmp_path, CONCEPTS)
+        if row["concept_id"] == new_fact["concept_id"]
+    )
+    assert (dei["namespace_uri"], dei["local_name"]) == (
+        "http://xbrl.sec.gov/dei/2024",
+        "DocumentType",
+    )
+    assert (dei["is_extension"], dei["source_schema_uri"]) == (False, DEI_SCHEMA_URL)
+    assert (new_fact["raw_value"], new_fact["is_hidden"]) == ("8-K", False)
+    assert new_fact["block_id"] is not None
+
+
+def test_taxonomy_cache_miss_rejects_the_batch_until_the_cache_is_warm(
+    tmp_path: Path, write_sec_filing, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    _write_dei_filing(tmp_path, write_sec_filing)
+
+    offline = run_sec_filings_silver(tmp_path)
+
+    assert offline.xbrl_facts is not None
+    assert offline.xbrl_facts.status == "rejected"
+    assert (offline.xbrl_facts.instances_failed, offline.xbrl_facts.facts_inserted) == (
+        1,
+        0,
+    )
+    assert _facts_snapshots(tmp_path) == (None, None)
+    output = capsys.readouterr().out
+    assert "xbrl_taxonomy_cache_miss" in output
+    assert DEI_SCHEMA_URL in output
+    assert not any((tmp_path / "_cache" / "arelle").rglob("*.xsd"))
+
+    _warm_dei_cache(tmp_path)
+    warm = run_sec_filings_silver(tmp_path)
+
+    assert warm.completed
+    assert warm.xbrl_facts is not None
+    assert (warm.xbrl_facts.instances_inserted, warm.xbrl_facts.facts_inserted) == (
+        4,
+        FACT_ROWS + 1,
+    )
+
+
+def test_concepts_only_commit_is_recovered_without_new_concepts(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+
+    def fail_facts(table: Table, rows, arrow_schema) -> None:
+        if arrow_schema is XBRL_FACTS_ARROW_SCHEMA:
+            raise OSError("disk full")
+        append_rows(table, rows, arrow_schema)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(xbrl_facts_stage, "append_rows", fail_facts)
+        with pytest.raises(OSError, match="disk full"):
+            run_sec_filings_silver(tmp_path)
+    concepts_snapshot, facts_snapshot = _facts_snapshots(tmp_path)
+    assert concepts_snapshot is not None and facts_snapshot is None
+
+    resumed = run_sec_filings_silver(tmp_path)
+
+    summary = resumed.xbrl_facts
+    assert resumed.completed
+    assert summary is not None
+    assert (summary.instances_recovered, summary.instances_inserted) == (3, 0)
+    assert (summary.concepts_inserted, summary.concepts_skipped) == (0, 13)
+    assert summary.facts_inserted == FACT_ROWS
+    assert _snapshot(tmp_path, CONCEPTS) == concepts_snapshot
+    assert len(_rows(tmp_path, CONCEPTS)) == 13
+
+    # A later filing of the same extension taxonomy is new, not recovered.
+    _write_new_year_filing(tmp_path, write_sec_filing)
+    later = run_sec_filings_silver(tmp_path).xbrl_facts
+
+    assert later is not None
+    assert (later.instances_inserted, later.instances_recovered) == (1, 0)
+
+
+def _change_stored_concept(data_dir: Path, local_name: str) -> None:
+    """Store another, self-consistent definition under the concept's ID."""
+
+    with open_silver_catalog(data_dir) as catalog:
+        table = catalog.load_table(CONCEPTS)
+        concept_id = concept_id_for(EX, local_name)
+        row = next(
+            r
+            for r in table.scan().to_arrow().to_pylist()
+            if r["concept_id"] == concept_id
+        )
+        table.delete(EqualTo("concept_id", concept_id))
+        changed = {**row, "balance": "debit"}
+        definition = ConceptDefinition(
+            **{f.name: changed[f.name] for f in fields(ConceptDefinition)}
+        )
+        changed["concept_definition_sha256"] = definition.sha256()
+        append_rows(
+            table,
+            [XbrlConceptRecord.model_validate(changed)],
+            XBRL_CONCEPTS_ARROW_SCHEMA,
+        )
+
+
+@pytest.mark.parametrize(
+    ("damage", "event"),
+    [
+        ("partial-fact-group", "xbrl_instance_facts_conflict"),
+        ("concept-definition-changed", "xbrl_instance_facts_conflict"),
+        ("source-set-changed", "xbrl_instance_facts_conflict"),
+        ("bronze-slice-changed", "xbrl_facts_instance_failed"),
+        ("xbrl-core-fact-count", "xbrl_core_semantics_incompatible"),
+    ],
+)
+def test_xbrl_facts_reject_the_batch_before_any_write(
+    tmp_path: Path,
+    write_sec_filing,
+    capsys: pytest.CaptureFixture[str],
+    damage: str,
+    event: str,
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    ten_q = _instance_id(TEN_Q_DOCUMENT)
+    if damage == "partial-fact-group":
+        _delete_rows(tmp_path, FACTS, "fact_id", f"{ten_q}:fact:00000002")
+    else:
+        # The 10-Q must be extracted again to meet the damage.
+        _delete_rows(tmp_path, FACTS, "instance_id", ten_q)
+    if damage == "concept-definition-changed":
+        _change_stored_concept(tmp_path, "Revenue")
+    elif damage == "source-set-changed":
+        _replace_instance(tmp_path, TEN_Q_DOCUMENT, source_set_sha256="0" * 64)
+    elif damage == "bronze-slice-changed":
+        submission = next(
+            tmp_path.glob("bronze/**/0000320193-25-000057/full-submission.txt")
+        )
+        text = submission.read_text()
+        submission.write_text(text.replace("Net income rose.", "Net income fell."))
+    elif damage == "xbrl-core-fact-count":
+        _replace_instance(tmp_path, TEN_Q_DOCUMENT, fact_count=3)
+    before = _facts_snapshots(tmp_path)
+    capsys.readouterr()
+
+    summary = xbrl_facts_stage.run_xbrl_facts_stage(
+        tmp_path,
+        datetime.now(UTC),
+        ProcessorSettings(
+            cache_dir=tmp_path / "_cache" / "arelle",
+            allow_network=False,
+            http_user_agent=None,
+        ),
+    )
+
+    assert summary.status == "rejected"
+    assert (summary.instances_conflicted + summary.instances_failed) == 1
+    assert (summary.concepts_inserted, summary.facts_inserted) == (0, 0)
+    assert _facts_snapshots(tmp_path) == before
+    assert event in capsys.readouterr().out
+
+
+def test_instance_without_facts_is_a_complete_empty_group(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    write_sec_filing(
+        tmp_path,
+        cik=CIK,
+        form="8-K",
+        accession="0000320193-26-000001",
+        filed="20260105",
+        primary_text=_inline_primary("ex-2024.xsd", ""),
+        xbrl_instance=False,
+    )
+
+    first = run_sec_filings_silver(tmp_path)
+
+    assert first.completed
+    assert first.xbrl_facts is not None
+    assert (
+        first.xbrl_facts.instances_skipped,
+        first.xbrl_facts.instances_inserted,
+    ) == (
+        1,
+        3,
+    )
+    instance = _instance_id(NEW_YEAR_DOCUMENT)
+    assert {
+        row["instance_id"]: row["fact_count"] for row in _rows(tmp_path, INSTANCES)
+    }[instance] == 0
+    assert instance not in {row["instance_id"] for row in _rows(tmp_path, FACTS)}

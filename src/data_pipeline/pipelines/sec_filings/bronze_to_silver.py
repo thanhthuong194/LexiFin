@@ -32,6 +32,11 @@ from src.data_pipeline.pipelines.sec_filings.xbrl_core import (
     XbrlCoreStageSummary,
     run_xbrl_core_stage,
 )
+from src.data_pipeline.pipelines.sec_filings.xbrl_facts import (
+    XbrlFactsStageSummary,
+    run_xbrl_facts_stage,
+)
+from src.data_pipeline.transforms.sec_filings.xbrl_processor import ProcessorSettings
 from src.utils.logger import get_logger
 from src.utils.timer import timed_operation
 
@@ -54,6 +59,7 @@ class SilverRunResult:
     document_tables: DocumentTablesStageSummary | None
     document_links: DocumentLinksStageSummary | None
     xbrl_core: XbrlCoreStageSummary | None
+    xbrl_facts: XbrlFactsStageSummary | None
 
     @property
     def completed(self) -> bool:
@@ -69,11 +75,18 @@ class SilverRunResult:
                 self.document_tables,
                 self.document_links,
                 self.xbrl_core,
+                self.xbrl_facts,
             )
         )
 
 
-def run_sec_filings_silver(data_dir: Path) -> SilverRunResult:
+def run_sec_filings_silver(
+    data_dir: Path,
+    *,
+    taxonomy_cache_dir: Path | None = None,
+    allow_taxonomy_network: bool = False,
+    http_user_agent: str | None = None,
+) -> SilverRunResult:
     """Build or incrementally update the SEC Silver tables from all SEC Bronze.
 
     Stages run parent first: `sec_filings.filings` from Bronze, then
@@ -82,18 +95,29 @@ def run_sec_filings_silver(data_dir: Path) -> SilverRunResult:
     `sec_filings.content_blocks` from the committed primary HTML documents,
     then `sec_filings.document_tables` and `sec_filings.document_table_cells`
     from the committed `table` blocks, then `sec_filings.document_links` from
-    every committed HTML document, and last the XBRL core tables
+    every committed HTML document, then the XBRL core tables
     (`xbrl_instances`, `xbrl_contexts`, `xbrl_units`) from the filings' Inline
-    XBRL and XML instance documents. Each stage validates its whole batch
+    XBRL and XML instance documents, and last `xbrl_concepts` and `xbrl_facts`
+    from those instances. The XBRL processor resolves taxonomies from
+    `taxonomy_cache_dir` (default `<data_dir>/_cache/arelle`) and downloads
+    missing ones, identifying itself with `http_user_agent`, only when
+    `allow_taxonomy_network` is set. Each stage validates its whole batch
     before its appends, so a rejected stage writes nothing, later stages do
     not run, and a rerun completes whatever is missing. Unexpected errors are
     logged and re-raised.
     """
 
     data_dir = data_dir.expanduser().resolve()
+    taxonomy = ProcessorSettings(
+        cache_dir=(taxonomy_cache_dir or data_dir / "_cache" / "arelle")
+        .expanduser()
+        .resolve(),
+        allow_network=allow_taxonomy_network,
+        http_user_agent=http_user_agent,
+    )
     processed_at = datetime.now(UTC)
     documents = filing_entities = narrative = document_tables = None
-    document_links = xbrl_core = None
+    document_links = xbrl_core = xbrl_facts = None
     logger.info("sec_silver_started", data_dir=str(data_dir))
     try:
         with timed_operation("pipeline.total"):
@@ -110,6 +134,8 @@ def run_sec_filings_silver(data_dir: Path) -> SilverRunResult:
                 document_links = run_document_links_stage(data_dir, processed_at)
             if document_links is not None and document_links.status == "completed":
                 xbrl_core = run_xbrl_core_stage(data_dir, processed_at)
+            if xbrl_core is not None and xbrl_core.status == "completed":
+                xbrl_facts = run_xbrl_facts_stage(data_dir, processed_at, taxonomy)
     except Exception as error:
         logger.error(
             "sec_silver_failed",
@@ -126,6 +152,7 @@ def run_sec_filings_silver(data_dir: Path) -> SilverRunResult:
         document_tables=document_tables,
         document_links=document_links,
         xbrl_core=xbrl_core,
+        xbrl_facts=xbrl_facts,
     )
     statuses = {
         "filings_status": filings.status,
@@ -141,6 +168,7 @@ def run_sec_filings_silver(data_dir: Path) -> SilverRunResult:
             None if document_links is None else document_links.status
         ),
         "xbrl_core_status": None if xbrl_core is None else xbrl_core.status,
+        "xbrl_facts_status": None if xbrl_facts is None else xbrl_facts.status,
     }
     if result.completed:
         logger.info("sec_silver_completed", **statuses)

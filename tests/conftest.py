@@ -60,9 +60,49 @@ _XBRL_NAMESPACES = (
     'xmlns:xlink="http://www.w3.org/1999/xlink" '
     'xmlns:xbrldi="http://xbrl.org/2006/xbrldi" '
     'xmlns:iso4217="http://www.xbrl.org/2003/iso4217" '
-    'xmlns:dei="http://xbrl.sec.gov/dei/2024" xmlns:ex="http://example.com/2024"'
+    'xmlns:ex="http://example.com/2024"'
 )
 _SCHEMA_REF = '<link:schemaRef xlink:type="simple" xlink:href="ex-2024.xsd"/>'
+# (name, type, period type, substitution group, other attributes) of the
+# extension concepts: items used by facts, abstract members, and an explicit
+# and a typed dimension whose domain is the non-item element ex:Region.
+_CONCEPTS = (
+    ("AmendmentFlag", "xbrli:booleanItemType", "duration", "xbrli:item", ""),
+    ("DocumentType", "xbrli:stringItemType", "duration", "xbrli:item", ""),
+    ("Product", "xbrli:stringItemType", "duration", "xbrli:item", ""),
+    ("Revenue", "xbrli:monetaryItemType", "duration", "xbrli:item",
+     'xbrli:balance="credit"'),
+    ("EarningsPerShare", "xbrli:decimalItemType", "duration", "xbrli:item", ""),
+    ("SharesOutstanding", "xbrli:sharesItemType", "instant", "xbrli:item", ""),
+    ("Cash", "xbrli:monetaryItemType", "instant", "xbrli:item",
+     'xbrli:balance="debit"'),
+    ("ProductAxis", "xbrli:stringItemType", "duration", "xbrldt:dimensionItem",
+     'abstract="true"'),
+    ("WidgetsMember", "xbrli:stringItemType", "duration", "xbrli:item",
+     'abstract="true"'),
+    ("RegionAxis", "xbrli:stringItemType", "duration", "xbrldt:dimensionItem",
+     'abstract="true" xbrldt:typedDomainRef="#ex_Region"'),
+)  # fmt: skip
+# The filing's extension schema. It imports only the XBRL 2.1 and dimension
+# schemas, which the XBRL processor ships with, so facts load offline.
+EXTENSION_SCHEMA = (
+    '<?xml version="1.0" encoding="utf-8"?>\n'
+    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+    'xmlns:xbrli="http://www.xbrl.org/2003/instance" '
+    'xmlns:xbrldt="http://xbrl.org/2005/xbrldt" '
+    'targetNamespace="http://example.com/2024" elementFormDefault="qualified">'
+    '<xs:import namespace="http://www.xbrl.org/2003/instance" '
+    'schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>'
+    '<xs:import namespace="http://xbrl.org/2005/xbrldt" '
+    'schemaLocation="http://www.xbrl.org/2005/xbrldt-2005.xsd"/>'
+    + "".join(
+        f'<xs:element id="ex_{name}" name="{name}" type="{item_type}" '
+        f'substitutionGroup="{group}" xbrli:periodType="{period}" nillable="true" '
+        f"{attributes}/>"
+        for name, item_type, period, group, attributes in _CONCEPTS
+    )
+    + '<xs:element id="ex_Region" name="Region" type="xs:string"/></xs:schema>\n'
+)
 # Contexts and units by ID, written with an `xbrli` prefix as in Inline XBRL;
 # GENERATED_XML rewrites them the way EDGAR does (default namespace, other
 # whitespace and member order), so both representations must still match.
@@ -89,25 +129,30 @@ _UNITS = {
     "eur": "<xbrli:measure>iso4217:EUR</xbrli:measure>",
 }
 # Hidden facts as (element, concept, context, unit, value) per form: the 10-K
-# also has a visible fact in its body and an unused EUR unit; the 8-K has only
+# also has visible facts in its body and an unused EUR unit; the 8-K has only
 # nonnumeric facts, so no unit.
 _FACTS = {
     "10-K": [
-        ("nonNumeric", "dei:AmendmentFlag", "FY", None, "false"),
+        ("nonNumeric", "ex:AmendmentFlag", "FY", None, "false"),
         ("nonFraction", "ex:Revenue", "FY", "usd", "1000"),
         ("nonFraction", "ex:EarningsPerShare", "FY_Widgets", "usdPerShare", "2.5"),
         ("nonFraction", "ex:SharesOutstanding", "AsOf", "shares", "400"),
     ],
     "10-Q": [
-        ("nonNumeric", "dei:AmendmentFlag", "FY", None, "false"),
+        ("nonNumeric", "ex:AmendmentFlag", "FY", None, "false"),
         ("nonFraction", "ex:Cash", "AsOf", "usd", "70"),
     ],
     "8-K": [
-        ("nonNumeric", "dei:AmendmentFlag", "FY", None, "false"),
-        ("nonNumeric", "dei:DocumentType", "FY", None, "8-K"),
+        ("nonNumeric", "ex:AmendmentFlag", "FY", None, "false"),
+        ("nonNumeric", "ex:DocumentType", "FY", None, "8-K"),
     ],
 }
-_VISIBLE_FACTS = {"10-K": [("ex:Product", "FY")]}
+# Visible facts of the primary documents as (concept, context, unit, value in
+# the XML rendering): the 10-K names its product in a paragraph and repeats
+# the hidden revenue fact, formatted, in a table cell.
+_VISIBLE_FACTS = {
+    "10-K": [("ex:Product", "FY", None, "widgets"), ("ex:Revenue", "FY", "usd", "1000")]
+}
 _RESOURCES = {
     "10-K": (["FY", "AsOf", "FY_Widgets"], ["usd", "shares", "usdPerShare", "eur"]),
     "10-Q": (["FY", "AsOf"], ["usd"]),
@@ -146,7 +191,8 @@ def _generated_xml(form: str) -> str:
     """EDGAR's XML rendering of the form's Inline XBRL, unused units left out."""
 
     contexts, _ = _RESOURCES[form]
-    used = [unit for _, _, _, unit, _ in _FACTS[form] if unit]
+    facts = [fact[1:] for fact in _FACTS[form]] + _VISIBLE_FACTS.get(form, [])
+    used = [unit for _, _, unit, _ in facts if unit]
     body = (
         "".join(_context(c) for c in contexts)
         .replace("xbrli:", "")
@@ -173,11 +219,7 @@ def _generated_xml(form: str) -> str:
         f'<{concept} contextRef="{context}"'
         + (f' unitRef="{unit}" decimals="0"' if unit else "")
         + f">{value}</{concept}>"
-        for _, concept, context, unit, value in _FACTS[form]
-    )
-    body += "".join(
-        f'<{concept} contextRef="{context}">widgets</{concept}>'
-        for concept, context in _VISIBLE_FACTS.get(form, [])
+        for concept, context, unit, value in facts
     )
     return (
         '\n<XML>\n<?xml version="1.0" encoding="utf-8"?>\n'
@@ -189,8 +231,8 @@ def _generated_xml(form: str) -> str:
 
 # Inline XBRL primary documents as EDGAR stores them: wrapped in <XBRL> with an
 # XML prolog, an ix:header (hidden facts, schema reference, contexts, units), a
-# linked table of contents, headings in divs or table cells, visible ix facts,
-# a narrative ITEM mention and a table. Links wrap existing text, so they leave
+# linked table of contents, headings in divs or table cells, visible ix facts
+# in a paragraph and a table cell, a narrative ITEM mention and a table. Links wrap existing text, so they leave
 # blocks and cells unchanged: the 10-K links its own exhibit by SEC URL and an
 # external site, the 8-K its exhibit, a missing file and another filing's
 # exhibit of the same name.
@@ -199,6 +241,7 @@ _INLINE_XBRL = (
     '<html xmlns="http://www.w3.org/1999/xhtml" '
     'xmlns:ix="http://www.xbrl.org/2013/inlineXBRL" '
     'xmlns:xbrli="http://www.xbrl.org/2003/instance" '
+    'xmlns:ixt="http://www.xbrl.org/inlineXBRL/transformation/2020-02-12" '
     f"{_XBRL_NAMESPACES}><head><title>example</title></head><body>"
     "{header}{body}</body></html>\n</XBRL>\n"
 )
@@ -221,7 +264,9 @@ PRIMARY_HTML = {
         '<div>As discussed in <a href="#i7">Item 7</a>, demand may fall.</div>'
         '<div id="p2">PART II</div>'
         '<div id="i7">Item 7. Management&#8217;s Discussion and Analysis</div>'
-        "<table><tr><td>Revenue</td><td>$1,000</td></tr></table>"
+        '<table><tr><td>Revenue</td><td>$<ix:nonFraction name="ex:Revenue" '
+        'contextRef="FY" unitRef="usd" decimals="0" format="ixt:num-dot-decimal">'
+        "1,000</ix:nonFraction></td></tr></table>"
         '<div><a name="signatures"></a>SIGNATURES</div><div>/s/ Jane Doe</div>',
     ),
     "10-Q": _INLINE_XBRL.format(
@@ -260,9 +305,9 @@ SEC_DOCUMENTS = (
     (
         "EX-101.SCH",
         "3",
-        "report.xsd",
+        "ex-2024.xsd",
         "XBRL TAXONOMY EXTENSION SCHEMA",
-        '\n<XBRL>\n<?xml version="1.0"?>\n<xs:schema/>\n</XBRL>\n',
+        f"\n<XBRL>\n{EXTENSION_SCHEMA}</XBRL>\n",
     ),
     (
         "XML",

@@ -62,17 +62,20 @@ XBRL_UNITS_ARROW_SCHEMA = pa.schema(
         pa.field("processed_at", pa.timestamp("us", tz="UTC"), nullable=False),
     ]
 )
-# A measure in Clark notation: {namespace-uri}local-name.
-_CLARK = re.compile(r"\{[^{}\s]+\}[^{}\s:]+")
+# An expanded QName (a measure, type or format) in Clark notation:
+# {namespace-uri}local-name.
+CLARK_QNAME = re.compile(r"\{[^{}\s]+\}[^{}\s:]+")
 
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _canonical_json(payload: object) -> str:
-    return json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+def canonical_sha256(payload: object) -> str:
+    """SHA-256 of a JSON payload serialized canonically (sorted keys, no spaces)."""
+
+    return _sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
 
 
@@ -104,10 +107,8 @@ def unit_key_for(instance_id: str, unit_ref: str) -> str:
 def source_set_sha256(sources: Sequence[tuple[str, str]]) -> str:
     """Hash an instance's (document_id, content_sha256) pairs, in source order."""
 
-    return _sha256(
-        _canonical_json(
-            [{"document_id": doc, "content_sha256": digest} for doc, digest in sources]
-        )
+    return canonical_sha256(
+        [{"document_id": doc, "content_sha256": digest} for doc, digest in sources]
     )
 
 
@@ -134,7 +135,7 @@ class ContextDefinition:
             name: value.isoformat() if isinstance(value, date) else value
             for name, value in asdict(self).items()
         }
-        return _sha256(_canonical_json(payload))
+        return canonical_sha256(payload)
 
 
 def unit_expression(numerators: Sequence[str], denominators: Sequence[str]) -> str:
@@ -269,7 +270,7 @@ class XbrlUnitRecord(ContractModel):
         if (self.unit_kind == "divide") != bool(self.denominator_measures):
             raise ValueError("exactly divide units have denominator measures")
         measures = (self.numerator_measures, self.denominator_measures)
-        if not all(_CLARK.fullmatch(m) for group in measures for m in group):
+        if not all(CLARK_QNAME.fullmatch(m) for group in measures for m in group):
             raise ValueError("measures must be {namespace}local QNames")
         if any(group != sorted(group) for group in measures):
             raise ValueError("measures must be sorted")
