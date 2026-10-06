@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -64,11 +65,38 @@ def silver_table_location(data_dir: Path, identifier: str) -> Path:
 
 
 def _iceberg_schema(arrow_schema: pa.Schema) -> Schema:
-    """Convert a flat Arrow schema to Iceberg, numbering fields in column order."""
+    """Convert an Arrow schema to Iceberg, numbering fields in column order.
+
+    Top-level fields get IDs 1..N, so flat tables keep the IDs they were
+    created with; list elements and map keys and values follow from N + 1,
+    also in column order.
+    """
+
+    nested_ids = count(len(arrow_schema) + 1)
+
+    def nested(arrow_type: pa.DataType) -> list[MappedField]:
+        if pa.types.is_map(arrow_type):
+            parts = [("key", arrow_type.key_type), ("value", arrow_type.item_type)]
+        elif pa.types.is_list(arrow_type):
+            parts = [("element", arrow_type.value_type)]
+        else:
+            return []
+        return [
+            MappedField.model_validate(
+                {"field-id": next(nested_ids), "names": [name], "fields": nested(type_)}
+            )
+            for name, type_ in parts
+        ]
 
     name_mapping = NameMapping(
         [
-            MappedField.model_validate({"field-id": field_id, "names": [field.name]})
+            MappedField.model_validate(
+                {
+                    "field-id": field_id,
+                    "names": [field.name],
+                    "fields": nested(field.type),
+                }
+            )
             for field_id, field in enumerate(arrow_schema, start=1)
         ]
     )

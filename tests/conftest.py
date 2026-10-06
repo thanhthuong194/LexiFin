@@ -55,21 +55,156 @@ SEC_FILER_TEMPLATE = """FILER:
 
 """
 
+_XBRL_NAMESPACES = (
+    'xmlns:link="http://www.xbrl.org/2003/linkbase" '
+    'xmlns:xlink="http://www.w3.org/1999/xlink" '
+    'xmlns:xbrldi="http://xbrl.org/2006/xbrldi" '
+    'xmlns:iso4217="http://www.xbrl.org/2003/iso4217" '
+    'xmlns:dei="http://xbrl.sec.gov/dei/2024" xmlns:ex="http://example.com/2024"'
+)
+_SCHEMA_REF = '<link:schemaRef xlink:type="simple" xlink:href="ex-2024.xsd"/>'
+# Contexts and units by ID, written with an `xbrli` prefix as in Inline XBRL;
+# GENERATED_XML rewrites them the way EDGAR does (default namespace, other
+# whitespace and member order), so both representations must still match.
+_CONTEXTS = {
+    "FY": "<xbrli:period><xbrli:startDate>2024-01-01</xbrli:startDate>"
+    "<xbrli:endDate>2024-12-31</xbrli:endDate></xbrli:period>",
+    "AsOf": "<xbrli:period><xbrli:instant>2024-12-31</xbrli:instant></xbrli:period>",
+    "FY_Widgets": "<xbrli:period><xbrli:startDate>2024-01-01</xbrli:startDate>"
+    "<xbrli:endDate>2024-12-31</xbrli:endDate></xbrli:period>",
+}
+_SEGMENT = (
+    "<xbrli:segment>\n  "
+    '<xbrldi:explicitMember dimension="ex:ProductAxis">ex:WidgetsMember'
+    "</xbrldi:explicitMember>\n  "
+    '<xbrldi:typedMember dimension="ex:RegionAxis"><ex:Region>North</ex:Region>'
+    "</xbrldi:typedMember>\n</xbrli:segment>"
+)
+_UNITS = {
+    "usd": "<xbrli:measure>iso4217:USD</xbrli:measure>",
+    "shares": "<xbrli:measure>xbrli:shares</xbrli:measure>",
+    "usdPerShare": "<xbrli:divide><xbrli:unitNumerator><xbrli:measure>iso4217:USD"
+    "</xbrli:measure></xbrli:unitNumerator><xbrli:unitDenominator><xbrli:measure>"
+    "xbrli:shares</xbrli:measure></xbrli:unitDenominator></xbrli:divide>",
+    "eur": "<xbrli:measure>iso4217:EUR</xbrli:measure>",
+}
+# Hidden facts as (element, concept, context, unit, value) per form: the 10-K
+# also has a visible fact in its body and an unused EUR unit; the 8-K has only
+# nonnumeric facts, so no unit.
+_FACTS = {
+    "10-K": [
+        ("nonNumeric", "dei:AmendmentFlag", "FY", None, "false"),
+        ("nonFraction", "ex:Revenue", "FY", "usd", "1000"),
+        ("nonFraction", "ex:EarningsPerShare", "FY_Widgets", "usdPerShare", "2.5"),
+        ("nonFraction", "ex:SharesOutstanding", "AsOf", "shares", "400"),
+    ],
+    "10-Q": [
+        ("nonNumeric", "dei:AmendmentFlag", "FY", None, "false"),
+        ("nonFraction", "ex:Cash", "AsOf", "usd", "70"),
+    ],
+    "8-K": [
+        ("nonNumeric", "dei:AmendmentFlag", "FY", None, "false"),
+        ("nonNumeric", "dei:DocumentType", "FY", None, "8-K"),
+    ],
+}
+_VISIBLE_FACTS = {"10-K": [("ex:Product", "FY")]}
+_RESOURCES = {
+    "10-K": (["FY", "AsOf", "FY_Widgets"], ["usd", "shares", "usdPerShare", "eur"]),
+    "10-Q": (["FY", "AsOf"], ["usd"]),
+    "8-K": (["FY"], []),
+}
+
+
+def _context(context_id: str) -> str:
+    segment = _SEGMENT if context_id == "FY_Widgets" else ""
+    return (
+        f'<xbrli:context id="{context_id}"><xbrli:entity><xbrli:identifier '
+        f'scheme="http://www.sec.gov/CIK">0000320193</xbrli:identifier>{segment}'
+        f"</xbrli:entity>{_CONTEXTS[context_id]}</xbrli:context>"
+    )
+
+
+def _inline_header(form: str) -> str:
+    contexts, units = _RESOURCES[form]
+    facts = "".join(
+        f'<ix:{kind} name="{concept}" contextRef="{context}"'
+        + (f' unitRef="{unit}" decimals="0"' if unit else "")
+        + f">{value}</ix:{kind}>"
+        for kind, concept, context, unit, value in _FACTS[form]
+    )
+    resources = "".join(_context(c) for c in contexts) + "".join(
+        f'<xbrli:unit id="{u}">{_UNITS[u]}</xbrli:unit>' for u in units
+    )
+    return (
+        f'<div style="display: none"><ix:header><ix:hidden>{facts}</ix:hidden>'
+        f"<ix:references>{_SCHEMA_REF}</ix:references>"
+        f"<ix:resources>{resources}</ix:resources></ix:header></div>"
+    )
+
+
+def _generated_xml(form: str) -> str:
+    """EDGAR's XML rendering of the form's Inline XBRL, unused units left out."""
+
+    contexts, _ = _RESOURCES[form]
+    used = [unit for _, _, _, unit, _ in _FACTS[form] if unit]
+    body = (
+        "".join(_context(c) for c in contexts)
+        .replace("xbrli:", "")
+        .replace(
+            "<segment>\n  "
+            '<xbrldi:explicitMember dimension="ex:ProductAxis">ex:WidgetsMember'
+            "</xbrldi:explicitMember>\n  ",
+            "<segment>\n        ",
+        )
+        .replace(
+            "</xbrldi:typedMember>\n</segment>",
+            "</xbrldi:typedMember>\n        "
+            '<xbrldi:explicitMember dimension="ex:ProductAxis"> ex:WidgetsMember '
+            "</xbrldi:explicitMember>\n      </segment>",
+        )
+    )
+    body += "".join(
+        f'<unit id="{u}">{_UNITS[u]}</unit>'.replace("xbrli:measure", "measure")
+        .replace("xbrli:divide", "divide")
+        .replace("xbrli:unit", "unit")
+        for u in dict.fromkeys(used)
+    )
+    body += "".join(
+        f'<{concept} contextRef="{context}"'
+        + (f' unitRef="{unit}" decimals="0"' if unit else "")
+        + f">{value}</{concept}>"
+        for _, concept, context, unit, value in _FACTS[form]
+    )
+    body += "".join(
+        f'<{concept} contextRef="{context}">widgets</{concept}>'
+        for concept, context in _VISIBLE_FACTS.get(form, [])
+    )
+    return (
+        '\n<XML>\n<?xml version="1.0" encoding="utf-8"?>\n'
+        '<xbrl xmlns="http://www.xbrl.org/2003/instance" '
+        f'xmlns:xbrli="http://www.xbrl.org/2003/instance" {_XBRL_NAMESPACES}>'
+        f"{_SCHEMA_REF}{body}</xbrl>\n</XML>\n"
+    )
+
+
 # Inline XBRL primary documents as EDGAR stores them: wrapped in <XBRL> with an
-# XML prolog, hidden ix:header facts, a linked table of contents, headings in
-# divs or table cells, visible ix facts, a narrative ITEM mention and a table.
-# Links wrap existing text, so they leave blocks and cells unchanged: the 10-K
-# links its own exhibit by SEC URL and an external site, the 8-K its exhibit,
-# a missing file and another filing's exhibit of the same name.
+# XML prolog, an ix:header (hidden facts, schema reference, contexts, units), a
+# linked table of contents, headings in divs or table cells, visible ix facts,
+# a narrative ITEM mention and a table. Links wrap existing text, so they leave
+# blocks and cells unchanged: the 10-K links its own exhibit by SEC URL and an
+# external site, the 8-K its exhibit, a missing file and another filing's
+# exhibit of the same name.
 _INLINE_XBRL = (
-    "\n<XBRL>\n<?xml version='1.0' encoding='ASCII'?>\n<html><head>"
-    "<title>example</title></head><body>"
-    '<div style="display: none"><ix:header><ix:hidden>'
-    '<ix:nonNumeric name="dei:AmendmentFlag">false</ix:nonNumeric>'
-    "</ix:hidden></ix:header></div>{body}</body></html>\n</XBRL>\n"
+    "\n<XBRL>\n<?xml version='1.0' encoding='ASCII'?>\n"
+    '<html xmlns="http://www.w3.org/1999/xhtml" '
+    'xmlns:ix="http://www.xbrl.org/2013/inlineXBRL" '
+    'xmlns:xbrli="http://www.xbrl.org/2003/instance" '
+    f"{_XBRL_NAMESPACES}><head><title>example</title></head><body>"
+    "{header}{body}</body></html>\n</XBRL>\n"
 )
 PRIMARY_HTML = {
     "10-K": _INLINE_XBRL.format(
+        header=_inline_header("10-K"),
         body='<div><a href="https://www.sec.gov/Archives/edgar/data/320193/'
         '000032019324000123/ex31.htm">Example Corp</a> Annual Report</div>'
         "<div>TABLE OF CONTENTS</div>"
@@ -81,15 +216,16 @@ PRIMARY_HTML = {
         '<div id="p1">PART I</div>'
         '<div id="i1"><span style="font-weight:700">Item 1. Business</span></div>'
         '<div>We make <a href="https://www.example.com/products">'
-        '<ix:nonNumeric name="ex:Product">widgets</ix:nonNumeric></a>.</div>'
+        '<ix:nonNumeric name="ex:Product" contextRef="FY">widgets</ix:nonNumeric></a>.</div>'
         '<div id="i1a">Item 1A. Risk Factors</div>'
         '<div>As discussed in <a href="#i7">Item 7</a>, demand may fall.</div>'
         '<div id="p2">PART II</div>'
         '<div id="i7">Item 7. Management&#8217;s Discussion and Analysis</div>'
         "<table><tr><td>Revenue</td><td>$1,000</td></tr></table>"
-        '<div><a name="signatures"></a>SIGNATURES</div><div>/s/ Jane Doe</div>'
+        '<div><a name="signatures"></a>SIGNATURES</div><div>/s/ Jane Doe</div>',
     ),
     "10-Q": _INLINE_XBRL.format(
+        header=_inline_header("10-Q"),
         body="<div>PART I &#8212; FINANCIAL INFORMATION</div>"
         "<div>Item 1. Financial Statements</div><div>Net income rose.</div>"
         "<div>Item 2. Management&#8217;s Discussion and Analysis</div>"
@@ -97,9 +233,10 @@ PRIMARY_HTML = {
         "<div>PART II &#8212; OTHER INFORMATION</div>"
         "<div>Item 1. Legal Proceedings</div><div>None.</div>"
         "<div>Item 1A. Risk Factors</div><div>No material changes.</div>"
-        "<div>SIGNATURES</div><div>/s/ Jane Doe</div>"
+        "<div>SIGNATURES</div><div>/s/ Jane Doe</div>",
     ),
     "8-K": _INLINE_XBRL.format(
+        header=_inline_header("8-K"),
         body="<div>Item 2.02 Results of Operations and Financial Condition.</div>"
         '<div>Example Corp reported <a href="https://www.sec.gov/Archives/edgar/'
         'data/789019/000078901924000001/ex31.htm">results</a>.</div>'
@@ -107,7 +244,7 @@ PRIMARY_HTML = {
         "<div>EXHIBIT INDEX</div>"
         '<table><tr><td><a href="ex31.htm">99.1</a></td>'
         '<td><a href="press-release.htm">Press release</a></td></tr></table>'
-        "<div>SIGNATURE</div><div>/s/ Jane Doe</div>"
+        "<div>SIGNATURE</div><div>/s/ Jane Doe</div>",
     ),
 }
 
@@ -163,7 +300,9 @@ def write_sec_filing() -> SecFilingWriter:
     `header_*` override is given, and holds one FILER block, plus a second
     FILER block when `co_registrant_cik` is given (as in multi-registrant
     8-Ks). The submission holds SEC_DOCUMENTS with the primary document typed
-    as the header form; `primary_text` replaces its <TEXT> content. Returns
+    as the header form; `primary_text` replaces its <TEXT> content, and the
+    extracted XBRL instance is EDGAR's XML rendering of the form's Inline
+    XBRL, left out when `xbrl_instance` is false. Returns
     the accession directory.
     """
 
@@ -179,6 +318,7 @@ def write_sec_filing() -> SecFilingWriter:
         header_accession: str | None = None,
         co_registrant_cik: str | None = None,
         primary_text: str | None = None,
+        xbrl_instance: bool = True,
         primary_html: bytes | None = b"<html>primary</html>",
     ) -> Path:
         directory = (
@@ -210,6 +350,13 @@ def write_sec_filing() -> SecFilingWriter:
         primary, *others = SEC_DOCUMENTS
         default_text = PRIMARY_HTML.get(form, "\n<html><body>report</body></html>\n")
         primary = (*primary[:4], primary_text or default_text)
+        if form in _FACTS:
+            others = [
+                (*doc[:4], _generated_xml(form)) if doc[2] == "primary_htm.xml" else doc
+                for doc in others
+            ]
+        if not xbrl_instance:
+            others = [doc for doc in others if doc[2] != "primary_htm.xml"]
         documents = "".join(
             _document_block(submission_form, document)
             for document in (primary, *others)

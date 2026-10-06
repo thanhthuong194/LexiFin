@@ -36,15 +36,18 @@ from src.data_pipeline.contracts.sec_filings.filing_entities import (
 )
 from src.data_pipeline.contracts.sec_filings.filings import FILINGS_ARROW_SCHEMA
 from src.data_pipeline.contracts.sec_filings.sections import SECTIONS_ARROW_SCHEMA
+from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
 from src.data_pipeline.pipelines.sec_filings import (
     document_link_extraction,
     document_table_extraction,
+    xbrl_core_extraction,
 )
 from src.data_pipeline.pipelines.sec_filings import (
     document_tables as document_tables_stage,
 )
 from src.data_pipeline.pipelines.sec_filings import documents as documents_stage
 from src.data_pipeline.pipelines.sec_filings import narrative as narrative_stage
+from src.data_pipeline.pipelines.sec_filings import xbrl_core as xbrl_core_stage
 from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
     run_sec_filings_silver,
 )
@@ -53,6 +56,7 @@ from src.data_pipeline.storage.iceberg import append_rows, open_silver_catalog
 from src.data_pipeline.storage.sec_filings.filing_entities import (
     read_filing_entity_groups,
 )
+from src.data_pipeline.storage.sec_filings.xbrl_core import XBRL_CORE_SCHEMAS
 
 pytestmark = pytest.mark.integration
 
@@ -89,6 +93,17 @@ LINKS = "sec_filings.document_links"
 # exhibit, a missing file and another filing's ex31.htm by SEC URL.
 HTML_DOCUMENTS, LINK_ROWS = 9, 11
 TEN_K_EXHIBIT = "sec:0000320193-24-000123:document:0002"
+INSTANCES = "sec_filings.xbrl_instances"
+CONTEXTS = "sec_filings.xbrl_contexts"
+UNITS = "sec_filings.xbrl_units"
+# (facts, contexts, units) of each primary document's one default Inline
+# target, merged with EDGAR's XML rendering (document 4): the 10-K keeps an
+# unused EUR unit that the rendering leaves out; the 8-K has no unit.
+XBRL_COUNTS = {
+    TEN_K_DOCUMENT: (5, 3, 4),
+    TEN_Q_DOCUMENT: (2, 2, 1),
+    EIGHT_K_DOCUMENT: (2, 1, 0),
+}
 EIGHT_K_EXHIBIT = "sec:0000789019-25-000010:document:0002"
 # Every fake submission from the write_sec_filing fixture holds six documents.
 DOCUMENTS_PER_FILING = 6
@@ -477,6 +492,12 @@ def test_new_year_and_backfill_append_into_their_year_partitions(
         new_year.document_links.links_inserted,
     ) == (1, 2, 7 + 2, 3)
     assert _rows_per_year(_table(tmp_path, LINKS)) == {2024: 8, 2025: 3, 2026: 3}
+    assert new_year.xbrl_core is not None
+    assert (
+        new_year.xbrl_core.filings_inserted,
+        new_year.xbrl_core.filings_skipped,
+        new_year.xbrl_core.instances_inserted,
+    ) == (1, 3, 1)
     sections = _rows_by_document(tmp_path, SECTIONS)
     assert len(sections) == 4
     assert len(sections[NEW_YEAR_DOCUMENT]) == 5
@@ -1242,3 +1263,213 @@ def test_incomplete_or_changed_link_groups_are_conflicts_before_any_write(
         for row in _table(tmp_path, LINKS).scan().to_arrow().to_pylist()
     }
     assert NEW_YEAR_DOCUMENT not in sources
+
+
+def _instance_id(document_id: str) -> str:
+    return f"{document_id.rsplit(':document:', 1)[0]}:xbrl:inline:default"
+
+
+def _xbrl_snapshots(data_dir: Path) -> tuple[int | None, ...]:
+    return tuple(_snapshot(data_dir, table) for table in (INSTANCES, CONTEXTS, UNITS))
+
+
+def test_xbrl_core_builds_instances_contexts_and_units_and_reruns_skip(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+
+    first = run_sec_filings_silver(tmp_path)
+
+    summary = first.xbrl_core
+    assert first.completed
+    assert summary is not None
+    assert (summary.filings_considered, summary.filings_inserted) == (3, 3)
+    assert (summary.instances_inserted, summary.contexts_inserted) == (3, 6)
+    assert (summary.units_inserted, summary.inline_instances) == (5, 3)
+    assert (summary.default_targets, summary.xml_only_instances) == (3, 0)
+    assert (summary.instant_contexts, summary.duration_contexts) == (2, 4)
+    assert (summary.simple_units, summary.divide_units) == (4, 1)
+    for identifier, schema in XBRL_CORE_SCHEMAS.items():
+        table = _table(tmp_path, identifier)
+        assert table.location() == str(
+            tmp_path / "silver" / "sec_filings" / identifier.split(".")[1]
+        )
+        assert _partition_columns(table) == []
+        assert table.scan().to_arrow().schema.equals(schema)
+
+    instances = {
+        row["instance_id"]: row
+        for row in _table(tmp_path, INSTANCES).scan().to_arrow().to_pylist()
+    }
+    contexts = Counter(
+        _table(tmp_path, CONTEXTS).scan().to_arrow()["instance_id"].to_pylist()
+    )
+    units = Counter(
+        _table(tmp_path, UNITS).scan().to_arrow()["instance_id"].to_pylist()
+    )
+    assert set(instances) == {_instance_id(document) for document in XBRL_COUNTS}
+    assert set(contexts) | set(units) <= set(instances)
+    for document, (facts, context_count, unit_count) in XBRL_COUNTS.items():
+        instance = instances[_instance_id(document)]
+        generated_xml = f"{document[:-4]}0004"
+        assert instance["source_document_ids"] == [document, generated_xml]
+        assert instance["schema_refs"] == ["ex-2024.xsd"]
+        assert (instance["fact_count"], instance["context_count"]) == (
+            facts,
+            context_count,
+        )
+        assert instance["unit_count"] == unit_count
+        assert (contexts[instance["instance_id"]], units[instance["instance_id"]]) == (
+            context_count,
+            unit_count,
+        )
+
+    def bronze_read(*_: object) -> bytes:
+        raise AssertionError("complete XBRL groups must not re-read Bronze")
+
+    monkeypatch.setattr(xbrl_core_extraction, "read_document_content", bronze_read)
+    rerun = run_sec_filings_silver(tmp_path)
+
+    assert rerun.xbrl_core is not None
+    assert (rerun.xbrl_core.filings_skipped, rerun.xbrl_core.instances_inserted) == (
+        3,
+        0,
+    )
+    assert _xbrl_snapshots(tmp_path) == (
+        summary.instances_snapshot_after,
+        summary.contexts_snapshot_after,
+        summary.units_snapshot_after,
+    )
+
+
+@pytest.mark.parametrize("failing", [CONTEXTS, UNITS])
+def test_xbrl_core_recovers_child_groups_after_a_failed_commit(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+
+    def fail_on(table: Table, rows, arrow_schema) -> None:
+        if arrow_schema is XBRL_CORE_SCHEMAS[failing]:
+            raise OSError("disk full")
+        append_rows(table, rows, arrow_schema)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(xbrl_core_stage, "append_rows", fail_on)
+        with pytest.raises(OSError, match="disk full"):
+            run_sec_filings_silver(tmp_path)
+    committed = _xbrl_snapshots(tmp_path)
+
+    resumed = run_sec_filings_silver(tmp_path)
+
+    summary = resumed.xbrl_core
+    assert resumed.completed
+    assert summary is not None
+    assert (summary.instances_inserted, summary.units_inserted) == (0, 5)
+    if failing == CONTEXTS:
+        # Every instance has contexts; the 8-K has no unit, so nothing to recover.
+        assert (summary.filings_recovered, summary.contexts_inserted) == (3, 6)
+        assert _xbrl_snapshots(tmp_path)[0] == committed[0]
+    else:
+        assert (summary.filings_recovered, summary.filings_skipped) == (2, 1)
+        assert summary.contexts_inserted == 0
+        assert _xbrl_snapshots(tmp_path)[:2] == committed[:2]
+    assert _table(tmp_path, CONTEXTS).scan().to_arrow().num_rows == 6
+    assert _table(tmp_path, UNITS).scan().to_arrow().num_rows == 5
+
+
+def _replace_instance(data_dir: Path, document: str, **changes: str) -> None:
+    with open_silver_catalog(data_dir) as catalog:
+        table = catalog.load_table(INSTANCES)
+        instance_id = _instance_id(document)
+        row = next(
+            row
+            for row in table.scan().to_arrow().to_pylist()
+            if row["instance_id"] == instance_id
+        )
+        table.delete(EqualTo("instance_id", instance_id))
+        if changes:
+            changed = XbrlInstanceRecord.model_validate(
+                {**row, "namespace_map": dict(row["namespace_map"]), **changes}
+            )
+            append_rows(table, [changed], XBRL_CORE_SCHEMAS[INSTANCES])
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "partial-contexts",
+        "children-without-instance",
+        "source-set-changed",
+        "bad-new-filing",
+    ],
+)
+def test_xbrl_core_rejects_the_batch_before_any_write(
+    tmp_path: Path, write_sec_filing, damage: str
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    if damage == "partial-contexts":
+        context = next(iter(_table(tmp_path, CONTEXTS).scan().to_arrow().to_pylist()))
+        _delete_rows(tmp_path, CONTEXTS, "context_key", context["context_key"])
+    elif damage == "children-without-instance":
+        _replace_instance(tmp_path, EIGHT_K_DOCUMENT)
+    elif damage == "source-set-changed":
+        _replace_instance(tmp_path, TEN_Q_DOCUMENT, source_set_sha256="0" * 64)
+    before = _xbrl_snapshots(tmp_path)
+    write_sec_filing(
+        tmp_path,
+        cik=CIK,
+        form="8-K",
+        accession="0000320193-26-000001",
+        filed="20260105",
+        # Names the Inline XBRL namespace but is not well-formed XML.
+        primary_text=None
+        if damage != "bad-new-filing"
+        else '\n<html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"><body>'
+        "<div>Item 2.02 Results.</div><p>open</body></html>\n",
+    )
+
+    result = run_sec_filings_silver(tmp_path)
+
+    assert result.xbrl_core is not None
+    assert result.xbrl_core.status == "rejected"
+    assert result.xbrl_core.instances_inserted == 0
+    if damage == "bad-new-filing":
+        assert result.xbrl_core.filings_failed == 1
+    else:
+        assert result.xbrl_core.filings_conflicted >= 1
+    assert _xbrl_snapshots(tmp_path) == before
+    stored = _table(tmp_path, INSTANCES).scan().to_arrow()["instance_id"].to_pylist()
+    assert _instance_id(NEW_YEAR_DOCUMENT) not in stored
+
+
+def test_filing_without_xbrl_gets_no_instance_and_reruns_quietly(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    write_sec_filing(
+        tmp_path,
+        cik=CIK,
+        form="8-K",
+        accession="0000320193-26-000001",
+        filed="20260105",
+        primary_text="\n<html><body><div>Item 2.02 Results.</div></body></html>\n",
+        xbrl_instance=False,
+    )
+
+    first = run_sec_filings_silver(tmp_path)
+    rerun = run_sec_filings_silver(tmp_path)
+
+    assert first.completed and rerun.completed
+    assert first.xbrl_core is not None and rerun.xbrl_core is not None
+    assert (first.xbrl_core.filings_without_xbrl, first.xbrl_core.filings_inserted) == (
+        1,
+        3,
+    )
+    assert (rerun.xbrl_core.filings_without_xbrl, rerun.xbrl_core.filings_skipped) == (
+        1,
+        3,
+    )
+    assert _xbrl_snapshots(tmp_path)[0] == first.xbrl_core.instances_snapshot_after
+    stored = _table(tmp_path, INSTANCES).scan().to_arrow()["filing_id"].to_pylist()
+    assert "sec:0000320193-26-000001" not in stored
