@@ -5,8 +5,6 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from time import perf_counter_ns
-from typing import TypeVar
 
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
 from src.data_pipeline.contracts.sec_filings.xbrl_concepts import (
@@ -39,6 +37,7 @@ from src.data_pipeline.transforms.sec_filings.xbrl_processor import (
     load_instance,
 )
 from src.utils.logger import get_logger, log_context
+from src.utils.timer import PhaseDurations
 
 logger = get_logger(__name__)
 
@@ -52,7 +51,6 @@ _DTS_ROLES = frozenset(
         "xbrl_presentation",
     }
 )
-Result = TypeVar("Result")
 
 
 class ConceptConflict(ValueError):
@@ -77,19 +75,22 @@ class FactsExtraction:
     recovered: set[str] = field(default_factory=set)
     unusable_values: int = 0
     locations: Counter[str] = field(default_factory=Counter)
-    elapsed_ns: Counter[str] = field(default_factory=Counter)
-
-    def timed(self, phase: str, work: Callable[[], Result]) -> Result:
-        """Run one phase of an instance and add its duration to the phase total."""
-
-        started = perf_counter_ns()
-        try:
-            return work()
-        finally:
-            self.elapsed_ns[phase] += perf_counter_ns() - started
+    durations: PhaseDurations = field(default_factory=PhaseDurations)
 
 
-def _source_files(
+def entry_documents(
+    instance: XbrlInstanceRecord, documents: Mapping[str, DocumentRecord]
+) -> list[DocumentRecord]:
+    """The instance's own documents: its Inline documents, or its XML instance."""
+
+    return [
+        documents[document_id]
+        for document_id in instance.source_document_ids
+        if (documents[document_id].content_kind == "html") == instance.is_inline
+    ]
+
+
+def source_files(
     instance: XbrlInstanceRecord,
     documents: Mapping[str, DocumentRecord],
     filing_documents: Sequence[DocumentRecord],
@@ -97,11 +98,7 @@ def _source_files(
 ) -> list[SourceFile]:
     """The instance's entry documents and its filing's taxonomy, read and verified."""
 
-    entries = [
-        documents[document_id]
-        for document_id in instance.source_document_ids
-        if (documents[document_id].content_kind == "html") == instance.is_inline
-    ]
+    entries = entry_documents(instance, documents)
     taxonomy = [
         d for d in filing_documents if d.role in _DTS_ROLES and d.content_sha256
     ]
@@ -203,14 +200,14 @@ def _extract_one(
     inputs: ExtractionInputs,
     extraction: FactsExtraction,
 ) -> list[XbrlFactRecord]:
-    files = extraction.timed(
+    files = extraction.durations.run(
         "materialize_sources",
-        lambda: _source_files(
+        lambda: source_files(
             instance, inputs.documents, filing_documents, inputs.data_dir
         ),
     )
     logger.info("xbrl_source_documents_verified", documents=len(files))
-    loaded = extraction.timed(
+    loaded = extraction.durations.run(
         "load_dts",
         lambda: load_instance(
             files,
@@ -230,7 +227,7 @@ def _extract_one(
             f"xbrl_instances {instance.fact_count}"
         )
     new_before = len(extraction.concepts)
-    recovers = extraction.timed(
+    recovers = extraction.durations.run(
         "resolve_concepts", lambda: _merge_concepts(loaded.concepts, inputs, extraction)
     )
     logger.info(
@@ -238,10 +235,10 @@ def _extract_one(
         concepts=len(loaded.concepts),
         new_concepts=len(extraction.concepts) - new_before,
     )
-    locations = extraction.timed(
+    locations = extraction.durations.run(
         "align_content", lambda: _align(loaded, files, inputs.content)
     )
-    records, unusable = extraction.timed(
+    records, unusable = extraction.durations.run(
         "extract_facts",
         lambda: fact_records(
             instance.instance_id,
@@ -315,9 +312,6 @@ def extract_instances(
         "xbrl_facts_extracted",
         instances=len(extraction.facts),
         facts=sum(map(len, extraction.facts.values())),
-        **{
-            f"{phase}_ms": ns // 1_000_000
-            for phase, ns in extraction.elapsed_ns.items()
-        },
+        **extraction.durations.milliseconds(),
     )
     return extraction

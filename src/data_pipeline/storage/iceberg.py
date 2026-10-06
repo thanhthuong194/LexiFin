@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from itertools import count
@@ -259,3 +260,26 @@ def verify_append(
     if missing:
         raise ValueError(f"Inserted rows missing after commit: {sorted(missing)[:5]}")
     return snapshot_after
+
+
+def verify_written_groups(
+    table: Table, written: Sequence[BaseModel], *, key_column: str, group_column: str
+) -> None:
+    """Check that every group (by `group_column`) written now is stored exactly.
+
+    Run after `verify_append`; rows are compared by `key_column`, with
+    `processed_at` left out. Raises ValueError on any difference.
+    """
+
+    expected: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in written:
+        values = row.model_dump(exclude={"processed_at"})
+        expected[values[group_column]][values[key_column]] = values
+    groups = group_rows_by(table, group_column) if expected else {}
+    for group, rows in expected.items():
+        found = {
+            row[key_column]: {k: v for k, v in row.items() if k != "processed_at"}
+            for row in groups.get(group, [])
+        }
+        if found != rows:
+            raise ValueError(f"{table.name()} rows of {group} differ after commit")

@@ -30,13 +30,14 @@ from src.data_pipeline.pipelines.sec_filings.xbrl_facts_state import (
     classify_instances,
     validate_built,
     verify_concepts,
-    verify_facts,
 )
 from src.data_pipeline.storage.iceberg import (
     append_rows,
     current_snapshot_id,
     group_rows_by,
     open_silver_catalog,
+    verify_append,
+    verify_written_groups,
 )
 from src.data_pipeline.storage.sec_filings.documents import (
     open_documents_table,
@@ -160,8 +161,15 @@ def _write(
         with timed_operation("xbrl_facts.write_facts", records=len(facts)):
             append_rows(facts_table, facts, XBRL_FACTS_ARROW_SCHEMA)
     with timed_operation("xbrl_facts.verify", table=XBRL_FACTS_TABLE):
-        summary.facts_snapshot_after = verify_facts(
-            facts_table, facts, stored_counts[1], summary.facts_snapshot_before
+        summary.facts_snapshot_after = verify_append(
+            facts_table,
+            key_column="fact_id",
+            expected_rows=stored_counts[1] + len(facts),
+            inserted_keys=[fact.fact_id for fact in facts],
+            snapshot_before=summary.facts_snapshot_before,
+        )
+        verify_written_groups(
+            facts_table, facts, key_column="fact_id", group_column="instance_id"
         )
     _count(extraction, facts, summary)
     logger.info(

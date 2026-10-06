@@ -10,6 +10,13 @@ from tempfile import TemporaryDirectory
 from arelle.api.Session import Session
 from arelle.RuntimeOptions import RuntimeOptions
 
+from src.data_pipeline.transforms.sec_filings.xbrl_model_enrichment import (
+    LoadedDimension,
+    LoadedFootnote,
+    read_context_hashes,
+    read_dimensions,
+    read_footnotes,
+)
 from src.data_pipeline.transforms.sec_filings.xbrl_model_reader import (
     LoadedConcept,
     LoadedFact,
@@ -63,11 +70,18 @@ class LoadedInstance:
 
     `inline_fact_totals` counts every Inline fact element of each entry
     document, whatever its target, so positions can be checked elsewhere.
+    `context_hashes` maps the refs of the contexts the processor read (an
+    Inline target holds only those its facts use) to their `context_hash`;
+    `dimensions` are those reported in these contexts, and `footnotes` the
+    fact-footnote relationships, which name facts by their position in `facts`.
     """
 
     concepts: list[LoadedConcept]
     facts: list[LoadedFact]
     inline_fact_totals: dict[str, int]
+    context_hashes: dict[str, str]
+    dimensions: list[LoadedDimension]
+    footnotes: list[LoadedFootnote]
     downloaded_uris: list[str]
 
 
@@ -121,8 +135,8 @@ def load_instance(
     Files are written to a temporary directory removed afterwards. An Inline
     instance is the document set of its entry files restricted to
     `target_name` (None is the default target); an XML instance is its one
-    entry file. Raises TaxonomyUnavailable when DTS files are missing offline
-    and XbrlProcessorError for anything else the processor cannot load.
+    entry file. Raises TaxonomyUnavailable when DTS files are unavailable and
+    XbrlProcessorError for anything else the processor cannot load or read.
     """
 
     with TemporaryDirectory(prefix="lexifin-xbrl-") as tmp:
@@ -153,11 +167,17 @@ def load_instance(
                 raise XbrlProcessorError(f"the processor loaded {len(models)} models")
             model = models[0]
             try:
-                facts, totals = read_facts(model, entries, inline=is_inline)
+                facts, totals, fact_objects = read_facts(
+                    model, entries, inline=is_inline
+                )
+                documents = {path: document_id for document_id, path in entries}
                 return LoadedInstance(
                     concepts=read_concepts(model, directory),
                     facts=facts,
                     inline_fact_totals=totals if is_inline else {},
+                    context_hashes=read_context_hashes(model),
+                    dimensions=read_dimensions(model),
+                    footnotes=read_footnotes(model, fact_objects, documents),
                     downloaded_uris=[
                         str(m.get("msg", "")).removeprefix("Downloaded ")
                         for m in messages

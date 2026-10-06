@@ -44,6 +44,12 @@ from src.data_pipeline.contracts.sec_filings.xbrl_concepts import (
     concept_id_for,
 )
 from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
+from src.data_pipeline.contracts.sec_filings.xbrl_dimensions import (
+    XBRL_DIMENSIONS_ARROW_SCHEMA,
+)
+from src.data_pipeline.contracts.sec_filings.xbrl_fact_footnotes import (
+    XBRL_FACT_FOOTNOTES_ARROW_SCHEMA,
+)
 from src.data_pipeline.contracts.sec_filings.xbrl_facts import (
     XBRL_FACTS_ARROW_SCHEMA,
     XbrlFactRecord,
@@ -52,6 +58,7 @@ from src.data_pipeline.pipelines.sec_filings import (
     document_link_extraction,
     document_table_extraction,
     xbrl_core_extraction,
+    xbrl_enrichment_extraction,
     xbrl_facts_extraction,
 )
 from src.data_pipeline.pipelines.sec_filings import (
@@ -60,6 +67,9 @@ from src.data_pipeline.pipelines.sec_filings import (
 from src.data_pipeline.pipelines.sec_filings import documents as documents_stage
 from src.data_pipeline.pipelines.sec_filings import narrative as narrative_stage
 from src.data_pipeline.pipelines.sec_filings import xbrl_core as xbrl_core_stage
+from src.data_pipeline.pipelines.sec_filings import (
+    xbrl_enrichment as xbrl_enrichment_stage,
+)
 from src.data_pipeline.pipelines.sec_filings import xbrl_facts as xbrl_facts_stage
 from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
     run_sec_filings_silver,
@@ -70,7 +80,13 @@ from src.data_pipeline.storage.sec_filings.filing_entities import (
     read_filing_entity_groups,
 )
 from src.data_pipeline.storage.sec_filings.xbrl_core import XBRL_CORE_SCHEMAS
-from src.data_pipeline.transforms.sec_filings.xbrl_processor import ProcessorSettings
+from src.data_pipeline.transforms.sec_filings.xbrl_model_reader import (
+    XbrlProcessorError,
+)
+from src.data_pipeline.transforms.sec_filings.xbrl_processor import (
+    ProcessorSettings,
+    load_instance,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -1912,3 +1928,364 @@ def test_instance_without_facts_is_a_complete_empty_group(
         row["instance_id"]: row["fact_count"] for row in _rows(tmp_path, INSTANCES)
     }[instance] == 0
     assert instance not in {row["instance_id"] for row in _rows(tmp_path, FACTS)}
+
+
+DIMENSIONS = "sec_filings.xbrl_dimensions"
+FOOTNOTES = "sec_filings.xbrl_fact_footnotes"
+TEN_K_INSTANCE = _instance_id(TEN_K_DOCUMENT)
+# The 10-K's FY_Widgets context reports an explicit ProductAxis and a typed
+# RegionAxis; its hidden revenue (fact 2) and table-cell revenue (fact 6)
+# share a footnote with markup, and fact 6 has a second, plain footnote.
+HIDDEN_REVENUE = f"{TEN_K_INSTANCE}:fact:00000002"
+CELL_REVENUE = f"{TEN_K_INSTANCE}:fact:00000006"
+FOOTNOTE_ROLE = "http://www.xbrl.org/2003/role/footnote"
+FACT_FOOTNOTE = "http://www.xbrl.org/2003/arcrole/fact-footnote"
+STANDARD_LINK = "http://www.xbrl.org/2003/role/link"
+
+
+def _enrichment_snapshots(data_dir: Path) -> tuple[int | None, int | None]:
+    return _snapshot(data_dir, DIMENSIONS), _snapshot(data_dir, FOOTNOTES)
+
+
+def _settings(data_dir: Path) -> ProcessorSettings:
+    return ProcessorSettings(
+        cache_dir=data_dir / "_cache" / "arelle",
+        allow_network=False,
+        http_user_agent=None,
+    )
+
+
+def _assert_fixture_dimensions(data_dir: Path) -> None:
+    """The 10-K FY_Widgets context: explicit ProductAxis, typed RegionAxis."""
+
+    contexts = {row["context_key"]: row for row in _rows(data_dir, CONTEXTS)}
+    concepts = {row["concept_id"] for row in _rows(data_dir, CONCEPTS)}
+    dimensions = sorted(_rows(data_dir, DIMENSIONS), key=lambda d: d["dimension_id"])
+    assert len({d["dimension_id"] for d in dimensions}) == len(dimensions) == 2
+    explicit, typed = dimensions
+    assert contexts[explicit["context_key"]]["context_ref"] == "FY_Widgets"
+    assert {explicit["context_key"], typed["context_key"]} == {explicit["context_key"]}
+    assert [
+        (d["dimension_ordinal"], d["context_dimension_count"]) for d in dimensions
+    ] == [(1, 2), (2, 2)]
+    assert (explicit["member_type"], explicit["context_element"]) == (
+        "explicit",
+        "segment",
+    )
+    assert (explicit["dimension_concept_id"], explicit["member_concept_id"]) == (
+        concept_id_for(EX, "ProductAxis"),
+        concept_id_for(EX, "WidgetsMember"),
+    )
+    assert (typed["member_type"], typed["member_concept_id"]) == ("typed", None)
+    assert typed["dimension_concept_id"] == concept_id_for(EX, "RegionAxis")
+    assert (typed["typed_member_qname"], typed["typed_member_value"]) == (
+        f"{{{EX}}}Region",
+        "North",
+    )
+    assert typed["typed_member_xml"] == (
+        '<ns0:Region xmlns:ns0="http://example.com/2024">North</ns0:Region>'
+    )
+    assert {explicit["dimension_concept_id"], explicit["member_concept_id"]} <= concepts
+
+
+def _assert_fixture_footnotes(data_dir: Path) -> None:
+    """The 10-K revenues share a footnote; the cell revenue has a second one."""
+
+    footnotes = _rows(data_dir, FOOTNOTES)
+    facts = {row["fact_id"] for row in _rows(data_dir, FACTS)}
+    assert {f["fact_id"] for f in footnotes} <= facts
+    assert len({f["footnote_relation_id"] for f in footnotes}) == len(footnotes) == 3
+    by_fact = {
+        fid: sorted(
+            (f for f in footnotes if f["fact_id"] == fid),
+            key=lambda f: f["footnote_ordinal"],
+        )
+        for fid in (HIDDEN_REVENUE, CELL_REVENUE)
+    }
+    assert [f["fact_footnote_count"] for f in by_fact[CELL_REVENUE]] == [2, 2]
+    assert [f["footnote_ordinal"] for f in by_fact[CELL_REVENUE]] == [1, 2]
+    [shared] = by_fact[HIDDEN_REVENUE]
+    cell_shared = next(
+        f for f in by_fact[CELL_REVENUE] if f["role_uri"] == FOOTNOTE_ROLE
+    )
+    estimate = next(f for f in by_fact[CELL_REVENUE] if f is not cell_shared)
+    # One resource noting two facts keeps one ID and one content hash.
+    assert shared["footnote_resource_id"] == cell_shared["footnote_resource_id"]
+    assert shared["footnote_content_sha256"] == cell_shared["footnote_content_sha256"]
+    assert (shared["footnote_text"], shared["footnote_html"]) == (
+        "Excludes discontinued operations.",
+        "Excludes <b>discontinued</b>\u00a0operations.",
+    )
+    assert (shared["language"], shared["resource_label"]) == ("en-us", "fn-revenue")
+    assert (shared["arcrole_uri"], shared["linkrole_uri"]) == (
+        FACT_FOOTNOTE,
+        STANDARD_LINK,
+    )
+    assert (
+        estimate["footnote_text"],
+        estimate["footnote_html"],
+        estimate["language"],
+    ) == (
+        "Estimated.",
+        None,
+        None,
+    )
+    assert (estimate["role_uri"], estimate["linkrole_uri"]) == (
+        "http://example.com/role/estimate",
+        "http://example.com/role/notes",
+    )
+
+
+def test_xbrl_enrichment_builds_dimensions_and_footnotes_and_reruns_skip(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    loads: list[str] = []
+
+    def counted_load(files, **options):
+        loads.append(files[0].document_id)
+        return load_instance(files, **options)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(xbrl_enrichment_extraction, "load_instance", counted_load)
+        first = run_sec_filings_silver(tmp_path)
+
+    summary = first.xbrl_enrichment
+    assert first.completed
+    assert summary is not None
+    # Only the 10-K reports dimensions or footnotes; the others are complete
+    # without a load and get no row.
+    assert loads == [TEN_K_DOCUMENT]
+    assert {key: asdict(summary)[key] for key in EXPECTED_FIRST_ENRICHMENT} == (
+        EXPECTED_FIRST_ENRICHMENT
+    )
+    for identifier, schema in (
+        (DIMENSIONS, XBRL_DIMENSIONS_ARROW_SCHEMA),
+        (FOOTNOTES, XBRL_FACT_FOOTNOTES_ARROW_SCHEMA),
+    ):
+        table = _table(tmp_path, identifier)
+        assert table.location() == str(
+            tmp_path / "silver" / "sec_filings" / identifier.split(".")[1]
+        )
+        assert table.scan().to_arrow().schema.equals(schema)
+        assert _partition_columns(table) == []
+
+    _assert_fixture_dimensions(tmp_path)
+    _assert_fixture_footnotes(tmp_path)
+
+    def reload(*_: object, **__: object) -> None:
+        raise AssertionError("complete instances must not reload XBRL")
+
+    monkeypatch.setattr(xbrl_enrichment_extraction, "load_instance", reload)
+    rerun = run_sec_filings_silver(tmp_path)
+
+    assert rerun.completed
+    assert rerun.xbrl_enrichment is not None
+    assert (
+        rerun.xbrl_enrichment.instances_skipped,
+        rerun.xbrl_enrichment.instances_inserted,
+    ) == (3, 0)
+    assert _enrichment_snapshots(tmp_path) == (
+        summary.dimensions_snapshot_after,
+        summary.footnotes_snapshot_after,
+    )
+    assert (len(_rows(tmp_path, DIMENSIONS)), len(_rows(tmp_path, FOOTNOTES))) == (2, 3)
+
+
+EXPECTED_FIRST_ENRICHMENT = {
+    "status": "completed",
+    "instances_considered": 3,
+    "instances_inserted": 1,
+    "instances_skipped": 2,
+    "instances_resumed": 0,
+    "contexts_considered": 3,
+    "contexts_with_dimensions": 1,
+    "contexts_without_dimensions": 2,
+    "dimensions_inserted": 2,
+    "explicit_dimensions": 1,
+    "typed_dimensions": 1,
+    "facts_considered": 6,
+    "facts_with_footnotes": 2,
+    "facts_without_footnotes": 4,
+    "footnote_relationships_inserted": 3,
+    "unique_footnote_resources": 2,
+    "empty_footnotes": 0,
+    "dimensions_snapshot_before": None,
+    "footnotes_snapshot_before": None,
+}
+
+
+def _write_second_ten_k(data_dir: Path, write_sec_filing) -> str:
+    """A new 10-K like the first: its own instance with dimensions and footnotes."""
+
+    write_sec_filing(
+        data_dir,
+        cik=CIK,
+        form="10-K",
+        accession="0000320193-26-000002",
+        filed="20260105",
+    )
+    return "sec:0000320193-26-000002:xbrl:inline:default"
+
+
+def test_new_instance_appends_only_its_dimensions_and_footnotes(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    first = run_sec_filings_silver(tmp_path).xbrl_enrichment
+    stored = (_rows(tmp_path, DIMENSIONS), _rows(tmp_path, FOOTNOTES))
+    new_instance = _write_second_ten_k(tmp_path, write_sec_filing)
+
+    result = run_sec_filings_silver(tmp_path)
+
+    summary = result.xbrl_enrichment
+    assert result.completed
+    assert first is not None and summary is not None
+    assert (summary.instances_inserted, summary.instances_skipped) == (1, 3)
+    assert (summary.dimensions_inserted, summary.footnote_relationships_inserted) == (
+        2,
+        3,
+    )
+    for table, before in (
+        (DIMENSIONS, first.dimensions_snapshot_after),
+        (FOOTNOTES, first.footnotes_snapshot_after),
+    ):
+        assert _table(tmp_path, table).current_snapshot().parent_snapshot_id == before
+    dimensions, footnotes = _rows(tmp_path, DIMENSIONS), _rows(tmp_path, FOOTNOTES)
+    assert all(row in dimensions for row in stored[0])
+    assert all(row in footnotes for row in stored[1])
+    assert {d["context_key"].split(":context:")[0] for d in dimensions} == {
+        TEN_K_INSTANCE,
+        new_instance,
+    }
+    assert sum(f["fact_id"].startswith(new_instance) for f in footnotes) == 3
+
+
+def _fail_footnotes(table: Table, rows, arrow_schema) -> None:
+    if arrow_schema is XBRL_FACT_FOOTNOTES_ARROW_SCHEMA:
+        raise OSError("disk full")
+    append_rows(table, rows, arrow_schema)
+
+
+def test_dimensions_only_commit_resumes_footnotes(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    with monkeypatch.context() as patch:
+        patch.setattr(xbrl_enrichment_stage, "append_rows", _fail_footnotes)
+        with pytest.raises(OSError, match="disk full"):
+            run_sec_filings_silver(tmp_path)
+    dimensions_snapshot, footnotes_snapshot = _enrichment_snapshots(tmp_path)
+    assert dimensions_snapshot is not None and footnotes_snapshot is None
+
+    resumed = run_sec_filings_silver(tmp_path).xbrl_enrichment
+
+    assert resumed is not None and resumed.status == "completed"
+    assert (resumed.instances_resumed, resumed.instances_inserted) == (1, 0)
+    assert (resumed.dimensions_inserted, resumed.footnote_relationships_inserted) == (
+        0,
+        3,
+    )
+    assert _snapshot(tmp_path, DIMENSIONS) == dimensions_snapshot
+    assert (len(_rows(tmp_path, DIMENSIONS)), len(_rows(tmp_path, FOOTNOTES))) == (2, 3)
+
+
+def test_footnotes_without_dimensions_resume_dimensions(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    [context_key] = {row["context_key"] for row in _rows(tmp_path, DIMENSIONS)}
+    _delete_rows(tmp_path, DIMENSIONS, "context_key", context_key)
+    footnotes_snapshot = _snapshot(tmp_path, FOOTNOTES)
+
+    resumed = run_sec_filings_silver(tmp_path).xbrl_enrichment
+
+    assert resumed is not None and resumed.status == "completed"
+    assert (resumed.instances_resumed, resumed.dimensions_inserted) == (1, 2)
+    assert resumed.footnote_relationships_inserted == 0
+    assert _snapshot(tmp_path, FOOTNOTES) == footnotes_snapshot
+    assert len(_rows(tmp_path, DIMENSIONS)) == 2
+
+
+def _drop_concept(data_dir: Path, local_name: str) -> None:
+    with open_silver_catalog(data_dir) as catalog:
+        catalog.load_table(CONCEPTS).delete(
+            EqualTo("concept_id", concept_id_for(EX, local_name))
+        )
+
+
+@pytest.mark.parametrize(
+    ("damage", "event"),
+    [
+        ("partial-dimension-group", "xbrl_enrichment_instance_conflict"),
+        ("partial-footnote-group", "xbrl_enrichment_instance_conflict"),
+        ("member-concept-missing", "xbrl_dimension_parent_missing"),
+        ("context-missing", "dimensions have no context"),
+        ("fact-missing", "xbrl_facts holds 5 of 6 facts"),
+    ],
+)
+def test_xbrl_enrichment_rejects_the_batch_before_any_write(
+    tmp_path: Path,
+    write_sec_filing,
+    capsys: pytest.CaptureFixture[str],
+    damage: str,
+    event: str,
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    [context_key] = {row["context_key"] for row in _rows(tmp_path, DIMENSIONS)}
+    if damage == "partial-dimension-group":
+        _delete_rows(
+            tmp_path, DIMENSIONS, "dimension_id", f"{context_key}:dimension:0002"
+        )
+    elif damage == "partial-footnote-group":
+        _delete_rows(
+            tmp_path, FOOTNOTES, "footnote_relation_id", f"{CELL_REVENUE}:footnote:0002"
+        )
+    elif damage == "member-concept-missing":
+        # The dimensions are extracted again and meet the missing parent.
+        _delete_rows(tmp_path, DIMENSIONS, "context_key", context_key)
+        _drop_concept(tmp_path, "WidgetsMember")
+    elif damage == "context-missing":
+        _delete_rows(tmp_path, CONTEXTS, "context_key", context_key)
+    elif damage == "fact-missing":
+        _delete_rows(tmp_path, FACTS, "fact_id", f"{TEN_K_INSTANCE}:fact:00000005")
+    # A second instance in the same batch must not be written either.
+    _write_second_ten_k(tmp_path, write_sec_filing)
+    before = _enrichment_snapshots(tmp_path)
+    capsys.readouterr()
+
+    summary = xbrl_enrichment_stage.run_xbrl_enrichment_stage(
+        tmp_path, datetime.now(UTC), _settings(tmp_path)
+    )
+
+    assert summary.status == "rejected"
+    assert summary.instances_conflicted >= 1
+    assert (summary.dimensions_inserted, summary.footnote_relationships_inserted) == (
+        0,
+        0,
+    )
+    assert _enrichment_snapshots(tmp_path) == before
+    assert event in capsys.readouterr().out
+
+
+def test_parser_error_in_one_instance_writes_no_instance(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    new_instance = _write_second_ten_k(tmp_path, write_sec_filing)
+
+    def broken_load(files, **options):
+        if files[0].document_id.startswith(new_instance.split(":xbrl:")[0]):
+            raise XbrlProcessorError("unreadable instance")
+        return load_instance(files, **options)
+
+    monkeypatch.setattr(xbrl_enrichment_extraction, "load_instance", broken_load)
+    result = run_sec_filings_silver(tmp_path)
+
+    summary = result.xbrl_enrichment
+    assert result.xbrl_facts is not None and result.xbrl_facts.status == "completed"
+    assert summary is not None and summary.status == "rejected"
+    assert (summary.instances_failed, summary.dimensions_inserted) == (1, 0)
+    assert _enrichment_snapshots(tmp_path) == (None, None)

@@ -241,13 +241,14 @@ def _fact(
 
 def read_facts(
     model: ModelXbrl, entries: Sequence[tuple[str, Path]], *, inline: bool
-) -> tuple[list[LoadedFact], dict[str, int]]:
+) -> tuple[list[LoadedFact], dict[str, int], list[Any]]:
     """The instance's facts in entry order, then DOM order within each document.
 
     `entries` are the (document_id, path) of the instance's own documents.
-    Also returns the number of Inline fact elements of each entry document.
-    Facts of concepts missing from the DTS, tuples and broken continuation
-    chains raise XbrlProcessorError.
+    Also returns the number of Inline fact elements of each entry document,
+    and the processor's fact objects in the same order, so relationships
+    can name a fact by its position. Facts of concepts missing from the DTS,
+    tuples and broken continuation chains raise XbrlProcessorError.
     """
 
     # The processor leaves such facts out of the instance: XML ones as
@@ -272,6 +273,7 @@ def read_facts(
         for element in root.iter(_CONTINUATION)
     }
     facts: list[LoadedFact] = []
+    elements: list[Any] = []
     used: set[str] = set()
     totals = {}
     for document_id, root in roots:
@@ -284,9 +286,10 @@ def read_facts(
                 facts.append(
                     _fact(element, document_id, position if inline else None, refs)
                 )
+                elements.append(element)
         totals[document_id] = position
     if len(facts) != len(loaded):
         raise XbrlProcessorError(
             f"{len(loaded) - len(facts)} facts are outside the entry documents"
         )
-    return facts, totals
+    return facts, totals, elements

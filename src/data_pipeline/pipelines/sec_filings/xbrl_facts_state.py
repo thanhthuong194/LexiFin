@@ -18,7 +18,7 @@ from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
 from src.data_pipeline.contracts.sec_filings.xbrl_facts import XbrlFactRecord
 from src.data_pipeline.quality.sec_filings.xbrl_core import instance_problem
 from src.data_pipeline.quality.sec_filings.xbrl_facts import facts_problem
-from src.data_pipeline.storage.iceberg import group_rows_by, verify_append
+from src.data_pipeline.storage.iceberg import verify_append
 from src.data_pipeline.storage.sec_filings.content_blocks import (
     open_content_blocks_table,
 )
@@ -181,32 +181,4 @@ def verify_concepts(
     hashes = read_concept_hashes(table)
     if any(hashes[c.concept_id] != c.concept_definition_sha256 for c in written):
         raise ValueError("xbrl_concepts rows differ after commit")
-    return snapshot
-
-
-def verify_facts(
-    table: Table, written: Sequence[XbrlFactRecord], stored: int, before: int | None
-) -> int | None:
-    """Re-read facts: unique IDs, and every group written now stored exactly."""
-
-    snapshot = verify_append(
-        table,
-        key_column="fact_id",
-        expected_rows=stored + len(written),
-        inserted_keys=[fact.fact_id for fact in written],
-        snapshot_before=before,
-    )
-    groups = group_rows_by(table, "instance_id")
-    expected: dict[str, dict[str, object]] = defaultdict(dict)
-    for fact in written:
-        expected[fact.instance_id][fact.fact_id] = fact.model_dump(
-            exclude={"processed_at"}
-        )
-    for instance_id, facts in expected.items():
-        found = {
-            row["fact_id"]: {k: v for k, v in row.items() if k != "processed_at"}
-            for row in groups.get(instance_id, [])
-        }
-        if found != facts:
-            raise ValueError(f"xbrl_facts rows of {instance_id} differ after commit")
     return snapshot

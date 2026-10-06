@@ -169,16 +169,35 @@ def _context(context_id: str) -> str:
     )
 
 
+# Fact-footnote relationships of the 10-K (hidden facts have IDs hidden-1...):
+# the hidden and the visible revenue share a footnote with markup; the visible
+# one also has a plain footnote with its own role, in another link role.
+_RELATIONSHIPS = {
+    "10-K": '<ix:relationship fromRefs="hidden-2 revenue-cell" toRefs="fn-revenue"/>'
+    '<ix:relationship fromRefs="revenue-cell" toRefs="fn-estimate" '
+    'linkRole="http://example.com/role/notes"/>'
+}
+# The 10-K footnotes, in a hidden div so that narrative content is unchanged.
+_FOOTNOTES = (
+    '<div style="display: none"><ix:footnote id="fn-revenue" xml:lang="en-US">'
+    "Excludes <b>discontinued</b>&#160;operations.</ix:footnote>"
+    '<ix:footnote id="fn-estimate" footnoteRole="http://example.com/role/estimate">'
+    "Estimated.</ix:footnote></div>"
+)
+
+
 def _inline_header(form: str) -> str:
     contexts, units = _RESOURCES[form]
     facts = "".join(
-        f'<ix:{kind} name="{concept}" contextRef="{context}"'
+        f'<ix:{kind} id="hidden-{n}" name="{concept}" contextRef="{context}"'
         + (f' unitRef="{unit}" decimals="0"' if unit else "")
         + f">{value}</ix:{kind}>"
-        for kind, concept, context, unit, value in _FACTS[form]
+        for n, (kind, concept, context, unit, value) in enumerate(_FACTS[form], 1)
     )
-    resources = "".join(_context(c) for c in contexts) + "".join(
-        f'<xbrli:unit id="{u}">{_UNITS[u]}</xbrli:unit>' for u in units
+    resources = (
+        "".join(_context(c) for c in contexts)
+        + "".join(f'<xbrli:unit id="{u}">{_UNITS[u]}</xbrli:unit>' for u in units)
+        + _RELATIONSHIPS.get(form, "")
     )
     return (
         f'<div style="display: none"><ix:header><ix:hidden>{facts}</ix:hidden>'
@@ -232,7 +251,8 @@ def _generated_xml(form: str) -> str:
 # Inline XBRL primary documents as EDGAR stores them: wrapped in <XBRL> with an
 # XML prolog, an ix:header (hidden facts, schema reference, contexts, units), a
 # linked table of contents, headings in divs or table cells, visible ix facts
-# in a paragraph and a table cell, a narrative ITEM mention and a table. Links wrap existing text, so they leave
+# in a paragraph and a table cell, a narrative ITEM mention and a table; the
+# 10-K also links two of its facts to hidden footnotes. Links wrap existing text, so they leave
 # blocks and cells unchanged: the 10-K links its own exhibit by SEC URL and an
 # external site, the 8-K its exhibit, a missing file and another filing's
 # exhibit of the same name.
@@ -264,10 +284,12 @@ PRIMARY_HTML = {
         '<div>As discussed in <a href="#i7">Item 7</a>, demand may fall.</div>'
         '<div id="p2">PART II</div>'
         '<div id="i7">Item 7. Management&#8217;s Discussion and Analysis</div>'
-        '<table><tr><td>Revenue</td><td>$<ix:nonFraction name="ex:Revenue" '
+        '<table><tr><td>Revenue</td><td>$<ix:nonFraction id="revenue-cell" '
+        'name="ex:Revenue" '
         'contextRef="FY" unitRef="usd" decimals="0" format="ixt:num-dot-decimal">'
         "1,000</ix:nonFraction></td></tr></table>"
-        '<div><a name="signatures"></a>SIGNATURES</div><div>/s/ Jane Doe</div>',
+        '<div><a name="signatures"></a>SIGNATURES</div><div>/s/ Jane Doe</div>'
+        + _FOOTNOTES,
     ),
     "10-Q": _INLINE_XBRL.format(
         header=_inline_header("10-Q"),

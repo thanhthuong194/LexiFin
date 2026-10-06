@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from src.data_pipeline.pipelines.sec_filings.document_links import (
     DocumentLinksStageSummary,
@@ -32,6 +34,10 @@ from src.data_pipeline.pipelines.sec_filings.xbrl_core import (
     XbrlCoreStageSummary,
     run_xbrl_core_stage,
 )
+from src.data_pipeline.pipelines.sec_filings.xbrl_enrichment import (
+    XbrlEnrichmentStageSummary,
+    run_xbrl_enrichment_stage,
+)
 from src.data_pipeline.pipelines.sec_filings.xbrl_facts import (
     XbrlFactsStageSummary,
     run_xbrl_facts_stage,
@@ -60,6 +66,7 @@ class SilverRunResult:
     document_links: DocumentLinksStageSummary | None
     xbrl_core: XbrlCoreStageSummary | None
     xbrl_facts: XbrlFactsStageSummary | None
+    xbrl_enrichment: XbrlEnrichmentStageSummary | None
 
     @property
     def completed(self) -> bool:
@@ -76,6 +83,7 @@ class SilverRunResult:
                 self.document_links,
                 self.xbrl_core,
                 self.xbrl_facts,
+                self.xbrl_enrichment,
             )
         )
 
@@ -97,11 +105,12 @@ def run_sec_filings_silver(
     from the committed `table` blocks, then `sec_filings.document_links` from
     every committed HTML document, then the XBRL core tables
     (`xbrl_instances`, `xbrl_contexts`, `xbrl_units`) from the filings' Inline
-    XBRL and XML instance documents, and last `xbrl_concepts` and `xbrl_facts`
-    from those instances. The XBRL processor resolves taxonomies from
-    `taxonomy_cache_dir` (default `<data_dir>/_cache/arelle`) and downloads
-    missing ones, identifying itself with `http_user_agent`, only when
-    `allow_taxonomy_network` is set. Each stage validates its whole batch
+    XBRL and XML instance documents, then `xbrl_concepts` and `xbrl_facts`
+    from those instances, and last `xbrl_dimensions` and
+    `xbrl_fact_footnotes` from their contexts and facts. The XBRL processor
+    resolves taxonomies from `taxonomy_cache_dir` (default
+    `<data_dir>/_cache/arelle`) and downloads missing ones, identifying
+    itself with `http_user_agent`, only when `allow_taxonomy_network` is set. Each stage validates its whole batch
     before its appends, so a rejected stage writes nothing, later stages do
     not run, and a rerun completes whatever is missing. Unexpected errors are
     logged and re-raised.
@@ -116,26 +125,29 @@ def run_sec_filings_silver(
         http_user_agent=http_user_agent,
     )
     processed_at = datetime.now(UTC)
-    documents = filing_entities = narrative = document_tables = None
-    document_links = xbrl_core = xbrl_facts = None
+    stages: list[tuple[str, Callable[[], Any]]] = [
+        ("filings", lambda: run_filings_stage(data_dir, processed_at)),
+        ("documents", lambda: run_documents_stage(data_dir, processed_at)),
+        ("filing_entities", lambda: run_filing_entities_stage(data_dir, processed_at)),
+        ("narrative", lambda: run_narrative_stage(data_dir, processed_at)),
+        ("document_tables", lambda: run_document_tables_stage(data_dir, processed_at)),
+        ("document_links", lambda: run_document_links_stage(data_dir, processed_at)),
+        ("xbrl_core", lambda: run_xbrl_core_stage(data_dir, processed_at)),
+        ("xbrl_facts", lambda: run_xbrl_facts_stage(data_dir, processed_at, taxonomy)),
+        (
+            "xbrl_enrichment",
+            lambda: run_xbrl_enrichment_stage(data_dir, processed_at, taxonomy),
+        ),
+    ]
+    summaries: dict[str, Any] = dict.fromkeys(name for name, _ in stages)
     logger.info("sec_silver_started", data_dir=str(data_dir))
     try:
         with timed_operation("pipeline.total"):
-            filings = run_filings_stage(data_dir, processed_at)
-            if filings.status == "completed":
-                documents = run_documents_stage(data_dir, processed_at)
-            if documents is not None and documents.status == "completed":
-                filing_entities = run_filing_entities_stage(data_dir, processed_at)
-            if filing_entities is not None and filing_entities.status == "completed":
-                narrative = run_narrative_stage(data_dir, processed_at)
-            if narrative is not None and narrative.status == "completed":
-                document_tables = run_document_tables_stage(data_dir, processed_at)
-            if document_tables is not None and document_tables.status == "completed":
-                document_links = run_document_links_stage(data_dir, processed_at)
-            if document_links is not None and document_links.status == "completed":
-                xbrl_core = run_xbrl_core_stage(data_dir, processed_at)
-            if xbrl_core is not None and xbrl_core.status == "completed":
-                xbrl_facts = run_xbrl_facts_stage(data_dir, processed_at, taxonomy)
+            for name, run_stage in stages:
+                summaries[name] = run_stage()
+                # Child rows are only built once their parents are committed.
+                if summaries[name].status != "completed":
+                    break
     except Exception as error:
         logger.error(
             "sec_silver_failed",
@@ -144,31 +156,10 @@ def run_sec_filings_silver(
         )
         raise
 
-    result = SilverRunResult(
-        filings=filings,
-        documents=documents,
-        filing_entities=filing_entities,
-        narrative=narrative,
-        document_tables=document_tables,
-        document_links=document_links,
-        xbrl_core=xbrl_core,
-        xbrl_facts=xbrl_facts,
-    )
+    result = SilverRunResult(**summaries)
     statuses = {
-        "filings_status": filings.status,
-        "documents_status": None if documents is None else documents.status,
-        "filing_entities_status": (
-            None if filing_entities is None else filing_entities.status
-        ),
-        "narrative_status": None if narrative is None else narrative.status,
-        "document_tables_status": (
-            None if document_tables is None else document_tables.status
-        ),
-        "document_links_status": (
-            None if document_links is None else document_links.status
-        ),
-        "xbrl_core_status": None if xbrl_core is None else xbrl_core.status,
-        "xbrl_facts_status": None if xbrl_facts is None else xbrl_facts.status,
+        f"{name}_status": None if summary is None else summary.status
+        for name, summary in summaries.items()
     }
     if result.completed:
         logger.info("sec_silver_completed", **statuses)

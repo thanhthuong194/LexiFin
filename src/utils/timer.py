@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import inspect
+from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import wraps
 from time import perf_counter_ns
-from typing import Any
+from typing import Any, TypeVar
 
 from .logger import get_logger
 
 logger = get_logger(__name__)
+Result = TypeVar("Result")
 
 
 def _elapsed_ms(start_ns: int) -> float:
@@ -67,6 +69,29 @@ def timed_operation(
             "operation_completed",
             **success_fields,
         )
+
+
+class PhaseDurations:
+    """Total durations of phases repeated per item, logged once instead of per item."""
+
+    def __init__(self) -> None:
+        self._elapsed_ns: Counter[str] = Counter()
+
+    def run(self, phase: str, work: Callable[[], Result]) -> Result:
+        """Run one phase of an item and add its duration to the phase total."""
+
+        started = perf_counter_ns()
+        try:
+            return work()
+        finally:
+            self._elapsed_ns[phase] += perf_counter_ns() - started
+
+    def milliseconds(self) -> dict[str, int]:
+        """Each phase's total as a `<phase>_ms` log field."""
+
+        return {
+            f"{phase}_ms": ns // 1_000_000 for phase, ns in self._elapsed_ns.items()
+        }
 
 
 def timed(
