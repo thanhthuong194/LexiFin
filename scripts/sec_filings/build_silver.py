@@ -14,11 +14,10 @@ from src.utils.logger import configure_logging
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse the SEC Silver `filings` build CLI."""
+    """Parse the SEC Silver build CLI."""
 
     parser = argparse.ArgumentParser(
-        description="Build Iceberg tables sec_filings.filings and .documents "
-        "from SEC Bronze"
+        description="Build the sec_filings Iceberg tables from SEC Bronze"
     )
     parser.add_argument(
         "--data-dir",

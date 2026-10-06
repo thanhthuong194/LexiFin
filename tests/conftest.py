@@ -55,13 +55,62 @@ SEC_FILER_TEMPLATE = """FILER:
 
 """
 
+# Inline XBRL primary documents as EDGAR stores them: wrapped in <XBRL> with an
+# XML prolog, hidden ix:header facts, a linked table of contents, headings in
+# divs or table cells, visible ix facts, a narrative ITEM mention and a table.
+_INLINE_XBRL = (
+    "\n<XBRL>\n<?xml version='1.0' encoding='ASCII'?>\n<html><head>"
+    "<title>example</title></head><body>"
+    '<div style="display: none"><ix:header><ix:hidden>'
+    '<ix:nonNumeric name="dei:AmendmentFlag">false</ix:nonNumeric>'
+    "</ix:hidden></ix:header></div>{body}</body></html>\n</XBRL>\n"
+)
+PRIMARY_HTML = {
+    "10-K": _INLINE_XBRL.format(
+        body="<div>Example Corp Annual Report</div><div>TABLE OF CONTENTS</div>"
+        '<table><tr><td><a href="#p1">Part I</a></td></tr>'
+        '<tr><td><a href="#i1">Item 1.</a></td><td>Business</td></tr>'
+        '<tr><td><a href="#i1a">Item 1A.</a></td><td>Risk Factors</td></tr>'
+        '<tr><td><a href="#p2">Part II</a></td></tr>'
+        '<tr><td><a href="#i7">Item 7.</a></td><td>MD&amp;A</td></tr></table>'
+        '<div id="p1">PART I</div>'
+        '<div id="i1"><span style="font-weight:700">Item 1. Business</span></div>'
+        '<div>We make <ix:nonNumeric name="ex:Product">widgets</ix:nonNumeric>.</div>'
+        '<div id="i1a">Item 1A. Risk Factors</div>'
+        "<div>As discussed in Item 7, demand may fall.</div>"
+        '<div id="p2">PART II</div>'
+        '<div id="i7">Item 7. Management&#8217;s Discussion and Analysis</div>'
+        "<table><tr><td>Revenue</td><td>$1,000</td></tr></table>"
+        "<div>SIGNATURES</div><div>/s/ Jane Doe</div>"
+    ),
+    "10-Q": _INLINE_XBRL.format(
+        body="<div>PART I &#8212; FINANCIAL INFORMATION</div>"
+        "<div>Item 1. Financial Statements</div><div>Net income rose.</div>"
+        "<div>Item 2. Management&#8217;s Discussion and Analysis</div>"
+        "<p>Results improved.</p>"
+        "<div>PART II &#8212; OTHER INFORMATION</div>"
+        "<div>Item 1. Legal Proceedings</div><div>None.</div>"
+        "<div>Item 1A. Risk Factors</div><div>No material changes.</div>"
+        "<div>SIGNATURES</div><div>/s/ Jane Doe</div>"
+    ),
+    "8-K": _INLINE_XBRL.format(
+        body="<div>Item 2.02 Results of Operations and Financial Condition.</div>"
+        "<div>Example Corp reported results.</div>"
+        "<div>Item 9.01 Financial Statements and Exhibits.</div>"
+        "<div>EXHIBIT INDEX</div>"
+        "<table><tr><td>99.1</td><td>Press release</td></tr></table>"
+        "<div>SIGNATURE</div><div>/s/ Jane Doe</div>"
+    ),
+}
+
 # (TYPE, SEQUENCE, FILENAME, DESCRIPTION, <TEXT> content) of the documents in
 # every fake submission, shaped like real EDGAR filings: the form's primary
-# document, an exhibit, XBRL schema and extracted instance, an uuencoded
-# graphic without DESCRIPTION, and an EDGAR-rendered R page (sequence gap).
-# "{form}" in TYPE is replaced by the submission's form.
+# document (its <TEXT> is PRIMARY_HTML of the folder form), an exhibit, XBRL
+# schema and extracted instance, an uuencoded graphic without DESCRIPTION, and
+# an EDGAR-rendered R page (sequence gap). "{form}" in TYPE is replaced by the
+# submission's form.
 SEC_DOCUMENTS = (
-    ("{form}", "1", "primary.htm", "{form}", "\n<html><body>report</body></html>\n"),
+    ("{form}", "1", "primary.htm", "{form}", ""),
     ("EX-31.1", "2", "ex31.htm", "CERTIFICATION", "\n<html>certify</html>\n"),
     (
         "EX-101.SCH",
@@ -106,7 +155,8 @@ def write_sec_filing() -> SecFilingWriter:
     `header_*` override is given, and holds one FILER block, plus a second
     FILER block when `co_registrant_cik` is given (as in multi-registrant
     8-Ks). The submission holds SEC_DOCUMENTS with the primary document typed
-    as the header form. Returns the accession directory.
+    as the header form; `primary_text` replaces its <TEXT> content. Returns
+    the accession directory.
     """
 
     def write(
@@ -120,6 +170,7 @@ def write_sec_filing() -> SecFilingWriter:
         header_form: str | None = None,
         header_accession: str | None = None,
         co_registrant_cik: str | None = None,
+        primary_text: str | None = None,
         primary_html: bytes | None = b"<html>primary</html>",
     ) -> Path:
         directory = (
@@ -148,8 +199,12 @@ def write_sec_filing() -> SecFilingWriter:
                 for name, filer_cik in filers
             ),
         )
+        primary, *others = SEC_DOCUMENTS
+        default_text = PRIMARY_HTML.get(form, "\n<html><body>report</body></html>\n")
+        primary = (*primary[:4], primary_text or default_text)
         documents = "".join(
-            _document_block(submission_form, document) for document in SEC_DOCUMENTS
+            _document_block(submission_form, document)
+            for document in (primary, *others)
         )
         (directory / "full-submission.txt").write_text(
             f"{header}{documents}</SEC-DOCUMENT>\n", encoding="ascii"

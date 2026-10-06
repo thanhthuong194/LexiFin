@@ -7,17 +7,36 @@ from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 from pyiceberg.expressions import EqualTo
 from pyiceberg.table import Table
 
 from scripts.sec_filings.build_silver import REPOSITORY_ROOT, parse_args
-from src.data_pipeline.contracts.sec_filings.documents import DOCUMENTS_ARROW_SCHEMA
+from src.data_pipeline.contracts.sec_filings.content_blocks import (
+    CONTENT_BLOCKS_ARROW_SCHEMA,
+)
+from src.data_pipeline.contracts.sec_filings.document_table_cells import (
+    DOCUMENT_TABLE_CELLS_ARROW_SCHEMA,
+)
+from src.data_pipeline.contracts.sec_filings.document_tables import (
+    DOCUMENT_TABLES_ARROW_SCHEMA,
+    DocumentTableRecord,
+)
+from src.data_pipeline.contracts.sec_filings.documents import (
+    DOCUMENTS_ARROW_SCHEMA,
+    DocumentRecord,
+)
 from src.data_pipeline.contracts.sec_filings.filing_entities import (
     FILING_ENTITIES_ARROW_SCHEMA,
 )
 from src.data_pipeline.contracts.sec_filings.filings import FILINGS_ARROW_SCHEMA
+from src.data_pipeline.contracts.sec_filings.sections import SECTIONS_ARROW_SCHEMA
+from src.data_pipeline.pipelines.sec_filings import (
+    document_tables as document_tables_stage,
+)
 from src.data_pipeline.pipelines.sec_filings import documents as documents_stage
+from src.data_pipeline.pipelines.sec_filings import narrative as narrative_stage
 from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
     run_sec_filings_silver,
 )
@@ -32,6 +51,29 @@ pytestmark = pytest.mark.integration
 FILINGS = "sec_filings.filings"
 DOCUMENTS = "sec_filings.documents"
 ENTITIES = "sec_filings.filing_entities"
+SECTIONS = "sec_filings.sections"
+BLOCKS = "sec_filings.content_blocks"
+TEN_K_DOCUMENT = "sec:0000320193-24-000123:document:0001"
+TEN_Q_DOCUMENT = "sec:0000320193-25-000057:document:0001"
+EIGHT_K_DOCUMENT = "sec:0000789019-25-000010:document:0001"
+NEW_YEAR_DOCUMENT = "sec:0000320193-26-000001:document:0001"
+# Sections and blocks that the fixture's PRIMARY_HTML yields per form.
+EXPECTED_CODES = {
+    TEN_K_DOCUMENT: [
+        "TABLE OF CONTENTS", "PART I", "ITEM 1", "ITEM 1A", "PART II", "ITEM 7",
+        "SIGNATURES",
+    ],
+    TEN_Q_DOCUMENT: [
+        "PART I", "ITEM 1", "ITEM 2", "PART II", "ITEM 1", "ITEM 1A", "SIGNATURES",
+    ],
+    EIGHT_K_DOCUMENT: ["ITEM 2.02", "ITEM 9.01", "EXHIBIT INDEX", "SIGNATURES"],
+}  # fmt: skip
+SECTION_ROWS, BLOCK_ROWS = 21, 32
+TABLES = "sec_filings.document_tables"
+CELLS = "sec_filings.document_table_cells"
+# The 10-K holds a linked TOC table (8 cells) and a revenue table (2 cells),
+# the 8-K an exhibit table (2 cells); the 10-Q has no table.
+TABLE_ROWS, CELL_ROWS = 3, 12
 # Every fake submission from the write_sec_filing fixture holds six documents.
 DOCUMENTS_PER_FILING = 6
 CIK = "0000320193"
@@ -116,6 +158,27 @@ def _rows_per_year(table: Table) -> Counter[int]:
             "record_count"
         ]
     return counts
+
+
+def _rows_by_document(data_dir: Path, identifier: str) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {}
+    for row in _table(data_dir, identifier).scan().to_arrow().to_pylist():
+        groups.setdefault(row["document_id"], []).append(row)
+    return groups
+
+
+def _snapshot(data_dir: Path, identifier: str) -> int | None:
+    snapshot = _table(data_dir, identifier).current_snapshot()
+    return None if snapshot is None else snapshot.snapshot_id
+
+
+def _delete_rows(data_dir: Path, identifier: str, column: str, value: str) -> int:
+    """Delete matching rows through PyIceberg and return the new snapshot ID."""
+
+    with open_silver_catalog(data_dir) as catalog:
+        table = catalog.load_table(identifier)
+        table.delete(EqualTo(column, value))
+        return table.current_snapshot().snapshot_id
 
 
 def _partition_columns(table: Table) -> list[tuple[str, str, str | None]]:
@@ -240,7 +303,8 @@ def test_documents_inventory_every_block_with_exact_offsets_and_reruns_skip(
     assert (primary["document_type"], primary["filename"]) == ("10-K", "primary.htm")
     raw = (tmp_path / primary["source_path"]).read_bytes()
     content = raw[primary["content_start_byte"] : primary["content_end_byte"]]
-    assert content == b"\n<html><body>report</body></html>\n"
+    assert content.startswith(b"\n<XBRL>\n")
+    assert content.endswith(b"</html>\n</XBRL>\n")
 
     rerun = run_sec_filings_silver(tmp_path)
 
@@ -372,6 +436,24 @@ def test_new_year_and_backfill_append_into_their_year_partitions(
     ) == (1, 1, 4)
     new_entities = read_filing_entity_groups(_table(tmp_path, ENTITIES))
     assert len(new_entities["sec:0000320193-26-000001"]) == 1
+    assert new_year.narrative is not None
+    assert (
+        new_year.narrative.documents_inserted,
+        new_year.narrative.documents_skipped,
+        new_year.narrative.sections_inserted,
+        new_year.narrative.blocks_inserted,
+    ) == (1, 3, 5, 7)
+    assert new_year.document_tables is not None
+    assert (
+        new_year.document_tables.documents_inserted,
+        new_year.document_tables.documents_skipped,
+        new_year.document_tables.documents_without_tables,
+        new_year.document_tables.tables_written,
+        new_year.document_tables.cells_written,
+    ) == (1, 2, 1, 1, 2)
+    sections = _rows_by_document(tmp_path, SECTIONS)
+    assert len(sections) == 4
+    assert len(sections[NEW_YEAR_DOCUMENT]) == 5
 
     write_sec_filing(
         tmp_path,
@@ -424,6 +506,7 @@ def test_filing_checksum_conflict_rejects_both_stages(
     assert documents.current_snapshot().snapshot_id == first.documents.snapshot_after
     assert documents.scan().to_arrow().num_rows == 18
     assert result.filing_entities is None
+    assert result.narrative is None
     assert _table(tmp_path, ENTITIES).scan().to_arrow().num_rows == 4
 
 
@@ -449,7 +532,7 @@ def test_partial_document_group_is_a_conflict_without_partial_append(
     assert result.documents.filings_conflicted == 1
     assert result.documents.filings_skipped == 2
     assert result.documents.documents_inserted == 0
-    assert result.filing_entities is None
+    assert (result.filing_entities, result.narrative) == (None, None)
     table = _table(tmp_path, DOCUMENTS)
     assert table.current_snapshot().snapshot_id == damaged_snapshot
     assert table.scan().to_arrow().num_rows == 17
@@ -482,6 +565,10 @@ def test_rerun_builds_documents_missing_after_a_failed_documents_stage(
     assert recovered.documents.documents_inserted == 18
     assert recovered.filing_entities is not None
     assert recovered.filing_entities.entities_inserted == 4
+    assert recovered.narrative is not None
+    assert recovered.narrative.documents_inserted == 3
+    assert recovered.document_tables is not None
+    assert recovered.document_tables.documents_inserted == 2
 
 
 def test_invalid_filing_rejects_batch_before_any_write(
@@ -503,8 +590,14 @@ def test_invalid_filing_rejects_batch_before_any_write(
     assert (result.filings.discovered, result.filings.parsed) == (4, 3)
     assert (result.filings.failed, result.filings.inserted) == (1, 0)
     assert result.documents is None
-    assert result.filing_entities is None
-    for table_name in ("filings", "documents", "filing_entities"):
+    assert (result.filing_entities, result.narrative) == (None, None)
+    for table_name in (
+        "filings",
+        "documents",
+        "filing_entities",
+        "sections",
+        "content_blocks",
+    ):
         assert not (tmp_path / "silver" / "sec_filings" / table_name).exists()
 
 
@@ -529,6 +622,7 @@ def test_missing_tail_entity_is_a_conflict_without_partial_append(
     assert result.filing_entities.status == "rejected"
     assert result.filing_entities.filings_conflicted == 1
     assert result.filing_entities.entities_inserted == 0
+    assert (result.narrative, result.document_tables) == (None, None)
     table = _table(tmp_path, ENTITIES)
     assert table.current_snapshot().snapshot_id == damaged_snapshot
     assert table.scan().to_arrow().num_rows == 3
@@ -572,3 +666,394 @@ def test_cli_default_data_dir_is_repository_relative(
     monkeypatch.setattr(sys, "argv", ["build_silver.py"])
 
     assert parse_args().data_dir == REPOSITORY_ROOT / "data"
+
+
+def test_narrative_builds_sections_and_blocks_and_reruns_skip(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+
+    first = run_sec_filings_silver(tmp_path)
+
+    narrative = first.narrative
+    assert first.completed
+    assert narrative is not None
+    assert (narrative.documents_considered, narrative.documents_inserted) == (3, 3)
+    assert (narrative.documents_skipped, narrative.documents_resumed) == (0, 0)
+    assert (narrative.documents_conflicted, narrative.documents_failed) == (0, 0)
+    assert (narrative.sections_inserted, narrative.blocks_inserted) == (
+        SECTION_ROWS,
+        BLOCK_ROWS,
+    )
+    assert (narrative.root_only_documents, narrative.duplicate_section_codes) == (0, 0)
+    assert narrative.sections_snapshot_before is None
+    assert narrative.content_blocks_snapshot_before is None
+    for identifier, schema in (
+        (SECTIONS, SECTIONS_ARROW_SCHEMA),
+        (BLOCKS, CONTENT_BLOCKS_ARROW_SCHEMA),
+    ):
+        table = _table(tmp_path, identifier)
+        assert table.location() == str(
+            tmp_path / "silver" / "sec_filings" / identifier.split(".")[1]
+        )
+        assert _partition_columns(table) == [("filing_year", "year", "filing_date")]
+        assert table.scan().to_arrow().schema.equals(schema)
+
+    sections = _rows_by_document(tmp_path, SECTIONS)
+    blocks = _rows_by_document(tmp_path, BLOCKS)
+    primaries = {
+        row["document_id"]: row
+        for row in _table(tmp_path, DOCUMENTS).scan().to_arrow().to_pylist()
+        if row["role"] == "primary_document"
+    }
+    assert set(sections) == set(blocks) == set(primaries)
+    for document_id, codes in EXPECTED_CODES.items():
+        ordered = sorted(sections[document_id], key=lambda row: row["section_ordinal"])
+        assert [row["section_code"] for row in ordered[1:]] == codes
+        assert ordered[0]["section_kind"] == "document"
+        section_ids = {row["section_id"]: row for row in ordered}
+        for block in blocks[document_id]:
+            assert block["section_id"] in section_ids
+            assert block["filing_id"] == primaries[document_id]["filing_id"]
+            assert (
+                block["source_document_sha256"]
+                == primaries[document_id]["content_sha256"]
+            )
+    all_blocks = [block for group in blocks.values() for block in group]
+    all_sections = [section for group in sections.values() for section in group]
+    assert len({b["block_id"] for b in all_blocks}) == len(all_blocks) == BLOCK_ROWS
+    assert (
+        len({s["section_id"] for s in all_sections})
+        == len(all_sections)
+        == SECTION_ROWS
+    )
+    texts = [block["text"] for block in all_blocks]
+    assert "We make widgets." in texts
+    assert "false" not in texts and "example" not in texts
+    revenue = next(b for b in blocks[TEN_K_DOCUMENT] if b["text"] == "Revenue\n$1,000")
+    assert (revenue["block_type"], revenue["source_tag"]) == ("table", "table")
+    assert not revenue["inside_table"] and revenue["source_table_xpath"] is None
+    assert not any(b["block_type"] == "table_cell" for b in all_blocks)
+    eight_k_root = f"{EIGHT_K_DOCUMENT}:section:0001"
+    assert not any(b["section_id"] == eight_k_root for b in blocks[EIGHT_K_DOCUMENT])
+
+    rerun = run_sec_filings_silver(tmp_path)
+
+    assert rerun.completed
+    assert rerun.narrative is not None
+    assert (rerun.narrative.documents_skipped, rerun.narrative.documents_inserted) == (
+        3,
+        0,
+    )
+    assert (
+        rerun.narrative.sections_snapshot_before,
+        rerun.narrative.content_blocks_snapshot_before,
+    ) == (narrative.sections_snapshot_after, narrative.content_blocks_snapshot_after)
+    assert (
+        rerun.narrative.sections_snapshot_after,
+        rerun.narrative.content_blocks_snapshot_after,
+    ) == (narrative.sections_snapshot_after, narrative.content_blocks_snapshot_after)
+    assert _table(tmp_path, SECTIONS).scan().to_arrow().num_rows == SECTION_ROWS
+    assert _table(tmp_path, BLOCKS).scan().to_arrow().num_rows == BLOCK_ROWS
+
+
+def test_narrative_resumes_blocks_after_a_failed_blocks_commit(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+
+    def append_sections_only(table: Table, rows, arrow_schema) -> None:
+        if arrow_schema is CONTENT_BLOCKS_ARROW_SCHEMA:
+            raise OSError("disk full")
+        append_rows(table, rows, arrow_schema)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(narrative_stage, "append_rows", append_sections_only)
+        with pytest.raises(OSError, match="disk full"):
+            run_sec_filings_silver(tmp_path)
+    sections_snapshot = _snapshot(tmp_path, SECTIONS)
+    assert _table(tmp_path, SECTIONS).scan().to_arrow().num_rows == SECTION_ROWS
+    assert _snapshot(tmp_path, BLOCKS) is None
+
+    resumed = run_sec_filings_silver(tmp_path)
+
+    assert resumed.completed
+    assert resumed.narrative is not None
+    assert (
+        resumed.narrative.documents_resumed,
+        resumed.narrative.documents_inserted,
+    ) == (
+        3,
+        0,
+    )
+    assert (resumed.narrative.sections_inserted, resumed.narrative.blocks_inserted) == (
+        0,
+        BLOCK_ROWS,
+    )
+    assert _snapshot(tmp_path, SECTIONS) == sections_snapshot
+    assert _table(tmp_path, SECTIONS).scan().to_arrow().num_rows == SECTION_ROWS
+    assert _table(tmp_path, BLOCKS).scan().to_arrow().num_rows == BLOCK_ROWS
+
+
+@pytest.mark.parametrize(
+    "deleted",
+    [
+        (SECTIONS, "document_id", TEN_Q_DOCUMENT),
+        (BLOCKS, "block_id", f"{TEN_K_DOCUMENT}:block:000013"),
+        (SECTIONS, "section_id", f"{TEN_K_DOCUMENT}:section:0008"),
+    ],
+    ids=["blocks-without-sections", "truncated-blocks", "truncated-sections"],
+)
+def test_incomplete_narrative_groups_are_conflicts_before_any_write(
+    tmp_path: Path, write_sec_filing, deleted: tuple[str, str, str]
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    _delete_rows(tmp_path, *deleted)
+    before = (_snapshot(tmp_path, SECTIONS), _snapshot(tmp_path, BLOCKS))
+    _write_new_year_filing(tmp_path, write_sec_filing)
+
+    result = run_sec_filings_silver(tmp_path)
+
+    assert result.filings.inserted == 1
+    assert result.narrative is not None
+    assert result.narrative.status == "rejected"
+    assert result.narrative.documents_conflicted == 1
+    assert result.narrative.documents_inserted == 0
+    assert (_snapshot(tmp_path, SECTIONS), _snapshot(tmp_path, BLOCKS)) == before
+    assert NEW_YEAR_DOCUMENT not in _rows_by_document(tmp_path, SECTIONS)
+    assert NEW_YEAR_DOCUMENT not in _rows_by_document(tmp_path, BLOCKS)
+
+
+def test_changed_parent_checksum_is_a_narrative_conflict(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    with open_silver_catalog(tmp_path) as catalog:
+        documents = catalog.load_table(DOCUMENTS)
+        row = next(
+            row
+            for row in documents.scan().to_arrow().to_pylist()
+            if row["document_id"] == TEN_K_DOCUMENT
+        )
+        documents.delete(EqualTo("document_id", TEN_K_DOCUMENT))
+        changed = DocumentRecord.model_validate({**row, "content_sha256": "0" * 64})
+        append_rows(documents, [changed], DOCUMENTS_ARROW_SCHEMA)
+    before = (_snapshot(tmp_path, SECTIONS), _snapshot(tmp_path, BLOCKS))
+
+    result = run_sec_filings_silver(tmp_path)
+
+    assert result.documents is not None
+    assert result.documents.status == "completed"
+    assert result.narrative is not None
+    assert result.narrative.status == "rejected"
+    assert result.narrative.documents_conflicted == 1
+    assert (_snapshot(tmp_path, SECTIONS), _snapshot(tmp_path, BLOCKS)) == before
+
+
+def test_one_invalid_candidate_blocks_every_new_narrative(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    first = run_sec_filings_silver(tmp_path)
+    assert first.narrative is not None
+    _write_new_year_filing(tmp_path, write_sec_filing)
+    write_sec_filing(
+        tmp_path,
+        cik=OTHER_CIK,
+        form="8-K",
+        accession="0000789019-26-000002",
+        filed="20260210",
+        primary_text='\n<html><body><div style="display:none">x</div></body></html>\n',
+    )
+
+    result = run_sec_filings_silver(tmp_path)
+
+    assert result.filings.inserted == 2
+    assert result.narrative is not None
+    assert result.narrative.status == "rejected"
+    assert (result.narrative.documents_failed, result.narrative.documents_inserted) == (
+        1,
+        0,
+    )
+    assert _snapshot(tmp_path, SECTIONS) == first.narrative.sections_snapshot_after
+    assert _snapshot(tmp_path, BLOCKS) == first.narrative.content_blocks_snapshot_after
+    assert set(_rows_by_document(tmp_path, SECTIONS)) == set(EXPECTED_CODES)
+
+
+def test_document_tables_link_each_table_block_and_reruns_skip(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+
+    first = run_sec_filings_silver(tmp_path)
+
+    summary = first.document_tables
+    assert first.completed
+    assert summary is not None
+    assert (summary.documents_considered, summary.documents_without_tables) == (3, 1)
+    assert (summary.documents_inserted, summary.table_blocks) == (2, TABLE_ROWS)
+    assert (summary.tables_written, summary.cells_written) == (TABLE_ROWS, CELL_ROWS)
+    assert (summary.documents_conflicted, summary.documents_failed) == (0, 0)
+    for identifier, schema in (
+        (TABLES, DOCUMENT_TABLES_ARROW_SCHEMA),
+        (CELLS, DOCUMENT_TABLE_CELLS_ARROW_SCHEMA),
+    ):
+        table = _table(tmp_path, identifier)
+        assert table.location() == str(
+            tmp_path / "silver" / "sec_filings" / identifier.split(".")[1]
+        )
+        assert _partition_columns(table) == [("filing_year", "year", "filing_date")]
+        assert table.scan().to_arrow().schema.equals(schema)
+
+    blocks = _table(tmp_path, BLOCKS).scan().to_arrow().to_pylist()
+    tables = _table(tmp_path, TABLES).scan().to_arrow().to_pylist()
+    cells = _table(tmp_path, CELLS).scan().to_arrow().to_pylist()
+    table_blocks = {b["block_id"]: b for b in blocks if b["block_type"] == "table"}
+    # content_blocks 1 -> 0..1 document_tables: exactly the table blocks have one.
+    assert sorted(t["block_id"] for t in tables) == sorted(table_blocks)
+    for table in tables:
+        block = table_blocks[table["block_id"]]
+        assert table["source_xpath"] == block["source_xpath"]
+        own_cells = sorted(
+            (c for c in cells if c["table_id"] == table["table_id"]),
+            key=lambda c: c["cell_ordinal"],
+        )
+        assert len(own_cells) == table["cell_count"] >= 1
+        assert block["text"] == "\n".join(c["text"] for c in own_cells if c["text"])
+    assert len({c["cell_id"] for c in cells}) == len(cells) == CELL_ROWS
+    assert TEN_Q_DOCUMENT not in {t["document_id"] for t in tables}
+
+    rerun = run_sec_filings_silver(tmp_path)
+
+    assert rerun.completed
+    assert rerun.document_tables is not None
+    assert (
+        rerun.document_tables.documents_skipped,
+        rerun.document_tables.documents_without_tables,
+        rerun.document_tables.documents_inserted,
+    ) == (2, 1, 0)
+    assert (_snapshot(tmp_path, TABLES), _snapshot(tmp_path, CELLS)) == (
+        summary.tables_snapshot_after,
+        summary.cells_snapshot_after,
+    )
+    assert _table(tmp_path, TABLES).scan().to_arrow().num_rows == TABLE_ROWS
+    assert _table(tmp_path, CELLS).scan().to_arrow().num_rows == CELL_ROWS
+
+
+def test_tables_only_state_resumes_cells_without_new_tables(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+
+    def append_tables_only(table: Table, rows, arrow_schema) -> None:
+        if arrow_schema is DOCUMENT_TABLE_CELLS_ARROW_SCHEMA:
+            raise OSError("disk full")
+        append_rows(table, rows, arrow_schema)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(document_tables_stage, "append_rows", append_tables_only)
+        with pytest.raises(OSError, match="disk full"):
+            run_sec_filings_silver(tmp_path)
+    tables_snapshot = _snapshot(tmp_path, TABLES)
+    assert _table(tmp_path, TABLES).scan().to_arrow().num_rows == TABLE_ROWS
+    assert _snapshot(tmp_path, CELLS) is None
+
+    resumed = run_sec_filings_silver(tmp_path)
+
+    assert resumed.completed
+    assert resumed.document_tables is not None
+    assert (
+        resumed.document_tables.documents_resumed,
+        resumed.document_tables.documents_inserted,
+        resumed.document_tables.tables_written,
+        resumed.document_tables.cells_written,
+    ) == (2, 0, 0, CELL_ROWS)
+    assert _snapshot(tmp_path, TABLES) == tables_snapshot
+    assert _table(tmp_path, CELLS).scan().to_arrow().num_rows == CELL_ROWS
+
+
+@pytest.mark.parametrize(
+    "deleted",
+    [
+        (CELLS, "cell_id", f"{TEN_K_DOCUMENT}:block:000003:table:cell:000008"),
+        (TABLES, "document_id", EIGHT_K_DOCUMENT),
+    ],
+    ids=["missing-cell", "cells-without-tables"],
+)
+def test_incomplete_table_groups_are_conflicts_before_any_write(
+    tmp_path: Path, write_sec_filing, deleted: tuple[str, str, str]
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    _delete_rows(tmp_path, *deleted)
+    before = (_snapshot(tmp_path, TABLES), _snapshot(tmp_path, CELLS))
+    _write_new_year_filing(tmp_path, write_sec_filing)
+
+    result = run_sec_filings_silver(tmp_path)
+
+    assert result.narrative is not None
+    assert result.narrative.documents_inserted == 1
+    assert result.document_tables is not None
+    assert result.document_tables.status == "rejected"
+    assert result.document_tables.documents_conflicted == 1
+    assert (_snapshot(tmp_path, TABLES), _snapshot(tmp_path, CELLS)) == before
+    assert NEW_YEAR_DOCUMENT not in _rows_by_document(tmp_path, TABLES)
+
+
+def test_stored_table_source_hash_mismatch_is_a_conflict(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    with open_silver_catalog(tmp_path) as catalog:
+        tables = catalog.load_table(TABLES)
+        row = next(
+            row
+            for row in tables.scan().to_arrow().to_pylist()
+            if row["document_id"] == EIGHT_K_DOCUMENT
+        )
+        tables.delete(EqualTo("table_id", row["table_id"]))
+        changed = DocumentTableRecord.model_validate(
+            {**row, "source_document_sha256": "0" * 64}
+        )
+        append_rows(tables, [changed], DOCUMENT_TABLES_ARROW_SCHEMA)
+    before = (_snapshot(tmp_path, TABLES), _snapshot(tmp_path, CELLS))
+
+    result = run_sec_filings_silver(tmp_path)
+
+    assert result.document_tables is not None
+    assert result.document_tables.status == "rejected"
+    assert result.document_tables.documents_conflicted == 1
+    assert (_snapshot(tmp_path, TABLES), _snapshot(tmp_path, CELLS)) == before
+
+
+def test_persisted_table_cell_blocks_stop_the_pipeline_without_writes(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    with open_silver_catalog(tmp_path) as catalog:
+        blocks = catalog.load_table(BLOCKS)
+        row = blocks.scan().to_arrow().to_pylist()[0]
+        # A row in the retired one-block-per-cell layout, written as raw Arrow
+        # because the current contract no longer allows that block type.
+        legacy = {**row, "block_id": f"{row['block_id']}x", "block_type": "table_cell"}
+        blocks.append(
+            pa.Table.from_pylist([legacy], schema=CONTENT_BLOCKS_ARROW_SCHEMA)
+        )
+    before = {
+        name: _snapshot(tmp_path, name) for name in (SECTIONS, BLOCKS, TABLES, CELLS)
+    }
+    _write_new_year_filing(tmp_path, write_sec_filing)
+
+    result = run_sec_filings_silver(tmp_path)
+
+    assert not result.completed
+    assert result.narrative is not None
+    assert result.narrative.status == "rejected"
+    assert result.narrative.legacy_table_cell_blocks == 1
+    assert result.narrative.documents_inserted == 0
+    assert result.document_tables is None
+    assert {name: _snapshot(tmp_path, name) for name in before} == before

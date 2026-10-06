@@ -17,6 +17,7 @@ dependencies = [
     "pyarrow>=25.0.1",
     "duckdb>=1.5.6",
     "sqlalchemy>=2.1.3",
+    "lxml>=6.0",
 ]
 
 [tool.pytest]
@@ -94,8 +95,8 @@ max-returns = 6
 strict = true
 
 [[tool.mypy.overrides]]
-# pyarrow ships no type information (no py.typed marker or stubs).
-module = ["pyarrow", "pyarrow.*"]
+# pyarrow and lxml ship no type information (no py.typed marker or stubs).
+module = ["pyarrow", "pyarrow.*", "lxml", "lxml.*"]
 ignore_missing_imports = true
 
 [tool.vulture]

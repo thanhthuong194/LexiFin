@@ -131,6 +131,18 @@ def current_snapshot_id(table: Table) -> int | None:
     return snapshot.snapshot_id if snapshot is not None else None
 
 
+def group_rows_by(table: Table, column: str) -> dict[str, list[dict[str, Any]]]:
+    """Return the current snapshot's rows as plain dicts grouped by `column`.
+
+    Rows are not validated here, so callers can judge invalid stored rows.
+    """
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in table.scan().to_arrow().to_pylist():
+        groups.setdefault(row[column], []).append(row)
+    return groups
+
+
 def append_rows(
     table: Table, rows: Sequence[BaseModel], arrow_schema: pa.Schema
 ) -> None:

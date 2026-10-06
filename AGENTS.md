@@ -5,15 +5,15 @@ Hiện chỉ có SEC 10-K/10-Q/8-K của top-N công ty trong quỹ IVV (S&P 500
 ## Commands
 
 - Cài: `uv sync --locked` (Python 3.13; `vnstock`/`vnai` lấy từ index riêng `vnstocks.com`).
-- Test toàn bộ: `uv run pytest` (123 test, ~6 s, không gọi mạng; coverage bật sẵn trong `addopts`).
+- Test toàn bộ: `uv run pytest` (175 test, ~25 s, không gọi mạng; coverage bật sẵn trong `addopts`).
 - Một test: `uv run pytest tests/unit/utils/test_timer.py::<tên_test> --no-cov`.
 - Chạy ingest SEC (Bronze):
   `uv run python scripts/ingest_sec_edgar.py --data-dir <thư_mục_tạm> --company-limit 1 --lookback-years 1`
   Cần `SEC_COMPANY_NAME`, `SEC_EMAIL` trong `.env` (mẫu: `.env.example`). Bỏ `--data-dir` thì ghi vào `./data`.
-- Dựng Silver (Iceberg) từ toàn bộ SEC Bronze, không gọi mạng, theo thứ tự stage `sec_filings.filings` → `sec_filings.documents` (mỗi `<DOCUMENT>` block của `full-submission.txt` là một row) → `sec_filings.filing_entities` (mỗi entity-role block như `FILER:` trong SEC header là một row). Hai stage sau đọc parent từ bảng filings, không quét lại Bronze; `bronze_to_silver.py` chỉ điều phối, mỗi stage nằm trong `pipelines/sec_filings/<table>.py`:
+- Dựng Silver (Iceberg) từ toàn bộ SEC Bronze, không gọi mạng, theo thứ tự stage `sec_filings.filings` → `sec_filings.documents` (mỗi `<DOCUMENT>` block của `full-submission.txt` là một row) → `sec_filings.filing_entities` (mỗi entity-role block như `FILER:` trong SEC header là một row) → narrative (`sec_filings.sections` + `sec_filings.content_blocks`, dựng cùng lúc từ một lần parse primary HTML của bảng documents) → tables (`sec_filings.document_tables` + `sec_filings.document_table_cells`, một bảng cho mỗi block `table`). Các stage sau đọc parent từ bảng Silver cha, không quét lại Bronze; `bronze_to_silver.py` chỉ điều phối, mỗi stage nằm trong `pipelines/sec_filings/<stage>.py`:
   `uv run python scripts/sec_filings/build_silver.py --data-dir <data_dir>`
-  Lần đầu ~16 s cho 343 filing / 12.809 document; chạy lại ~4 s vì filing và document đã có đều được skip.
-  Exit 1 khi một stage bị reject (filing lỗi, checksum conflict, document/entity group thiếu hoặc khác); stage đó không ghi gì và các stage sau không chạy.
+  Dựng từ đầu cho 343 filing ~2 phút 40 s, RSS tối đa ~6 GB (narrative 33 s → 2.803 section, 83.301 block; tables 109 s → 10.184 bảng, 878.380 cell, vì mỗi stage validate cả batch trong bộ nhớ trước lần ghi đầu). Chạy lại ~35 s, RSS ~4,3 GB: mọi group đã có đều được skip, nhưng narrative và tables vẫn đọc lại và kiểm tra hash của group đã lưu.
+  Exit 1 khi một stage bị reject (filing lỗi, checksum conflict, document/entity/narrative group thiếu hoặc khác); stage đó không ghi gì và các stage sau không chạy. Narrative ghi sections trước blocks, tables ghi document_tables trước cells: nếu commit thứ hai lỗi, lần chạy sau resume khi phần đã lưu khớp chính xác.
 
 ## Domain terms
 
@@ -27,7 +27,11 @@ Tên dễ hiểu nhầm:
 - `connectors/sec_filings/` chứa cả `ishares.py`, dù iShares không phải nguồn SEC.
 - Marker `integration` không có nghĩa là test gọi mạng; các test này dùng fetcher/downloader giả. Test trong `tests/unit/utils/` không gắn marker, nên chạy `-m unit` sẽ bỏ sót chúng.
 - File rỗng, không phải entry point: `main.py`, `Makefile`, `Dockerfile`, `src/data_pipeline/runner.py`, `connectors/registry.py`, `pipelines/{bronze,silver,gold}.py`, `contracts/{silver,gold}.py`, `quality/{silver,gold}.py`.
-- `bronze-silver.md` gọi các bảng là "Delta table", nhưng dependency lại là `pyiceberg` + `duckdb`. Silver mới có các bảng Iceberg `sec_filings.filings`, `sec_filings.documents` và `sec_filings.filing_entities` (không partition); Gold chưa có code.
+- `bronze-silver.md` gọi các bảng là "Delta table", nhưng dependency lại là `pyiceberg` + `duckdb`. Silver mới có các bảng Iceberg `sec_filings.filings`, `sec_filings.documents`, `sec_filings.filing_entities` (không partition), `sec_filings.sections`, `sec_filings.content_blocks`, `sec_filings.document_tables` và `sec_filings.document_table_cells`; Gold chưa có code.
+- Mỗi `<table>` có ít nhất một cell nhìn thấy được là đúng một content block `block_type="table"` (`source_tag="table"`, text = các cell khác rỗng nối bằng `\n`, có thể rỗng); cell không còn là content block. Bảng lồng là block riêng. Heading nằm trong bảng thì cả block `table` là heading; `title` của section là text đã normalize (cell nối bằng khoảng trắng, không có `\n`). Nếu `content_blocks` còn row `table_cell` của layout cũ, narrative log `narrative_table_semantics_incompatible`, reject (exit 1) và không ghi gì cho tới khi rebuild có kiểm soát `sections` + `content_blocks`. Rebuild như vậy đã được làm cho `data/` ngày 2026-10-06 (drop/purge hai bảng qua catalog PyIceberg, rồi chạy lại build).
+- Bảng SEC trong Bronze không dùng `<th>`, `<caption>` hay `thead`/`tfoot` (mọi cell là `td`, row group `body`) và ~69% cell rỗng (cell đệm); `colspan > 1` rất phổ biến.
+- `content_blocks.source_xpath` là `getpath()` của DOM đã parse ở HTML mode, nên đoạn Inline XBRL giữ nguyên tên tag có tiền tố (`/html/body/ix:nonnumeric[1]/p[1]`, ~44% block). XPath chuẩn coi `ix:` là namespace prefix: muốn evaluate thì viết đoạn đó thành `*[name()='ix:nonnumeric'][1]`.
+- Narrative không tự phát hiện thay đổi logic parser: group đã có được skip theo source hash. Đổi parser thì phải rebuild có kiểm soát hai bảng narrative.
 - `public_document_count` (header `PUBLIC DOCUMENT COUNT`) không đáng tin: filing nộp từ 2024-01-30 đến 2026-03-13 có header lớn hơn số `<DOCUMENT>` block thật 1–2 (149/343 filing). Documents stage chỉ log `submission_document_count_mismatch`, không fail.
 
 ## Do not touch
