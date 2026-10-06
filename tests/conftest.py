@@ -58,6 +58,9 @@ SEC_FILER_TEMPLATE = """FILER:
 # Inline XBRL primary documents as EDGAR stores them: wrapped in <XBRL> with an
 # XML prolog, hidden ix:header facts, a linked table of contents, headings in
 # divs or table cells, visible ix facts, a narrative ITEM mention and a table.
+# Links wrap existing text, so they leave blocks and cells unchanged: the 10-K
+# links its own exhibit by SEC URL and an external site, the 8-K its exhibit,
+# a missing file and another filing's exhibit of the same name.
 _INLINE_XBRL = (
     "\n<XBRL>\n<?xml version='1.0' encoding='ASCII'?>\n<html><head>"
     "<title>example</title></head><body>"
@@ -67,7 +70,9 @@ _INLINE_XBRL = (
 )
 PRIMARY_HTML = {
     "10-K": _INLINE_XBRL.format(
-        body="<div>Example Corp Annual Report</div><div>TABLE OF CONTENTS</div>"
+        body='<div><a href="https://www.sec.gov/Archives/edgar/data/320193/'
+        '000032019324000123/ex31.htm">Example Corp</a> Annual Report</div>'
+        "<div>TABLE OF CONTENTS</div>"
         '<table><tr><td><a href="#p1">Part I</a></td></tr>'
         '<tr><td><a href="#i1">Item 1.</a></td><td>Business</td></tr>'
         '<tr><td><a href="#i1a">Item 1A.</a></td><td>Risk Factors</td></tr>'
@@ -75,13 +80,14 @@ PRIMARY_HTML = {
         '<tr><td><a href="#i7">Item 7.</a></td><td>MD&amp;A</td></tr></table>'
         '<div id="p1">PART I</div>'
         '<div id="i1"><span style="font-weight:700">Item 1. Business</span></div>'
-        '<div>We make <ix:nonNumeric name="ex:Product">widgets</ix:nonNumeric>.</div>'
+        '<div>We make <a href="https://www.example.com/products">'
+        '<ix:nonNumeric name="ex:Product">widgets</ix:nonNumeric></a>.</div>'
         '<div id="i1a">Item 1A. Risk Factors</div>'
-        "<div>As discussed in Item 7, demand may fall.</div>"
+        '<div>As discussed in <a href="#i7">Item 7</a>, demand may fall.</div>'
         '<div id="p2">PART II</div>'
         '<div id="i7">Item 7. Management&#8217;s Discussion and Analysis</div>'
         "<table><tr><td>Revenue</td><td>$1,000</td></tr></table>"
-        "<div>SIGNATURES</div><div>/s/ Jane Doe</div>"
+        '<div><a name="signatures"></a>SIGNATURES</div><div>/s/ Jane Doe</div>'
     ),
     "10-Q": _INLINE_XBRL.format(
         body="<div>PART I &#8212; FINANCIAL INFORMATION</div>"
@@ -95,10 +101,12 @@ PRIMARY_HTML = {
     ),
     "8-K": _INLINE_XBRL.format(
         body="<div>Item 2.02 Results of Operations and Financial Condition.</div>"
-        "<div>Example Corp reported results.</div>"
+        '<div>Example Corp reported <a href="https://www.sec.gov/Archives/edgar/'
+        'data/789019/000078901924000001/ex31.htm">results</a>.</div>'
         "<div>Item 9.01 Financial Statements and Exhibits.</div>"
         "<div>EXHIBIT INDEX</div>"
-        "<table><tr><td>99.1</td><td>Press release</td></tr></table>"
+        '<table><tr><td><a href="ex31.htm">99.1</a></td>'
+        '<td><a href="press-release.htm">Press release</a></td></tr></table>'
         "<div>SIGNATURE</div><div>/s/ Jane Doe</div>"
     ),
 }

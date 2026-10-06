@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from src.data_pipeline.pipelines.sec_filings.document_links import (
+    DocumentLinksStageSummary,
+    run_document_links_stage,
+)
 from src.data_pipeline.pipelines.sec_filings.document_tables import (
     DocumentTablesStageSummary,
     run_document_tables_stage,
@@ -44,6 +48,7 @@ class SilverRunResult:
     filing_entities: FilingEntitiesStageSummary | None
     narrative: NarrativeStageSummary | None
     document_tables: DocumentTablesStageSummary | None
+    document_links: DocumentLinksStageSummary | None
 
     @property
     def completed(self) -> bool:
@@ -57,6 +62,7 @@ class SilverRunResult:
                 self.filing_entities,
                 self.narrative,
                 self.document_tables,
+                self.document_links,
             )
         )
 
@@ -69,14 +75,17 @@ def run_sec_filings_silver(data_dir: Path) -> SilverRunResult:
     committed filings, then `sec_filings.sections` and
     `sec_filings.content_blocks` from the committed primary HTML documents,
     then `sec_filings.document_tables` and `sec_filings.document_table_cells`
-    from the committed `table` blocks. Each stage validates its whole batch before one append,
-    so a rejected stage writes nothing, later stages do not run, and a rerun
-    completes whatever is missing. Unexpected errors are logged and re-raised.
+    from the committed `table` blocks, and last `sec_filings.document_links`
+    from every committed HTML document. Each stage validates its whole batch
+    before its appends, so a rejected stage writes nothing, later stages do
+    not run, and a rerun completes whatever is missing. Unexpected errors are
+    logged and re-raised.
     """
 
     data_dir = data_dir.expanduser().resolve()
     processed_at = datetime.now(UTC)
     documents = filing_entities = narrative = document_tables = None
+    document_links = None
     logger.info("sec_silver_started", data_dir=str(data_dir))
     try:
         with timed_operation("pipeline.total"):
@@ -89,6 +98,8 @@ def run_sec_filings_silver(data_dir: Path) -> SilverRunResult:
                 narrative = run_narrative_stage(data_dir, processed_at)
             if narrative is not None and narrative.status == "completed":
                 document_tables = run_document_tables_stage(data_dir, processed_at)
+            if document_tables is not None and document_tables.status == "completed":
+                document_links = run_document_links_stage(data_dir, processed_at)
     except Exception as error:
         logger.error(
             "sec_silver_failed",
@@ -103,6 +114,7 @@ def run_sec_filings_silver(data_dir: Path) -> SilverRunResult:
         filing_entities=filing_entities,
         narrative=narrative,
         document_tables=document_tables,
+        document_links=document_links,
     )
     statuses = {
         "filings_status": filings.status,
@@ -113,6 +125,9 @@ def run_sec_filings_silver(data_dir: Path) -> SilverRunResult:
         "narrative_status": None if narrative is None else narrative.status,
         "document_tables_status": (
             None if document_tables is None else document_tables.status
+        ),
+        "document_links_status": (
+            None if document_links is None else document_links.status
         ),
     }
     if result.completed:

@@ -61,6 +61,15 @@ def read_document_groups(table: Table) -> dict[str, list[StoredDocument]]:
     return dict(groups)
 
 
+def read_documents(table: Table) -> list[DocumentRecord]:
+    """Return every document of the current snapshot, validated."""
+
+    return [
+        DocumentRecord.model_validate(row)
+        for row in table.scan().to_arrow().to_pylist()
+    ]
+
+
 def read_primary_html_documents(table: Table) -> list[DocumentRecord]:
     """Return the primary HTML documents of the current snapshot, validated."""
 

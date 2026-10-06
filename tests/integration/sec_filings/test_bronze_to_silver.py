@@ -16,6 +16,10 @@ from scripts.sec_filings.build_silver import REPOSITORY_ROOT, parse_args
 from src.data_pipeline.contracts.sec_filings.content_blocks import (
     CONTENT_BLOCKS_ARROW_SCHEMA,
 )
+from src.data_pipeline.contracts.sec_filings.document_links import (
+    DOCUMENT_LINKS_ARROW_SCHEMA,
+    DocumentLinkRecord,
+)
 from src.data_pipeline.contracts.sec_filings.document_table_cells import (
     DOCUMENT_TABLE_CELLS_ARROW_SCHEMA,
 )
@@ -32,7 +36,10 @@ from src.data_pipeline.contracts.sec_filings.filing_entities import (
 )
 from src.data_pipeline.contracts.sec_filings.filings import FILINGS_ARROW_SCHEMA
 from src.data_pipeline.contracts.sec_filings.sections import SECTIONS_ARROW_SCHEMA
-from src.data_pipeline.pipelines.sec_filings import document_table_extraction
+from src.data_pipeline.pipelines.sec_filings import (
+    document_link_extraction,
+    document_table_extraction,
+)
 from src.data_pipeline.pipelines.sec_filings import (
     document_tables as document_tables_stage,
 )
@@ -75,6 +82,14 @@ CELLS = "sec_filings.document_table_cells"
 # The 10-K holds a linked TOC table (8 cells) and a revenue table (2 cells),
 # the 8-K an exhibit table (2 cells); the 10-Q has no table.
 TABLE_ROWS, CELL_ROWS = 3, 12
+LINKS = "sec_filings.document_links"
+# Each filing has three HTML documents (primary, exhibit ex31.htm, R page) of
+# which only the 10-K and 8-K primaries hold links: the 10-K five TOC fragments,
+# an in-text fragment, its exhibit by SEC URL and an external site; the 8-K its
+# exhibit, a missing file and another filing's ex31.htm by SEC URL.
+HTML_DOCUMENTS, LINK_ROWS = 9, 11
+TEN_K_EXHIBIT = "sec:0000320193-24-000123:document:0002"
+EIGHT_K_EXHIBIT = "sec:0000789019-25-000010:document:0002"
 # Every fake submission from the write_sec_filing fixture holds six documents.
 DOCUMENTS_PER_FILING = 6
 CIK = "0000320193"
@@ -452,6 +467,16 @@ def test_new_year_and_backfill_append_into_their_year_partitions(
         new_year.document_tables.tables_written,
         new_year.document_tables.cells_written,
     ) == (1, 2, 1, 1, 2)
+    assert new_year.document_links is not None
+    # Documents without links are parsed again: the first run's seven plus the
+    # new filing's exhibit and R page.
+    assert (
+        new_year.document_links.documents_inserted,
+        new_year.document_links.documents_skipped,
+        new_year.document_links.documents_without_links,
+        new_year.document_links.links_inserted,
+    ) == (1, 2, 7 + 2, 3)
+    assert _rows_per_year(_table(tmp_path, LINKS)) == {2024: 8, 2025: 3, 2026: 3}
     sections = _rows_by_document(tmp_path, SECTIONS)
     assert len(sections) == 4
     assert len(sections[NEW_YEAR_DOCUMENT]) == 5
@@ -623,7 +648,11 @@ def test_missing_tail_entity_is_a_conflict_without_partial_append(
     assert result.filing_entities.status == "rejected"
     assert result.filing_entities.filings_conflicted == 1
     assert result.filing_entities.entities_inserted == 0
-    assert (result.narrative, result.document_tables) == (None, None)
+    assert (result.narrative, result.document_tables, result.document_links) == (
+        None,
+        None,
+        None,
+    )
     table = _table(tmp_path, ENTITIES)
     assert table.current_snapshot().snapshot_id == damaged_snapshot
     assert table.scan().to_arrow().num_rows == 3
@@ -1063,3 +1092,153 @@ def test_persisted_table_cell_blocks_stop_the_pipeline_without_writes(
     assert result.narrative.documents_inserted == 0
     assert result.document_tables is None
     assert {name: _snapshot(tmp_path, name) for name in before} == before
+
+
+def test_document_links_reference_source_and_target_documents_and_reruns_skip(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+
+    first = run_sec_filings_silver(tmp_path)
+
+    summary = first.document_links
+    assert first.completed
+    assert summary is not None
+    assert (
+        summary.documents_considered,
+        summary.documents_inserted,
+        summary.documents_without_links,
+        summary.links_inserted,
+    ) == (HTML_DOCUMENTS, 2, 7, LINK_ROWS)
+    assert (
+        summary.links_resolved,
+        summary.links_unresolved,
+        summary.links_ambiguous,
+        summary.links_not_applicable,
+        summary.links_external,
+    ) == (8, 2, 0, 1, 1)
+    table = _table(tmp_path, LINKS)
+    assert table.location() == str(
+        tmp_path / "silver" / "sec_filings" / "document_links"
+    )
+    assert _partition_columns(table) == [("filing_year", "year", "filing_date")]
+    arrow = table.scan().to_arrow()
+    assert arrow.schema.equals(DOCUMENT_LINKS_ARROW_SCHEMA)
+    assert "target_exhibit_id" not in arrow.schema.names
+    links = arrow.to_pylist()
+    documents = {
+        row["document_id"]: row
+        for row in _table(tmp_path, DOCUMENTS).scan().to_arrow().to_pylist()
+    }
+    assert len({link["link_id"] for link in links}) == len(links) == LINK_ROWS
+    # Both references point at documents: every link has one HTML source, and a
+    # resolved target is a document of the same filing.
+    for link in links:
+        source = documents[link["source_document_id"]]
+        assert source["content_kind"] == "html"
+        if link["target_document_id"] is not None:
+            target = documents[link["target_document_id"]]
+            assert target["filing_id"] == source["filing_id"] == link["filing_id"]
+    assert Counter(link["source_document_id"] for link in links) == {
+        TEN_K_DOCUMENT: 8,
+        EIGHT_K_DOCUMENT: 3,
+    }
+    assert Counter(link["target_document_id"] for link in links) == {
+        TEN_K_DOCUMENT: 6,
+        TEN_K_EXHIBIT: 1,
+        EIGHT_K_EXHIBIT: 1,
+        None: 3,
+    }
+    by_href = {link["href"]: link for link in links}
+    expected = {
+        "#i1a": ("fragment", "resolved", TEN_K_DOCUMENT, "Item 1A."),
+        "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/ex31.htm": (
+            "sec_url", "resolved", TEN_K_EXHIBIT, "Example Corp",
+        ),
+        "https://www.example.com/products": (
+            "external_url", "not_applicable", None, "widgets",
+        ),
+        "ex31.htm": ("relative_document", "resolved", EIGHT_K_EXHIBIT, "99.1"),
+        "press-release.htm": (
+            "relative_document", "unresolved", None, "Press release",
+        ),
+        "https://www.sec.gov/Archives/edgar/data/789019/000078901924000001/ex31.htm": (
+            "sec_url", "unresolved", None, "results",
+        ),
+    }  # fmt: skip
+    assert {
+        href: (
+            by_href[href]["link_kind"],
+            by_href[href]["resolution_status"],
+            by_href[href]["target_document_id"],
+            by_href[href]["link_text"],
+        )
+        for href in expected
+    } == expected
+    assert {documents[TEN_K_EXHIBIT]["role"], documents[EIGHT_K_EXHIBIT]["role"]} == {
+        "exhibit"
+    }
+
+    read: list[str] = []
+    read_content = document_link_extraction.read_document_content
+
+    def recording_read(parent: DocumentRecord, data_dir: Path) -> bytes:
+        read.append(parent.document_id)
+        return read_content(parent, data_dir)
+
+    monkeypatch.setattr(
+        document_link_extraction, "read_document_content", recording_read
+    )
+    rerun = run_sec_filings_silver(tmp_path)
+
+    assert rerun.document_links is not None
+    assert (
+        rerun.document_links.documents_skipped,
+        rerun.document_links.documents_without_links,
+        rerun.document_links.documents_inserted,
+    ) == (2, 7, 0)
+    # Complete groups are not re-read; documents without links are parsed again.
+    assert len(read) == 7
+    assert {TEN_K_DOCUMENT, EIGHT_K_DOCUMENT}.isdisjoint(read)
+    assert _snapshot(tmp_path, LINKS) == summary.snapshot_after
+    assert _table(tmp_path, LINKS).scan().to_arrow().num_rows == LINK_ROWS
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [None, {"source_document_sha256": "0" * 64}],
+    ids=["missing-link", "changed-source-hash"],
+)
+def test_incomplete_or_changed_link_groups_are_conflicts_before_any_write(
+    tmp_path: Path, write_sec_filing, changes: dict[str, str] | None
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    with open_silver_catalog(tmp_path) as catalog:
+        links = catalog.load_table(LINKS)
+        row = next(
+            row
+            for row in links.scan().to_arrow().to_pylist()
+            if row["source_document_id"] == EIGHT_K_DOCUMENT
+        )
+        links.delete(EqualTo("link_id", row["link_id"]))
+        if changes is not None:
+            changed = DocumentLinkRecord.model_validate({**row, **changes})
+            append_rows(links, [changed], DOCUMENT_LINKS_ARROW_SCHEMA)
+    before = _snapshot(tmp_path, LINKS)
+    _write_new_year_filing(tmp_path, write_sec_filing)
+
+    result = run_sec_filings_silver(tmp_path)
+
+    assert result.document_tables is not None
+    assert result.document_tables.documents_inserted == 1
+    assert result.document_links is not None
+    assert result.document_links.status == "rejected"
+    assert result.document_links.documents_conflicted == 1
+    assert result.document_links.links_inserted == 0
+    assert _snapshot(tmp_path, LINKS) == before
+    sources = {
+        row["source_document_id"]
+        for row in _table(tmp_path, LINKS).scan().to_arrow().to_pylist()
+    }
+    assert NEW_YEAR_DOCUMENT not in sources
