@@ -5,7 +5,7 @@ Hiện chỉ có SEC 10-K/10-Q/8-K của top-N công ty trong quỹ IVV (S&P 500
 ## Commands
 
 - Cài: `uv sync --locked` (Python 3.13; `vnstock`/`vnai` lấy từ index riêng `vnstocks.com`).
-- Test toàn bộ: `uv run pytest` (212 test, ~30 s, không gọi mạng; coverage bật sẵn trong `addopts`).
+- Test toàn bộ: `uv run pytest` (233 test, ~45 s, không gọi mạng; coverage bật sẵn trong `addopts`).
 - Một test: `uv run pytest tests/unit/utils/test_timer.py::<tên_test> --no-cov`.
 - Chạy ingest SEC (Bronze):
   `uv run python scripts/ingest_sec_edgar.py --data-dir <thư_mục_tạm> --company-limit 1 --lookback-years 1`
@@ -14,6 +14,9 @@ Hiện chỉ có SEC 10-K/10-Q/8-K của top-N công ty trong quỹ IVV (S&P 500
   `uv run python scripts/sec_filings/build_silver.py --data-dir <data_dir>`
   Dựng từ đầu cho 343 filing ~3 phút 15 s (ước tính: ~2 phút 40 s đo trước khi có links, cộng 36 s của links), RSS tối đa ~6 GB (narrative 33 s → 2.803 section, 83.301 block; tables 109 s → 10.184 bảng, 878.380 cell; links 36 s → 8.881 document HTML, 365.221 link; vì mỗi stage validate cả batch trong bộ nhớ trước lần ghi đầu). Chạy lại ~43 s, RSS ~4,3 GB: mọi group đã có đều được skip, nhưng narrative, tables và links vẫn đọc lại và kiểm tra group đã lưu; riêng links parse lại 914 document không có link (không có row để đánh dấu đã xử lý).
   Exit 1 khi một stage bị reject (filing lỗi, checksum conflict, document/entity/narrative/table/link group thiếu hoặc khác); stage đó không ghi gì và các stage sau không chạy. Narrative ghi sections trước blocks, tables ghi document_tables trước cells: nếu commit thứ hai lỗi, lần chạy sau resume khi phần đã lưu khớp chính xác.
+- Audit Silver chỉ đọc (không ghi, không tạo bảng, không đổi snapshot), không nằm trong build:
+  `uv run python scripts/sec_filings/validate_silver.py --data-dir <data_dir> [--verify-source-hashes]`
+  Kiểm schema/partition/location theo contract, khoá chính, FK + lineage, contract từng row, độ đầy đủ của từng group (dùng lại các `*_problem` của stage) và semantics bảng; `--verify-source-hashes` hash lại Bronze (submission, primary document, span của document và entity). Exit 0 = pass (có thể có warning), 1 = có error, 2 = không chạy được (thiếu catalog...). Trên `data/`: ~27 s, ~34 s khi verify hash, RSS ~2,2 GB; warning còn lại là 149 `public_document_count` và link unresolved.
 
 ## Domain terms
 

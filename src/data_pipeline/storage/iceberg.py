@@ -16,6 +16,7 @@ from pyiceberg.schema import Schema
 from pyiceberg.table import Table
 from pyiceberg.table.name_mapping import MappedField, NameMapping
 from pyiceberg.transforms import Transform
+from pyiceberg.types import NestedField
 
 SILVER_CATALOG_NAME = "lexifin_silver"
 # Iceberg reserves partition field IDs from 1000 upwards.
@@ -31,6 +32,12 @@ class PartitionColumn:
     name: str
 
 
+def silver_catalog_paths(data_dir: Path) -> tuple[Path, Path]:
+    """Return the Silver catalog database and default warehouse under `data_dir`."""
+
+    return data_dir / "_catalog" / "silver.db", data_dir / "silver"
+
+
 def open_silver_catalog(data_dir: Path) -> SqlCatalog:
     """Open (creating if needed) the local SQLite catalog of the Silver layer.
 
@@ -39,8 +46,7 @@ def open_silver_catalog(data_dir: Path) -> SqlCatalog:
     its database connections are closed; tables need it open to commit.
     """
 
-    database_path = data_dir / "_catalog" / "silver.db"
-    warehouse_path = data_dir / "silver"
+    database_path, warehouse_path = silver_catalog_paths(data_dir)
     database_path.parent.mkdir(parents=True, exist_ok=True)
     warehouse_path.mkdir(parents=True, exist_ok=True)
     return SqlCatalog(
@@ -115,13 +121,50 @@ def create_or_load_table(
         )
         return table, True
 
-    if table.schema() != schema:
-        raise ValueError(f"Iceberg table {identifier} schema differs from contract")
-    if table.spec().fields != spec.fields:
-        raise ValueError(
-            f"Iceberg table {identifier} partition spec differs: {table.spec()}"
-        )
+    problem = table_definition_problem(table, arrow_schema, partition_by)
+    if problem is not None:
+        raise ValueError(f"Iceberg table {identifier} {problem}")
     return table, False
+
+
+def _describe_field(field: NestedField) -> str:
+    nullability = "required" if field.required else "optional"
+    return f"{field.field_id}:{field.name} {field.field_type} {nullability}"
+
+
+def table_definition_problem(
+    table: Table, arrow_schema: pa.Schema, partition_by: Sequence[PartitionColumn]
+) -> str | None:
+    """Describe how a table's schema or partition spec differs from its contract.
+
+    The schema must equal the contract's field for field (ID in column order,
+    name, type, nullability); the partition fields must be exactly the
+    contract's. Returns None when both match.
+    """
+
+    schema = _iceberg_schema(arrow_schema)
+    if table.schema() != schema:
+        expected = [_describe_field(field) for field in schema.fields]
+        actual = [_describe_field(field) for field in table.schema().fields]
+        if expected == actual:
+            return "schema differs from contract in its identifier fields"
+        position = next(
+            (
+                i
+                for i, pair in enumerate(zip(expected, actual, strict=False))
+                if pair[0] != pair[1]
+            ),
+            min(len(expected), len(actual)),
+        )
+        return (
+            f"schema differs from contract at column {position + 1}: expected "
+            f"{expected[position] if position < len(expected) else 'no column'}, "
+            f"found {actual[position] if position < len(actual) else 'no column'}"
+        )
+    spec = _partition_spec(schema, partition_by)
+    if table.spec().fields != spec.fields:
+        return f"partition spec differs: expected {spec}, found {table.spec()}"
+    return None
 
 
 def current_snapshot_id(table: Table) -> int | None:

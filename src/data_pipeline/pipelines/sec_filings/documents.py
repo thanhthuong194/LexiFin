@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Literal, Protocol
+from typing import Literal
 
 from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
@@ -14,9 +14,9 @@ from pyiceberg.table import Table
 from src.data_pipeline.contracts.sec_filings.documents import (
     DOCUMENTS_ARROW_SCHEMA,
     DocumentRecord,
-    document_id_for,
 )
 from src.data_pipeline.contracts.sec_filings.filings import FilingRecord
+from src.data_pipeline.quality.sec_filings.documents import documents_problem
 from src.data_pipeline.storage.bronze import resolve_relative_path, sha256_bytes
 from src.data_pipeline.storage.iceberg import (
     append_rows,
@@ -71,43 +71,6 @@ class DocumentsStageSummary:
     snapshot_after: int | None = None
 
 
-class _GroupMember(Protocol):
-    """Document fields shared by new DocumentRecords and StoredDocuments."""
-
-    @property
-    def document_id(self) -> str: ...
-
-    @property
-    def document_ordinal(self) -> int: ...
-
-    @property
-    def role(self) -> str: ...
-
-    @property
-    def source_submission_sha256(self) -> str: ...
-
-
-def _group_problem(parent: FilingRecord, group: Sequence[_GroupMember]) -> str | None:
-    """Return why a filing's documents are not one complete inventory, or None."""
-
-    ordinals = sorted(member.document_ordinal for member in group)
-    if ordinals != list(range(1, len(group) + 1)):
-        return "document ordinals are not exactly 1..N"
-    if any(
-        member.document_id != document_id_for(parent.filing_id, member.document_ordinal)
-        for member in group
-    ):
-        return "document_id does not match filing_id and ordinal"
-    if {member.source_submission_sha256 for member in group} != {
-        parent.full_submission_sha256
-    }:
-        return "source submission SHA-256 differs from sec_filings.filings"
-    primaries = sum(member.role == "primary_document" for member in group)
-    if primaries != 1:
-        return f"expected one primary_document, found {primaries}"
-    return None
-
-
 def _pending_parents(
     parents: Sequence[FilingRecord],
     stored: Mapping[str, Sequence[StoredDocument]],
@@ -129,7 +92,7 @@ def _pending_parents(
         if group is None:
             pending.append(parent)
             continue
-        problem = _group_problem(parent, group)
+        problem = documents_problem(parent, group)
         if problem is None:
             summary.filings_skipped += 1
             summary.documents_skipped += len(group)
@@ -211,7 +174,7 @@ def _validate_new_groups(
     for record in records:
         groups[record.filing_id].append(record)
     for filing_id, group in groups.items():
-        problem = _group_problem(parents[filing_id], group)
+        problem = documents_problem(parents[filing_id], group)
         if problem is not None:
             summary.documents_failed += 1
             logger.error(
@@ -230,7 +193,7 @@ def _verify_stored_groups(table: Table, parents: Sequence[FilingRecord]) -> None
         parent = parents_by_id.get(filing_id)
         if parent is None:
             raise ValueError(f"Documents of {filing_id} have no parent filing")
-        problem = _group_problem(parent, group)
+        problem = documents_problem(parent, group)
         if problem is not None:
             raise ValueError(f"Documents of {filing_id} after commit: {problem}")
 
