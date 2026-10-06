@@ -191,6 +191,18 @@ def test_nested_table_is_a_separate_table_with_its_own_cells() -> None:
     assert "parent_table_id" not in DocumentTableRecord.model_fields
 
 
+def test_text_of_a_nested_table_without_cells_stays_in_its_cell() -> None:
+    body = "<table><tr><td>a<table><div>note</div></table></td><td>b</td></tr></table>"
+
+    extracted = extract_blocks(_root(body))
+
+    assert [(b.block_type, b.text) for b in extracted.blocks] == [
+        ("table", "a note\nb")
+    ]
+    assert extracted.empty_tables == 1
+    assert [c.text for c in _layout(body).cells] == ["a note", "b"]
+
+
 def test_row_groups_follow_the_row_container() -> None:
     layout = _layout(
         "<table><thead><tr><th>h</th></tr></thead><tbody><tr><td>b</td></tr></tbody>"
@@ -229,13 +241,16 @@ def test_multiple_direct_captions_are_joined() -> None:
 
 
 def test_records_have_deterministic_ids_and_hashes() -> None:
-    block, layout = _table_block(
-        "<p>x</p><table><tr><th>Item</th><td></td><td>$5</td></tr></table>"
-    )
+    body = "<p>x</p><table><tr><th>Item</th><td></td><td>$5</td></tr></table>"
+    block, layout = _table_block(body)
+    again_block, again_layout = _table_block(body)
 
     tables, cells = build_document_tables([block], [layout], PROCESSED_AT)
 
-    assert build_document_tables([block], [layout], PROCESSED_AT) == (tables, cells)
+    assert build_document_tables([again_block], [again_layout], PROCESSED_AT) == (
+        tables,
+        cells,
+    )
     (table,) = tables
     assert table.table_id == f"{block.block_id}:table"
     assert [cell.cell_id for cell in cells] == [

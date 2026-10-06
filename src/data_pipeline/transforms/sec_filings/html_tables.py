@@ -15,6 +15,7 @@ from src.data_pipeline.contracts.sec_filings.document_table_cells import (
 from src.data_pipeline.transforms.sec_filings.html_dom import (
     element_tag,
     is_hidden,
+    is_owned_by,
     visible_text,
 )
 
@@ -109,25 +110,6 @@ _HASHED_CELL_FIELDS = (
 )
 
 
-def _nearest_table(element: etree._Element) -> etree._Element | None:
-    return next(element.iterancestors("table"), None)
-
-
-def _hidden_below(element: etree._Element, table: etree._Element) -> bool:
-    """Whether the element, or an ancestor inside `table`, is hidden."""
-
-    node: etree._Element | None = element
-    while node is not None and node is not table:
-        if is_hidden(node, element_tag(node)):
-            return True
-        node = node.getparent()
-    return False
-
-
-def _owned(element: etree._Element, table: etree._Element) -> bool:
-    return _nearest_table(element) is table and not _hidden_below(element, table)
-
-
 def _rows_and_cells(
     table: etree._Element,
 ) -> tuple[list[etree._Element], list[PhysicalCell]]:
@@ -137,11 +119,11 @@ def _rows_and_cells(
     for a cell without a row of its own table.
     """
 
-    rows = [row for row in table.iter("tr") if _owned(row, table)]
+    rows = [row for row in table.iter("tr") if is_owned_by(row, table)]
     row_index = {row: index for index, row in enumerate(rows)}
     cells = []
     for cell in table.iter("td", "th"):
-        if not _owned(cell, table):
+        if not is_owned_by(cell, table):
             continue
         row = next(cell.iterancestors("tr"), None)
         if row not in row_index:

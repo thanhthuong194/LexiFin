@@ -89,11 +89,32 @@ def is_link(element: etree._Element, tag: str) -> bool:
     return tag == "a" and element.get("href") is not None
 
 
+def is_owned_by(element: etree._Element, table: etree._Element) -> bool:
+    """Whether `table` is the element's nearest table and nothing between is hidden."""
+
+    if next(element.iterancestors("table"), None) is not table:
+        return False
+    node: etree._Element | None = element
+    while node is not None and node is not table:
+        if is_hidden(node, element_tag(node)):
+            return False
+        node = node.getparent()
+    return True
+
+
+def has_visible_cell(table: etree._Element) -> bool:
+    """Whether a table owns a visible `<td>`/`<th>`, so it is represented as a table."""
+
+    return any(is_owned_by(cell, table) for cell in table.iter("td", "th"))
+
+
 def visible_text(element: etree._Element) -> tuple[str, str]:
     """Return the normalized visible text of an element and of its links.
 
-    Hidden subtrees and nested tables contribute nothing (a nested table is
-    represented on its own); block-level children and `<br>` separate words.
+    Hidden subtrees and nested tables with a visible cell contribute nothing
+    (such a table is represented on its own); the text of a nested table
+    without cells stays with the element. Block-level children and `<br>`
+    separate words.
     """
 
     pieces: list[str] = []
@@ -102,7 +123,9 @@ def visible_text(element: etree._Element) -> tuple[str, str]:
     walker = etree.iterwalk(element, events=("start", "end"))
     for event, node in walker:
         tag = element_tag(node)
-        skipped = node is not element and (tag == "table" or is_hidden(node, tag))
+        skipped = node is not element and (
+            is_hidden(node, tag) or (tag == "table" and has_visible_cell(node))
+        )
         if event == "start":
             if skipped:
                 walker.skip_subtree()

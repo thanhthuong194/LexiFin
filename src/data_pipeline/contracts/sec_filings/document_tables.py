@@ -41,9 +41,10 @@ class DocumentTableRecord(ContractModel):
 
     Field order matches DOCUMENT_TABLES_ARROW_SCHEMA. `table_ordinal` orders the
     document's table blocks by block ordinal. `row_count` and `cell_count`
-    count physical rows and cells; `column_count` is the logical width after
-    row/column spans. `table_content_sha256` hashes the caption, size and
-    ordered cells as canonical JSON.
+    count visible physical rows and cells (hidden ones, such as
+    `display:none`, are never rendered and not stored); `column_count` is the
+    logical width after row/column spans. `table_content_sha256` hashes the
+    caption, size and ordered cells as canonical JSON.
     """
 
     table_id: str

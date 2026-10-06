@@ -47,7 +47,7 @@ def cell_id_for(table_id: str, cell_ordinal: int) -> str:
 
 
 class DocumentTableCellRecord(ContractModel):
-    """One physical `<td>`/`<th>` of a document table, placed on its logical grid.
+    """One visible physical `<td>`/`<th>` of a table, placed on its logical grid.
 
     Field order matches DOCUMENT_TABLE_CELLS_ARROW_SCHEMA. Ordinals start at 1:
     `cell_ordinal` in DOM order within the table, `row_ordinal` among the

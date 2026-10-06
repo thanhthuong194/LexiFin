@@ -32,6 +32,7 @@ from src.data_pipeline.contracts.sec_filings.filing_entities import (
 )
 from src.data_pipeline.contracts.sec_filings.filings import FILINGS_ARROW_SCHEMA
 from src.data_pipeline.contracts.sec_filings.sections import SECTIONS_ARROW_SCHEMA
+from src.data_pipeline.pipelines.sec_filings import document_table_extraction
 from src.data_pipeline.pipelines.sec_filings import (
     document_tables as document_tables_stage,
 )
@@ -883,7 +884,7 @@ def test_one_invalid_candidate_blocks_every_new_narrative(
 
 
 def test_document_tables_link_each_table_block_and_reruns_skip(
-    tmp_path: Path, write_sec_filing
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_bronze(tmp_path, write_sec_filing)
 
@@ -925,6 +926,10 @@ def test_document_tables_link_each_table_block_and_reruns_skip(
     assert len({c["cell_id"] for c in cells}) == len(cells) == CELL_ROWS
     assert TEN_Q_DOCUMENT not in {t["document_id"] for t in tables}
 
+    def bronze_read(*_: object) -> bytes:
+        raise AssertionError("complete table groups must not re-read Bronze")
+
+    monkeypatch.setattr(document_table_extraction, "read_document_content", bronze_read)
     rerun = run_sec_filings_silver(tmp_path)
 
     assert rerun.completed
@@ -978,9 +983,10 @@ def test_tables_only_state_resumes_cells_without_new_tables(
     "deleted",
     [
         (CELLS, "cell_id", f"{TEN_K_DOCUMENT}:block:000003:table:cell:000008"),
+        (TABLES, "table_id", f"{TEN_K_DOCUMENT}:block:000011:table"),
         (TABLES, "document_id", EIGHT_K_DOCUMENT),
     ],
-    ids=["missing-cell", "cells-without-tables"],
+    ids=["missing-cell", "missing-table", "cells-without-tables"],
 )
 def test_incomplete_table_groups_are_conflicts_before_any_write(
     tmp_path: Path, write_sec_filing, deleted: tuple[str, str, str]
