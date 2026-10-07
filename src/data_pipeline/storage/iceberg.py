@@ -286,19 +286,32 @@ def verify_written_groups(
             raise ValueError(f"{table.name()} rows of {group} differ after commit")
 
 
-def read_rows_by_key(
-    table: Table, keys: Collection[str], *, key_column: str, columns: Sequence[str]
-) -> dict[str, dict[str, Any]]:
-    """The `columns` of the stored rows whose `key_column` is one of `keys`, by key.
+def read_rows_in(
+    table: Table, column: str, values: Collection[str], *, columns: Sequence[str]
+) -> list[dict[str, Any]]:
+    """The `columns` (and `column`) of the stored rows whose `column` is in `values`.
 
     Only the named columns are read, and filtered before leaving Arrow.
     """
 
-    if not keys:
-        return {}
-    rows = table.scan(selected_fields=(key_column, *columns)).to_arrow()
-    rows = rows.filter(pc.is_in(rows[key_column], value_set=pa.array(list(keys))))
-    return {row.pop(key_column): row for row in rows.to_pylist()}
+    if not values:
+        return []
+    fields = tuple(dict.fromkeys((column, *columns)))
+    rows = table.scan(selected_fields=fields).to_arrow()
+    rows = rows.filter(pc.is_in(rows[column], value_set=pa.array(list(values))))
+    found: list[dict[str, Any]] = rows.to_pylist()
+    return found
+
+
+def read_rows_by_key(
+    table: Table, keys: Collection[str], *, key_column: str, columns: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """The `columns` of the stored rows whose `key_column` is one of `keys`, by key."""
+
+    return {
+        row.pop(key_column): row
+        for row in read_rows_in(table, key_column, keys, columns=columns)
+    }
 
 
 def verify_written_values(

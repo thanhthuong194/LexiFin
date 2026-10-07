@@ -315,6 +315,9 @@ def test_eight_k_detects_decimal_items_signature_and_exhibit_index() -> None:
         ("exhibit_index", "EXHIBIT INDEX", 1),
         ("signature", "SIGNATURES", 1),
     ]
+    # 8-Ks have no PARTs: items, the exhibit index and signatures hang off root.
+    root = narrative.sections[0].section_id
+    assert {s.parent_section_id for s in narrative.sections[1:]} == {root}
     assert _codes("<div>Item 2.02 Results of Operations.</div>") == []
 
 
@@ -432,6 +435,22 @@ def test_truncated_and_inconsistent_groups_are_detected() -> None:
             parent, [*narrative.sections[:3], wrong_parent, *narrative.sections[4:]]
         )
     )
+    item_one, part_one = narrative.sections[3], narrative.sections[2]
+    other_document = item_one.model_copy(
+        update={
+            "parent_section_id": f"{_parent().filing_id}:document:0002:section:0001"
+        }
+    )
+    self_parent = item_one.model_copy(update={"parent_section_id": item_one.section_id})
+    cycle = part_one.model_copy(update={"parent_section_id": item_one.section_id})
+    for broken, problem in (
+        ((other_document,), "parent is not a section of this document"),
+        ((self_parent,), "level is not below its parent's"),
+        ((cycle, item_one), "level is not below its parent's"),
+    ):
+        replaced = {section.section_id: section for section in broken}
+        sections = [replaced.get(s.section_id, s) for s in narrative.sections]
+        assert problem in str(sections_problem(parent, sections))
     other_source = parent.model_copy(update={"content_sha256": "c" * 64})
     assert "differs from the parent" in str(
         sections_problem(other_source, narrative.sections)

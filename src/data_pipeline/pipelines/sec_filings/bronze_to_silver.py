@@ -18,6 +18,10 @@ from src.data_pipeline.pipelines.sec_filings.documents import (
     DocumentsStageSummary,
     run_documents_stage,
 )
+from src.data_pipeline.pipelines.sec_filings.exhibit_index import (
+    ExhibitIndexStageSummary,
+    run_exhibit_index_stage,
+)
 from src.data_pipeline.pipelines.sec_filings.filing_entities import (
     FilingEntitiesStageSummary,
     run_filing_entities_stage,
@@ -68,6 +72,7 @@ class SilverRunResult:
     narrative: NarrativeStageSummary | None
     document_tables: DocumentTablesStageSummary | None
     document_links: DocumentLinksStageSummary | None
+    exhibit_index: ExhibitIndexStageSummary | None
     xbrl_core: XbrlCoreStageSummary | None
     xbrl_facts: XbrlFactsStageSummary | None
     xbrl_enrichment: XbrlEnrichmentStageSummary | None
@@ -86,6 +91,7 @@ class SilverRunResult:
                 self.narrative,
                 self.document_tables,
                 self.document_links,
+                self.exhibit_index,
                 self.xbrl_core,
                 self.xbrl_facts,
                 self.xbrl_enrichment,
@@ -109,7 +115,8 @@ def run_sec_filings_silver(
     `sec_filings.content_blocks` from the committed primary HTML documents,
     then `sec_filings.document_tables` and `sec_filings.document_table_cells`
     from the committed `table` blocks, then `sec_filings.document_links` from
-    every committed HTML document, then the XBRL core tables
+    every committed HTML document, then `sec_filings.exhibits` from the
+    committed Exhibit Index tables and their links, then the XBRL core tables
     (`xbrl_instances`, `xbrl_contexts`, `xbrl_units`) from the filings' Inline
     XBRL and XML instance documents, then `xbrl_concepts` and `xbrl_facts`
     from those instances, then `xbrl_dimensions` and `xbrl_fact_footnotes`
@@ -139,6 +146,7 @@ def run_sec_filings_silver(
         ("narrative", lambda: run_narrative_stage(data_dir, processed_at)),
         ("document_tables", lambda: run_document_tables_stage(data_dir, processed_at)),
         ("document_links", lambda: run_document_links_stage(data_dir, processed_at)),
+        ("exhibit_index", lambda: run_exhibit_index_stage(data_dir, processed_at)),
         ("xbrl_core", lambda: run_xbrl_core_stage(data_dir, processed_at)),
         ("xbrl_facts", lambda: run_xbrl_facts_stage(data_dir, processed_at, taxonomy)),
         (
