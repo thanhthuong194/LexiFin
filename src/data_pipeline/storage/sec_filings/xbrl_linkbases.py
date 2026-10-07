@@ -13,14 +13,16 @@ from src.data_pipeline.contracts.sec_filings.xbrl_networks import (
     XBRL_NETWORKS_ARROW_SCHEMA,
     XBRL_RELATIONSHIPS_ARROW_SCHEMA,
 )
-from src.data_pipeline.storage.iceberg import (
-    create_or_load_table,
-    silver_table_location,
-)
+from src.data_pipeline.storage.iceberg import SilverTableSpec
 
 XBRL_LABELS_TABLE = "sec_filings.xbrl_labels"
 XBRL_NETWORKS_TABLE = "sec_filings.xbrl_networks"
 XBRL_RELATIONSHIPS_TABLE = "sec_filings.xbrl_relationships"
+XBRL_LABELS_SPEC = SilverTableSpec(XBRL_LABELS_TABLE, XBRL_LABELS_ARROW_SCHEMA)
+XBRL_NETWORKS_SPEC = SilverTableSpec(XBRL_NETWORKS_TABLE, XBRL_NETWORKS_ARROW_SCHEMA)
+XBRL_RELATIONSHIPS_SPEC = SilverTableSpec(
+    XBRL_RELATIONSHIPS_TABLE, XBRL_RELATIONSHIPS_ARROW_SCHEMA
+)
 # Columns that identify a relationship row and its place in its network.
 RELATIONSHIP_HEAD_COLUMNS = (
     "relationship_id",
@@ -35,17 +37,9 @@ def open_xbrl_linkbase_table(
 ) -> tuple[Table, bool]:
     """Load or create one of the unpartitioned label, network and relationship tables."""
 
-    schemas = {
-        XBRL_LABELS_TABLE: XBRL_LABELS_ARROW_SCHEMA,
-        XBRL_NETWORKS_TABLE: XBRL_NETWORKS_ARROW_SCHEMA,
-        XBRL_RELATIONSHIPS_TABLE: XBRL_RELATIONSHIPS_ARROW_SCHEMA,
-    }
-    return create_or_load_table(
-        catalog,
-        identifier,
-        arrow_schema=schemas[identifier],
-        location=silver_table_location(data_dir, identifier),
-        partition_by=(),
+    specs = (XBRL_LABELS_SPEC, XBRL_NETWORKS_SPEC, XBRL_RELATIONSHIPS_SPEC)
+    return next(spec for spec in specs if spec.identifier == identifier).open(
+        catalog, data_dir
     )
 
 

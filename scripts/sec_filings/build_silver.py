@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
@@ -14,14 +16,24 @@ from src.data_pipeline.connectors.sec_filings.sec_edgar import sec_user_agent
 from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
     run_sec_filings_silver,
 )
+from src.data_pipeline.pipelines.sec_filings.silver_stages import (
+    SILVER_STAGES,
+    select_stages,
+)
+from src.data_pipeline.quality.sec_filings.silver_audit import validate_silver
+from src.data_pipeline.transforms.sec_filings.xbrl_processor import ProcessorSettings
 from src.utils.logger import configure_logging
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse the SEC Silver build CLI."""
+    """Parse the SEC Silver build CLI; invalid combinations exit with code 2."""
 
+    names = [stage.name for stage in SILVER_STAGES]
     parser = argparse.ArgumentParser(
-        description="Build the sec_filings Iceberg tables from SEC Bronze"
+        description=(
+            "Build the sec_filings Iceberg tables from SEC Bronze, then audit "
+            "them read-only"
+        )
     )
     parser.add_argument(
         "--data-dir",
@@ -43,14 +55,41 @@ def parse_args() -> argparse.Namespace:
             "SEC_COMPANY_NAME and SEC_EMAIL from .env (default: offline)"
         ),
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--from-stage",
+        choices=names,
+        help="Start at this stage; the tables of the stages it needs must exist",
+    )
+    parser.add_argument(
+        "--to-stage", choices=names, help="Stop after this stage (default: integrity)"
+    )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Only audit the existing Silver tables; write nothing",
+    )
+    parser.add_argument(
+        "--list-stages",
+        action="store_true",
+        help="Print the stages in run order with their dependencies and tables",
+    )
+    args = parser.parse_args()
+    if args.check_only and (
+        args.from_stage or args.to_stage or args.allow_taxonomy_network
+    ):
+        parser.error("--check-only takes no stage range or taxonomy download")
+    try:
+        select_stages(SILVER_STAGES, args.from_stage, args.to_stage)
+    except ValueError as error:
+        parser.error(str(error))
+    return args
 
 
-def main() -> int:
-    """Run one Bronze -> Silver batch; exit 1 when any stage is rejected."""
+def _taxonomy(args: argparse.Namespace) -> ProcessorSettings | None:
+    """The XBRL taxonomy settings the options ask for; None for the default."""
 
-    args = parse_args()
-    configure_logging()
+    if args.taxonomy_cache_dir is None and not args.allow_taxonomy_network:
+        return None
     user_agent = None
     if args.allow_taxonomy_network:
         # Taxonomy hosts include sec.gov, which requires a declared identity.
@@ -63,12 +102,83 @@ def main() -> int:
             raise SystemExit(
                 f"{error}; add them to .env or the environment to download taxonomies"
             ) from error
-    result = run_sec_filings_silver(
-        args.data_dir,
-        taxonomy_cache_dir=args.taxonomy_cache_dir,
-        allow_taxonomy_network=args.allow_taxonomy_network,
+    data_dir = args.data_dir.expanduser().resolve()
+    return ProcessorSettings(
+        cache_dir=(args.taxonomy_cache_dir or data_dir / "_cache" / "arelle")
+        .expanduser()
+        .resolve(),
+        allow_network=args.allow_taxonomy_network,
         http_user_agent=user_agent,
     )
+
+
+def _print_stages() -> None:
+    print(f"{'#':>2}  {'stage':<16} {'dependencies':<52} owned tables")
+    for order, stage in enumerate(SILVER_STAGES, start=1):
+        dependencies = ", ".join(stage.dependencies) or "-"
+        tables = ", ".join(spec.identifier for spec in stage.owned_tables) or "-"
+        if len(dependencies) > 52:
+            dependencies = "every table stage"
+        print(f"{order:>2}  {stage.name:<16} {dependencies:<52} {tables}")
+
+
+def _print_summary(summary: Mapping[str, Any]) -> None:
+    """Print the summary fields worth reading at a terminal."""
+
+    for name in (
+        "status",
+        "run_id",
+        "duration_seconds",
+        "stages_completed",
+        "stages_skipped",
+        "failed_stage",
+        "prerequisite_problems",
+        "tables_created",
+        "rows_inserted",
+        "rows_skipped",
+        "snapshot_changes",
+        "tables_checked",
+        "rows_checked",
+        "integrity_checks_run",
+        "integrity_checks_passed",
+        "integrity_checks_failed",
+        "checks_run",
+        "checks_passed",
+        "checks_failed",
+        "warnings",
+    ):
+        if name in summary:
+            print(f"{name}: {summary[name]}")
+    for failure in summary.get("failures", summary.get("integrity_failures", [])):
+        print(f"failure: {failure}")
+
+
+def main() -> int:
+    """Run the pipeline, or only its audit.
+
+    Exit 0 on success, 1 when a stage is rejected or the audit finds errors,
+    2 on invalid arguments or, with --check-only, a missing Silver catalog.
+    """
+
+    args = parse_args()
+    if args.list_stages:
+        _print_stages()
+        return 0
+    configure_logging()
+    if args.check_only:
+        try:
+            report = validate_silver(args.data_dir)
+        except FileNotFoundError:  # no catalog: logged as silver_integrity_failed
+            return 2
+        _print_summary(report.summary())
+        return 0 if report.status == "passed" else 1
+    result = run_sec_filings_silver(
+        args.data_dir,
+        from_stage=args.from_stage,
+        to_stage=args.to_stage,
+        taxonomy=_taxonomy(args),
+    )
+    _print_summary(result.summary())
     return 0 if result.completed else 1
 
 

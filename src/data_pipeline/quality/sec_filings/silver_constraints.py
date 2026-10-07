@@ -23,9 +23,28 @@ from src.data_pipeline.storage.sec_filings.document_table_cells import (
 )
 from src.data_pipeline.storage.sec_filings.document_tables import DOCUMENT_TABLES_TABLE
 from src.data_pipeline.storage.sec_filings.documents import DOCUMENTS_TABLE
+from src.data_pipeline.storage.sec_filings.exhibits import EXHIBITS_TABLE
 from src.data_pipeline.storage.sec_filings.filing_entities import FILING_ENTITIES_TABLE
 from src.data_pipeline.storage.sec_filings.filings import FILINGS_TABLE
 from src.data_pipeline.storage.sec_filings.sections import SECTIONS_TABLE
+from src.data_pipeline.storage.sec_filings.xbrl_core import (
+    XBRL_CONTEXTS_TABLE,
+    XBRL_INSTANCES_TABLE,
+    XBRL_UNITS_TABLE,
+)
+from src.data_pipeline.storage.sec_filings.xbrl_enrichment import (
+    XBRL_DIMENSIONS_TABLE,
+    XBRL_FACT_FOOTNOTES_TABLE,
+)
+from src.data_pipeline.storage.sec_filings.xbrl_facts import (
+    XBRL_CONCEPTS_TABLE,
+    XBRL_FACTS_TABLE,
+)
+from src.data_pipeline.storage.sec_filings.xbrl_linkbases import (
+    XBRL_LABELS_TABLE,
+    XBRL_NETWORKS_TABLE,
+    XBRL_RELATIONSHIPS_TABLE,
+)
 from src.data_pipeline.transforms.sec_filings.documents import check_document_offsets
 from src.utils.logger import get_logger
 
@@ -68,9 +87,10 @@ _SAME_DOCUMENT = (
     ("filing_date", "filing_date"),
     ("source_document_sha256", "source_document_sha256"),
 )
-# The ERD of the SEC Silver layer, parent first. A null target_document_id is
-# an unresolved link, not an orphan; a resolved target stays in its filing.
-RELATIONS = (
+# The foreign keys of the filing, document and HTML tables, parent first. A
+# null key (root section, unresolved link or exhibit entry) is no orphan; a
+# resolved target stays in its filing.
+DOCUMENT_RELATIONS = (
     Relation(
         DOCUMENTS_TABLE,
         "filing_id",
@@ -78,6 +98,7 @@ RELATIONS = (
         "filing_id",
         (
             ("filing_date", "filing_date"),
+            ("source_path", "full_submission_path"),
             ("source_submission_sha256", "full_submission_sha256"),
         ),
         "document_id",
@@ -100,6 +121,14 @@ RELATIONS = (
         DOCUMENTS_TABLE,
         "document_id",
         _FROM_DOCUMENT,
+        "section_id",
+    ),
+    Relation(
+        SECTIONS_TABLE,
+        "parent_section_id",
+        SECTIONS_TABLE,
+        "section_id",
+        (("document_id", "document_id"),),
         "section_id",
     ),
     Relation(
@@ -150,7 +179,82 @@ RELATIONS = (
         (("filing_id", "filing_id"),),
         "link_id",
     ),
+    Relation(
+        EXHIBITS_TABLE,
+        "filing_id",
+        FILINGS_TABLE,
+        "filing_id",
+        (("filing_date", "filing_date"),),
+        "exhibit_id",
+    ),
+    Relation(
+        EXHIBITS_TABLE,
+        "source_document_id",
+        DOCUMENTS_TABLE,
+        "document_id",
+        (("filing_id", "filing_id"),),
+        "exhibit_id",
+    ),
+    Relation(
+        EXHIBITS_TABLE,
+        "resolved_document_id",
+        DOCUMENTS_TABLE,
+        "document_id",
+        (("filing_id", "filing_id"),),
+        "exhibit_id",
+    ),
 )
+
+
+def _xbrl_relation(
+    child: str,
+    child_key: str,
+    parent: str,
+    child_id: str,
+    lineage: tuple[tuple[str, str], ...] = (),
+) -> Relation:
+    """A foreign key to a parent's key column of the same name (or `<parent>_id`)."""
+
+    parent_key = {
+        FILINGS_TABLE: "filing_id",
+        DOCUMENTS_TABLE: "document_id",
+        CONTENT_BLOCKS_TABLE: "block_id",
+        DOCUMENT_TABLE_CELLS_TABLE: "cell_id",
+        XBRL_INSTANCES_TABLE: "instance_id",
+        XBRL_CONTEXTS_TABLE: "context_key",
+        XBRL_UNITS_TABLE: "unit_key",
+        XBRL_CONCEPTS_TABLE: "concept_id",
+        XBRL_FACTS_TABLE: "fact_id",
+        XBRL_NETWORKS_TABLE: "network_id",
+    }[parent]
+    return Relation(child, child_key, parent, parent_key, lineage, child_id)
+
+
+# The foreign keys of the XBRL tables. XBRL children do not repeat filing
+# columns; a fact's context and unit belong to its own instance, and its block
+# or cell (when aligned) to its own document. Labels and relationships name
+# their DTS file by document_id or URL, checked with the XBRL groups.
+XBRL_RELATIONS = (
+    _xbrl_relation(XBRL_INSTANCES_TABLE, "filing_id", FILINGS_TABLE, "instance_id"),
+    _xbrl_relation(XBRL_CONTEXTS_TABLE, "instance_id", XBRL_INSTANCES_TABLE, "context_key"),
+    _xbrl_relation(XBRL_UNITS_TABLE, "instance_id", XBRL_INSTANCES_TABLE, "unit_key"),
+    _xbrl_relation(XBRL_FACTS_TABLE, "instance_id", XBRL_INSTANCES_TABLE, "fact_id"),
+    _xbrl_relation(XBRL_FACTS_TABLE, "document_id", DOCUMENTS_TABLE, "fact_id"),
+    _xbrl_relation(XBRL_FACTS_TABLE, "concept_id", XBRL_CONCEPTS_TABLE, "fact_id"),
+    _xbrl_relation(XBRL_FACTS_TABLE, "context_key", XBRL_CONTEXTS_TABLE, "fact_id", (("instance_id", "instance_id"),)),
+    _xbrl_relation(XBRL_FACTS_TABLE, "unit_key", XBRL_UNITS_TABLE, "fact_id", (("instance_id", "instance_id"),)),
+    _xbrl_relation(XBRL_FACTS_TABLE, "block_id", CONTENT_BLOCKS_TABLE, "fact_id", (("document_id", "document_id"),)),
+    _xbrl_relation(XBRL_FACTS_TABLE, "cell_id", DOCUMENT_TABLE_CELLS_TABLE, "fact_id", (("document_id", "document_id"),)),
+    _xbrl_relation(XBRL_DIMENSIONS_TABLE, "context_key", XBRL_CONTEXTS_TABLE, "dimension_id"),
+    _xbrl_relation(XBRL_DIMENSIONS_TABLE, "dimension_concept_id", XBRL_CONCEPTS_TABLE, "dimension_id"),
+    _xbrl_relation(XBRL_DIMENSIONS_TABLE, "member_concept_id", XBRL_CONCEPTS_TABLE, "dimension_id"),
+    _xbrl_relation(XBRL_FACT_FOOTNOTES_TABLE, "fact_id", XBRL_FACTS_TABLE, "footnote_relation_id"),
+    _xbrl_relation(XBRL_LABELS_TABLE, "concept_id", XBRL_CONCEPTS_TABLE, "label_id"),
+    _xbrl_relation(XBRL_NETWORKS_TABLE, "instance_id", XBRL_INSTANCES_TABLE, "network_id"),
+    _xbrl_relation(XBRL_RELATIONSHIPS_TABLE, "network_id", XBRL_NETWORKS_TABLE, "relationship_id"),
+    _xbrl_relation(XBRL_RELATIONSHIPS_TABLE, "source_concept_id", XBRL_CONCEPTS_TABLE, "relationship_id"),
+    _xbrl_relation(XBRL_RELATIONSHIPS_TABLE, "target_concept_id", XBRL_CONCEPTS_TABLE, "relationship_id"),
+)  # fmt: skip
 
 
 def _orphans(child: pa.Table, parent: pa.Table, relation: Relation) -> pa.Table:
@@ -190,15 +294,20 @@ def _lineage_mismatches(
     return joined.filter(reduce(pc.or_, differs))
 
 
-def check_references(data: Mapping[str, pa.Table], report: SilverAuditReport) -> None:
-    """Check every foreign key of RELATIONS and the lineage it carries.
+def check_references(
+    data: Mapping[str, pa.Table],
+    relations: Sequence[Relation],
+    report: SilverAuditReport,
+) -> None:
+    """Check each foreign key of `relations` and the lineage it carries.
 
     A child key missing from its parent is an orphan; a matched child that
     does not repeat its parent's lineage is a lineage mismatch. Both are
-    errors. Works on whole columns, without per-row loops over valid data.
+    errors. Works on whole columns, without per-row loops over valid data;
+    `data` needs each relation's key, lineage and child ID columns.
     """
 
-    for relation in RELATIONS:
+    for relation in relations:
         report.ran(f"reference:{relation.name}")
         child, parent = data[relation.child], data[relation.parent]
         orphans = _orphans(child, parent, relation)
@@ -210,9 +319,14 @@ def check_references(data: Mapping[str, pa.Table], report: SilverAuditReport) ->
                 relation.child,
                 f"{relation.name}: no parent row",
                 row[relation.child_id],
+                parent_table=relation.parent,
                 **{relation.child_key: row[relation.child_key]},
             )
-        mismatches = _lineage_mismatches(child, parent, relation)
+        mismatches = (
+            _lineage_mismatches(child, parent, relation)
+            if relation.lineage
+            else child.slice(0, 0)
+        )
         for row in mismatches.to_pylist():
             report.add(
                 "error",
@@ -220,6 +334,7 @@ def check_references(data: Mapping[str, pa.Table], report: SilverAuditReport) ->
                 relation.child,
                 f"{relation.name}: lineage differs from the parent row",
                 row[relation.child_id],
+                parent_table=relation.parent,
                 **{
                     column: [str(row[column]), str(row[_PARENT_PREFIX + parent_column])]
                     for column, parent_column in relation.lineage
@@ -235,36 +350,40 @@ def check_references(data: Mapping[str, pa.Table], report: SilverAuditReport) ->
         )
 
 
+def _repeated(table: pa.Table, key: Sequence[str]) -> list[tuple[str, int]]:
+    """Each value (joined with "|" for several columns) held by several rows."""
+
+    counts = table.group_by(list(key)).aggregate([([], "count_all")])
+    repeated = counts.filter(pc.greater(counts["count_all"], 1)).to_pylist()
+    return [
+        ("|".join(str(row[column]) for column in key), row["count_all"])
+        for row in repeated
+    ]
+
+
 def check_keys(
     data: Mapping[str, pa.Table],
-    unique_keys: Mapping[str, Sequence[str]],
+    unique_keys: Mapping[str, Sequence[Sequence[str]]],
     report: SilverAuditReport,
 ) -> None:
-    """Each unique column of each table holds every value once.
+    """Each unique key of each table identifies one row.
 
-    `unique_keys` maps table identifiers to their unique columns; every
-    repeated value is an error.
+    `unique_keys` maps table identifiers to their keys: the primary key and
+    the column sets of the table's grain. Every repeated value is an error.
     """
 
     for identifier, keys in unique_keys.items():
         for key in keys:
-            name = f"{identifier.split('.', 1)[1]}.{key}"
+            name = f"{identifier.split('.', 1)[1]}.{'+'.join(key)}"
             report.ran(f"unique:{name}")
-            counts = pc.value_counts(data[identifier][key])
-            repeated = counts.filter(pc.greater(counts.field("counts"), 1))
-            report.duplicate_counts[name] = sum(
-                count - 1 for count in repeated.field("counts").to_pylist()
-            )
-            for value, count in zip(
-                repeated.field("values").to_pylist(),
-                repeated.field("counts").to_pylist(),
-                strict=True,
-            ):
+            repeated = _repeated(data[identifier], key)
+            report.duplicate_counts[name] = sum(count - 1 for _, count in repeated)
+            for value, count in repeated:
                 report.add(
                     "error",
                     "duplicate_key",
                     identifier,
-                    f"{key} appears {count} times",
+                    f"{'+'.join(key)} appears {count} times",
                     value,
                 )
 

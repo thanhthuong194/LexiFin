@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
@@ -13,6 +13,8 @@ Severity = Literal["error", "warning", "info"]
 # Every occurrence is counted, but only the first issues of a check are kept
 # and logged, so a systematic defect cannot flood the report.
 ISSUES_PER_CHECK = 20
+# Identifiers kept per failure in the summary.
+SAMPLE_IDS = 5
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,18 @@ class AuditIssue:
     message: str
     identifier: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AuditFailure:
+    """Every error of one check on one table (and parent table), counted."""
+
+    check_name: str
+    table: str
+    parent_table: str | None
+    message: str
+    affected_count: int = 0
+    sample_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -45,6 +59,9 @@ class SilverAuditReport:
     checks_run: list[str] = field(default_factory=list)
     issues: list[AuditIssue] = field(default_factory=list)
     issue_counts: Counter[tuple[str, str]] = field(default_factory=Counter)
+    failures: dict[tuple[str, str, str | None], AuditFailure] = field(
+        default_factory=dict
+    )
     row_counts: dict[str, int] = field(default_factory=dict)
     snapshot_ids_before: dict[str, int | None] = field(default_factory=dict)
     snapshot_ids_after: dict[str, int | None] = field(default_factory=dict)
@@ -71,6 +88,20 @@ class SilverAuditReport:
         )
 
     @property
+    def rows_checked(self) -> int:
+        """Rows read from the audited tables."""
+
+        return sum(self.row_counts.values())
+
+    @property
+    def checks_failed(self) -> int:
+        """Checks that found at least one error."""
+
+        return len(
+            {check for severity, check in self.issue_counts if severity == "error"}
+        )
+
+    @property
     def status(self) -> Literal["passed", "failed"]:
         """`passed` exactly when the audit found no error."""
 
@@ -91,10 +122,24 @@ class SilverAuditReport:
         identifier: str | None = None,
         **details: Any,
     ) -> None:
-        """Count an issue; keep and log it while its check has few issues."""
+        """Count an issue; keep and log it while its check has few issues.
+
+        Errors are also grouped by check, table and parent table (the
+        `parent_table` detail of reference checks) into `failures`, with their
+        count and the first SAMPLE_IDS identifiers.
+        """
 
         self.ran(check_name)
         self.issue_counts[(severity, check_name)] += 1
+        if severity == "error":
+            parent_table = details.get("parent_table")
+            failure = self.failures.setdefault(
+                (check_name, table, parent_table),
+                AuditFailure(check_name, table, parent_table, message),
+            )
+            failure.affected_count += 1
+            if identifier is not None and len(failure.sample_ids) < SAMPLE_IDS:
+                failure.sample_ids.append(identifier)
         if self.issue_counts[(severity, check_name)] > ISSUES_PER_CHECK:
             return
         issue = AuditIssue(severity, check_name, table, message, identifier, details)
@@ -125,10 +170,14 @@ class SilverAuditReport:
             "tables_expected": len(self.tables_expected),
             "tables_checked": len(self.tables_found),
             "tables_missing": self.tables_missing,
+            "rows_checked": self.rows_checked,
             "checks_run": len(self.checks_run),
+            "checks_passed": len(self.checks_run) - self.checks_failed,
+            "checks_failed": self.checks_failed,
             "errors": self.errors,
             "warnings": self.warnings,
             "duration_seconds": self.duration_seconds,
+            "failures": [asdict(failure) for failure in self.failures.values()],
             "row_counts": self.row_counts,
             "duplicate_counts": self.duplicate_counts,
             "orphan_counts": self.orphan_counts,

@@ -11,11 +11,15 @@ from src.data_pipeline.contracts.sec_filings.filing_entities import (
     FilingEntityRecord,
 )
 from src.data_pipeline.storage.iceberg import (
-    create_or_load_table,
-    silver_table_location,
+    SilverTableSpec,
 )
 
 FILING_ENTITIES_TABLE = "sec_filings.filing_entities"
+
+
+FILING_ENTITIES_SPEC = SilverTableSpec(
+    FILING_ENTITIES_TABLE, FILING_ENTITIES_ARROW_SCHEMA
+)
 
 
 def open_filing_entities_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
@@ -25,13 +29,7 @@ def open_filing_entities_table(catalog: Catalog, data_dir: Path) -> tuple[Table,
     benchmark yet shows partitioning would help.
     """
 
-    return create_or_load_table(
-        catalog,
-        FILING_ENTITIES_TABLE,
-        arrow_schema=FILING_ENTITIES_ARROW_SCHEMA,
-        location=silver_table_location(data_dir, FILING_ENTITIES_TABLE),
-        partition_by=(),
-    )
+    return FILING_ENTITIES_SPEC.open(catalog, data_dir)
 
 
 def read_filing_entity_groups(table: Table) -> dict[str, list[FilingEntityRecord]]:

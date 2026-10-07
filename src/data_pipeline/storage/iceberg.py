@@ -197,6 +197,35 @@ def table_definition_problem(
     return None
 
 
+@dataclass(frozen=True)
+class SilverTableSpec:
+    """A Silver table's identifier, contract schema and hidden partitioning.
+
+    The one definition that its stage creates the table from and that the
+    audit and the pipeline registry check it against.
+    """
+
+    identifier: str
+    arrow_schema: pa.Schema
+    partition_by: tuple[PartitionColumn, ...] = ()
+
+    def open(self, catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
+        """Load or create the table under `data_dir`; return whether it was created."""
+
+        return create_or_load_table(
+            catalog,
+            self.identifier,
+            arrow_schema=self.arrow_schema,
+            location=silver_table_location(data_dir, self.identifier),
+            partition_by=self.partition_by,
+        )
+
+    def definition_problem(self, table: Table) -> str | None:
+        """How a loaded table differs from this definition, or None."""
+
+        return table_definition_problem(table, self.arrow_schema, self.partition_by)
+
+
 def current_snapshot_id(table: Table) -> int | None:
     """Return the table's current snapshot ID, or None before the first write."""
 

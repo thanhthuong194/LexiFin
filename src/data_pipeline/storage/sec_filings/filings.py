@@ -13,14 +13,18 @@ from src.data_pipeline.contracts.sec_filings.filings import (
 )
 from src.data_pipeline.storage.iceberg import (
     PartitionColumn,
-    create_or_load_table,
-    silver_table_location,
+    SilverTableSpec,
 )
 
 FILINGS_TABLE = "sec_filings.filings"
 # SEC Silver tables carry their filing's date and are partitioned by its year.
 FILING_YEAR_PARTITION = (
     PartitionColumn("filing_date", YearTransform(), "filing_year"),
+)
+
+
+FILINGS_SPEC = SilverTableSpec(
+    FILINGS_TABLE, FILINGS_ARROW_SCHEMA, FILING_YEAR_PARTITION
 )
 
 
@@ -35,13 +39,7 @@ class StoredChecksums:
 def open_filings_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
     """Load or create `sec_filings.filings`, returning whether it was created."""
 
-    return create_or_load_table(
-        catalog,
-        FILINGS_TABLE,
-        arrow_schema=FILINGS_ARROW_SCHEMA,
-        location=silver_table_location(data_dir, FILINGS_TABLE),
-        partition_by=FILING_YEAR_PARTITION,
-    )
+    return FILINGS_SPEC.open(catalog, data_dir)
 
 
 def read_stored_checksums(table: Table) -> dict[str, StoredChecksums]:

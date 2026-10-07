@@ -18,6 +18,7 @@ from src.data_pipeline.contracts.sec_filings.document_table_cells import (
 )
 from src.data_pipeline.contracts.sec_filings.document_tables import DocumentTableRecord
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
+from src.data_pipeline.contracts.sec_filings.exhibits import ExhibitRecord
 from src.data_pipeline.contracts.sec_filings.filing_entities import FilingEntityRecord
 from src.data_pipeline.contracts.sec_filings.filings import FilingRecord
 from src.data_pipeline.contracts.sec_filings.sections import SectionRecord
@@ -41,6 +42,7 @@ from src.data_pipeline.storage.sec_filings.document_table_cells import (
 )
 from src.data_pipeline.storage.sec_filings.document_tables import DOCUMENT_TABLES_TABLE
 from src.data_pipeline.storage.sec_filings.documents import DOCUMENTS_TABLE
+from src.data_pipeline.storage.sec_filings.exhibits import EXHIBITS_TABLE
 from src.data_pipeline.storage.sec_filings.filing_entities import FILING_ENTITIES_TABLE
 from src.data_pipeline.storage.sec_filings.filings import FILINGS_TABLE
 from src.data_pipeline.storage.sec_filings.sections import SECTIONS_TABLE
@@ -57,7 +59,7 @@ class ParentRecords:
     entities: dict[str, list[FilingEntityRecord]]
 
 
-def _records[Record: BaseModel](
+def validated_records[Record: BaseModel](
     report: SilverAuditReport,
     table: str,
     rows: Iterable[dict[str, Any]],
@@ -90,7 +92,7 @@ def _load[Record: BaseModel](
     model: type[Record],
     key: str,
 ) -> list[Record]:
-    return _records(report, table, data[table].to_pylist(), model, key)
+    return validated_records(report, table, data[table].to_pylist(), model, key)
 
 
 def _by[Record: BaseModel](
@@ -102,7 +104,7 @@ def _by[Record: BaseModel](
     return dict(groups)
 
 
-def _sorted_groups(
+def sorted_groups(
     table: pa.Table, key: str
 ) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     """Yield each key's rows in key order, converting one group to Python at a time."""
@@ -280,9 +282,9 @@ def _check_cells(
 
     report.ran("cells.groups")
     seen = set()
-    for document_id, rows in _sorted_groups(cells, "document_id"):
+    for document_id, rows in sorted_groups(cells, "document_id"):
         seen.add(document_id)
-        records = _records(
+        records = validated_records(
             report, DOCUMENT_TABLE_CELLS_TABLE, rows, DocumentTableCellRecord, "cell_id"
         )
         if document_id in complete:
@@ -301,8 +303,8 @@ def _check_links(
     """Every stored link group is complete and its targets stay in its filing."""
 
     report.ran("links.groups")
-    for source_id, rows in _sorted_groups(links, "source_document_id"):
-        records = _records(
+    for source_id, rows in sorted_groups(links, "source_document_id"):
+        records = validated_records(
             report, DOCUMENT_LINKS_TABLE, rows, DocumentLinkRecord, "link_id"
         )
         source = documents.get(source_id)
@@ -317,14 +319,45 @@ def _check_links(
             report.group_violation(DOCUMENT_LINKS_TABLE, source_id, problem)
 
 
+def _check_exhibits(
+    exhibits: pa.Table,
+    documents: Mapping[str, DocumentRecord],
+    report: SilverAuditReport,
+) -> None:
+    """Each filing's Exhibit Index entries: ordinals 1..N of their declared count.
+
+    All entries are read from the filing's primary document.
+    """
+
+    report.ran("exhibits.groups")
+    for filing_id, rows in sorted_groups(exhibits, "filing_id"):
+        records = validated_records(
+            report, EXHIBITS_TABLE, rows, ExhibitRecord, "exhibit_id"
+        )
+        problem = declared_count_problem(
+            [record.exhibit_ordinal for record in records],
+            {record.filing_exhibit_count for record in records},
+            "exhibit entries",
+        )
+        if problem is None and any(
+            (source := documents.get(record.source_document_id)) is not None
+            and source.role != "primary_document"
+            for record in records
+        ):
+            problem = "entries are not read from the primary document"
+        if problem is not None:
+            report.group_violation(EXHIBITS_TABLE, filing_id, problem)
+
+
 def check_groups(
     data: Mapping[str, pa.Table], data_dir: Path, report: SilverAuditReport
 ) -> ParentRecords:
     """Validate every row against its contract and every group's completeness.
 
     Reuses the stage checks: documents per filing, sections and blocks per
-    primary HTML document, a table per table block and its cells, and links
-    per source document. Returns the validated parent records.
+    primary HTML document, a table per table block and its cells, links per
+    source document and Exhibit Index entries per filing. Returns the
+    validated parent records.
     """
 
     documents = _load(report, data, DOCUMENTS_TABLE, DocumentRecord, "document_id")
@@ -340,4 +373,5 @@ def check_groups(
     complete = _check_primary_documents(data, parents.documents, report)
     _check_cells(data[DOCUMENT_TABLE_CELLS_TABLE], complete, report)
     _check_links(data[DOCUMENT_LINKS_TABLE], parents.documents, report)
+    _check_exhibits(data[EXHIBITS_TABLE], parents.documents, report)
     return parents

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,54 +12,68 @@ from pyiceberg.catalog import Catalog
 from pyiceberg.exceptions import NoSuchNamespaceError, NoSuchTableError
 from pyiceberg.table import Table
 
-from src.data_pipeline.contracts.sec_filings.content_blocks import (
-    CONTENT_BLOCKS_ARROW_SCHEMA,
-)
-from src.data_pipeline.contracts.sec_filings.document_links import (
-    DOCUMENT_LINKS_ARROW_SCHEMA,
-)
-from src.data_pipeline.contracts.sec_filings.document_table_cells import (
-    DOCUMENT_TABLE_CELLS_ARROW_SCHEMA,
-)
-from src.data_pipeline.contracts.sec_filings.document_tables import (
-    DOCUMENT_TABLES_ARROW_SCHEMA,
-)
-from src.data_pipeline.contracts.sec_filings.documents import DOCUMENTS_ARROW_SCHEMA
-from src.data_pipeline.contracts.sec_filings.filing_entities import (
-    FILING_ENTITIES_ARROW_SCHEMA,
-)
-from src.data_pipeline.contracts.sec_filings.filings import FILINGS_ARROW_SCHEMA
-from src.data_pipeline.contracts.sec_filings.sections import SECTIONS_ARROW_SCHEMA
 from src.data_pipeline.quality.sec_filings.silver_constraints import (
+    DOCUMENT_RELATIONS,
+    XBRL_RELATIONS,
     check_keys,
     check_references,
     check_source_hashes,
 )
-from src.data_pipeline.quality.sec_filings.silver_groups import (
-    check_groups,
-)
+from src.data_pipeline.quality.sec_filings.silver_groups import check_groups
 from src.data_pipeline.quality.sec_filings.silver_report import SilverAuditReport
+from src.data_pipeline.quality.sec_filings.silver_xbrl import check_xbrl_groups
 from src.data_pipeline.storage.iceberg import (
-    PartitionColumn,
+    SilverTableSpec,
     current_snapshot_id,
     open_silver_catalog,
     silver_catalog_paths,
     silver_table_location,
-    table_definition_problem,
 )
-from src.data_pipeline.storage.sec_filings.content_blocks import CONTENT_BLOCKS_TABLE
-from src.data_pipeline.storage.sec_filings.document_links import DOCUMENT_LINKS_TABLE
+from src.data_pipeline.storage.sec_filings.content_blocks import (
+    CONTENT_BLOCKS_SPEC,
+    CONTENT_BLOCKS_TABLE,
+)
+from src.data_pipeline.storage.sec_filings.document_links import (
+    DOCUMENT_LINKS_SPEC,
+    DOCUMENT_LINKS_TABLE,
+)
 from src.data_pipeline.storage.sec_filings.document_table_cells import (
+    DOCUMENT_TABLE_CELLS_SPEC,
     DOCUMENT_TABLE_CELLS_TABLE,
 )
-from src.data_pipeline.storage.sec_filings.document_tables import DOCUMENT_TABLES_TABLE
-from src.data_pipeline.storage.sec_filings.documents import DOCUMENTS_TABLE
-from src.data_pipeline.storage.sec_filings.filing_entities import FILING_ENTITIES_TABLE
-from src.data_pipeline.storage.sec_filings.filings import (
-    FILING_YEAR_PARTITION,
-    FILINGS_TABLE,
+from src.data_pipeline.storage.sec_filings.document_tables import (
+    DOCUMENT_TABLES_SPEC,
+    DOCUMENT_TABLES_TABLE,
 )
-from src.data_pipeline.storage.sec_filings.sections import SECTIONS_TABLE
+from src.data_pipeline.storage.sec_filings.documents import (
+    DOCUMENTS_SPEC,
+    DOCUMENTS_TABLE,
+)
+from src.data_pipeline.storage.sec_filings.exhibits import EXHIBITS_SPEC
+from src.data_pipeline.storage.sec_filings.filing_entities import FILING_ENTITIES_SPEC
+from src.data_pipeline.storage.sec_filings.filings import FILINGS_SPEC, FILINGS_TABLE
+from src.data_pipeline.storage.sec_filings.sections import (
+    SECTIONS_SPEC,
+    SECTIONS_TABLE,
+)
+from src.data_pipeline.storage.sec_filings.xbrl_core import (
+    XBRL_CONTEXTS_SPEC,
+    XBRL_INSTANCES_SPEC,
+    XBRL_UNITS_SPEC,
+)
+from src.data_pipeline.storage.sec_filings.xbrl_enrichment import (
+    XBRL_DIMENSIONS_SPEC,
+    XBRL_FACT_FOOTNOTES_SPEC,
+)
+from src.data_pipeline.storage.sec_filings.xbrl_facts import (
+    XBRL_CONCEPTS_SPEC,
+    XBRL_FACTS_SPEC,
+)
+from src.data_pipeline.storage.sec_filings.xbrl_linkbases import (
+    XBRL_LABELS_SPEC,
+    XBRL_NETWORKS_SPEC,
+    XBRL_RELATIONSHIPS_SPEC,
+)
 from src.utils.logger import get_logger, log_context
 from src.utils.timer import timed_operation
 
@@ -69,26 +83,56 @@ NAMESPACE = "sec_filings"
 
 
 @dataclass(frozen=True)
-class SilverTable:
-    """An audited table: contract schema, partitioning and each unique column."""
+class AuditedTable:
+    """An audited table: its definition and the columns that identify a row.
 
-    identifier: str
-    arrow_schema: pa.Schema
-    partition_by: tuple[PartitionColumn, ...]
-    unique_keys: tuple[str, ...]
+    `unique` lists the primary key first, then every other column set of the
+    table's grain that must hold each value once.
+    """
+
+    spec: SilverTableSpec
+    unique: tuple[tuple[str, ...], ...]
+
+    @property
+    def identifier(self) -> str:
+        """The table's catalog identifier."""
+
+        return self.spec.identifier
 
 
-# Partitioning as each stage's storage module creates the table.
-SILVER_TABLES = (
-    SilverTable(FILINGS_TABLE, FILINGS_ARROW_SCHEMA, FILING_YEAR_PARTITION, ("filing_id",)),
-    SilverTable(DOCUMENTS_TABLE, DOCUMENTS_ARROW_SCHEMA, FILING_YEAR_PARTITION, ("document_id",)),
-    SilverTable(FILING_ENTITIES_TABLE, FILING_ENTITIES_ARROW_SCHEMA, (), ("filing_entity_id",)),
-    SilverTable(SECTIONS_TABLE, SECTIONS_ARROW_SCHEMA, FILING_YEAR_PARTITION, ("section_id",)),
-    SilverTable(CONTENT_BLOCKS_TABLE, CONTENT_BLOCKS_ARROW_SCHEMA, FILING_YEAR_PARTITION, ("block_id",)),
-    SilverTable(DOCUMENT_TABLES_TABLE, DOCUMENT_TABLES_ARROW_SCHEMA, FILING_YEAR_PARTITION, ("table_id", "block_id")),
-    SilverTable(DOCUMENT_TABLE_CELLS_TABLE, DOCUMENT_TABLE_CELLS_ARROW_SCHEMA, FILING_YEAR_PARTITION, ("cell_id",)),
-    SilverTable(DOCUMENT_LINKS_TABLE, DOCUMENT_LINKS_ARROW_SCHEMA, FILING_YEAR_PARTITION, ("link_id",)),
+# The filing, document and HTML tables, then the XBRL tables: the audit
+# checks the first group, then keeps only their keys to check the second.
+DOCUMENT_TABLES = (
+    AuditedTable(FILINGS_SPEC, (("filing_id",), ("accession_number",))),
+    AuditedTable(DOCUMENTS_SPEC, (("document_id",), ("filing_id", "document_ordinal"))),
+    AuditedTable(FILING_ENTITIES_SPEC, (("filing_entity_id",), ("filing_id", "entity_ordinal"))),
+    AuditedTable(SECTIONS_SPEC, (("section_id",), ("document_id", "section_ordinal"))),
+    AuditedTable(CONTENT_BLOCKS_SPEC, (("block_id",), ("document_id", "block_ordinal"))),
+    AuditedTable(DOCUMENT_TABLES_SPEC, (("table_id",), ("block_id",), ("document_id", "table_ordinal"))),
+    AuditedTable(DOCUMENT_TABLE_CELLS_SPEC, (("cell_id",), ("table_id", "cell_ordinal"))),
+    AuditedTable(DOCUMENT_LINKS_SPEC, (("link_id",), ("source_document_id", "link_ordinal"))),
+    AuditedTable(EXHIBITS_SPEC, (("exhibit_id",), ("filing_id", "exhibit_ordinal"))),
 )  # fmt: skip
+XBRL_TABLES = (
+    AuditedTable(XBRL_INSTANCES_SPEC, (("instance_id",),)),
+    AuditedTable(XBRL_CONTEXTS_SPEC, (("context_key",), ("instance_id", "context_ref"))),
+    AuditedTable(XBRL_UNITS_SPEC, (("unit_key",), ("instance_id", "unit_ref"))),
+    AuditedTable(XBRL_CONCEPTS_SPEC, (("concept_id",), ("namespace_uri", "local_name"))),
+    AuditedTable(XBRL_FACTS_SPEC, (("fact_id",), ("instance_id", "fact_order"))),
+    AuditedTable(XBRL_DIMENSIONS_SPEC, (("dimension_id",), ("context_key", "dimension_ordinal"), ("context_key", "dimension_concept_id"))),
+    AuditedTable(XBRL_FACT_FOOTNOTES_SPEC, (("footnote_relation_id",), ("fact_id", "footnote_ordinal"))),
+    AuditedTable(XBRL_LABELS_SPEC, (("label_id",),)),
+    AuditedTable(XBRL_NETWORKS_SPEC, (("network_id",), ("instance_id", "network_ordinal"), ("instance_id", "linkbase_type", "role_uri"))),
+    AuditedTable(XBRL_RELATIONSHIPS_SPEC, (("relationship_id",), ("network_id", "relationship_ordinal"))),
+)  # fmt: skip
+SILVER_TABLES = DOCUMENT_TABLES + XBRL_TABLES
+# Columns of the first group that the XBRL checks reference.
+_XBRL_PARENT_KEYS = {
+    FILINGS_TABLE: ("filing_id",),
+    DOCUMENTS_TABLE: ("document_id", "filing_id"),
+    CONTENT_BLOCKS_TABLE: ("block_id", "document_id"),
+    DOCUMENT_TABLE_CELLS_TABLE: ("cell_id", "document_id"),
+}
 
 
 # Narrative tables must be rebuilt in this order when the persisted table
@@ -144,9 +188,7 @@ def _check_definitions(
         if table is None:
             continue
         report.ran(f"definition:{expected.identifier}")
-        problem = table_definition_problem(
-            table, expected.arrow_schema, expected.partition_by
-        )
+        problem = expected.spec.definition_problem(table)
         if problem is None:
             valid.add(expected.identifier)
         else:
@@ -235,6 +277,52 @@ def _verify_snapshots(catalog: Catalog, report: SilverAuditReport) -> None:
             )
 
 
+def _read(
+    found: Mapping[str, Table],
+    tables: Sequence[AuditedTable],
+    report: SilverAuditReport,
+) -> dict[str, pa.Table]:
+    """Each table at the snapshot the catalog check loaded."""
+
+    data = {}
+    for table in tables:
+        rows = found[table.identifier].scan().to_arrow()
+        # PyIceberg gives an empty scan large Arrow types; joins need the
+        # contract's types on both sides.
+        data[table.identifier] = (
+            rows if rows.num_rows else table.spec.arrow_schema.empty_table()
+        )
+    report.row_counts.update((name, rows.num_rows) for name, rows in data.items())
+    return data
+
+
+def _check_rows(
+    found: Mapping[str, Table],
+    data_dir: Path,
+    report: SilverAuditReport,
+    *,
+    verify_source_hashes: bool,
+) -> None:
+    """Keys, references, groups and semantics of every table, one group at a time."""
+
+    with timed_operation("silver_audit.documents"):
+        data = _read(found, DOCUMENT_TABLES, report)
+        check_keys(data, {t.identifier: t.unique for t in DOCUMENT_TABLES}, report)
+        check_references(data, DOCUMENT_RELATIONS, report)
+        parents = check_groups(data, data_dir, report)
+        _check_semantics(data, report)
+    if verify_source_hashes:
+        with timed_operation("silver_audit.source_hashes"):
+            check_source_hashes(parents, data_dir, report)
+    keys = {name: data[name].select(list(c)) for name, c in _XBRL_PARENT_KEYS.items()}
+    del data  # the XBRL checks only need the keys above
+    with timed_operation("silver_audit.xbrl"):
+        xbrl = _read(found, XBRL_TABLES, report) | keys
+        check_keys(xbrl, {t.identifier: t.unique for t in XBRL_TABLES}, report)
+        check_references(xbrl, XBRL_RELATIONS, report)
+        check_xbrl_groups(xbrl, parents.documents, report)
+
+
 def _audit(
     catalog: Catalog,
     data_dir: Path,
@@ -247,29 +335,7 @@ def _audit(
     with timed_operation("silver_audit.schemas"):
         valid = _check_definitions(found, data_dir, report)
     if len(valid) == len(SILVER_TABLES):
-        with timed_operation("silver_audit.read"):
-            # Each table is read at the snapshot loaded by the catalog check.
-            data = {
-                identifier: table.scan().to_arrow()
-                for identifier, table in found.items()
-            }
-        report.row_counts = {
-            identifier: rows.num_rows for identifier, rows in data.items()
-        }
-        with timed_operation("silver_audit.keys"):
-            check_keys(
-                data,
-                {t.identifier: t.unique_keys for t in SILVER_TABLES},
-                report,
-            )
-        with timed_operation("silver_audit.relationships"):
-            check_references(data, report)
-        with timed_operation("silver_audit.groups"):
-            parents = check_groups(data, data_dir, report)
-            _check_semantics(data, report)
-        if verify_source_hashes:
-            with timed_operation("silver_audit.source_hashes"):
-                check_source_hashes(parents, data_dir, report)
+        _check_rows(found, data_dir, report, verify_source_hashes=verify_source_hashes)
     else:
         report.add(
             "info",
@@ -287,12 +353,12 @@ def validate_silver(
     """Audit the SEC Silver tables of `data_dir` without writing anything.
 
     Checks that every audited table exists with its contract schema, partition
-    spec and location; then, when all do, unique keys, foreign keys and
-    lineage, row contracts, group completeness and table semantics, and with
-    `verify_source_hashes` the Bronze bytes behind filings, documents and
-    entities. Snapshot IDs must not move during the audit. Findings are
-    returned in the report; a missing catalog or an unexpected error is
-    logged and raised as an operational failure.
+    spec and location; then, when all do, primary keys and grain keys,
+    foreign keys and copied lineage, row contracts, group completeness and
+    table semantics, and with `verify_source_hashes` the Bronze bytes behind
+    filings, documents and entities. Snapshot IDs must not move during the
+    audit. Findings are returned in the report; a missing catalog or an
+    unexpected error is logged as `silver_integrity_failed` and raised.
     """
 
     data_dir = data_dir.expanduser().resolve()
@@ -303,7 +369,7 @@ def validate_silver(
     )
     with log_context(source="sec_filings"):
         logger.info(
-            "silver_audit_started",
+            "silver_integrity_started",
             data_dir=str(data_dir),
             verify_source_hashes=verify_source_hashes,
         )
@@ -323,13 +389,15 @@ def validate_silver(
                 )
         except Exception as error:
             logger.error(
-                "silver_audit_failed",
+                "silver_integrity_failed",
                 error_type=type(error).__name__,
                 error=str(error),
             )
             raise
         report.finished_at = datetime.now(UTC)
         report.duration_seconds = round(perf_counter() - started, 3)
-        log = logger.info if report.status == "passed" else logger.error
-        log("silver_audit_completed", **report.summary())
+        if report.status == "passed":
+            logger.info("silver_integrity_completed", **report.summary())
+        else:
+            logger.error("silver_integrity_failed", **report.summary())
     return report

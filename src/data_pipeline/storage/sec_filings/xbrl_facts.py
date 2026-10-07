@@ -13,8 +13,7 @@ from src.data_pipeline.contracts.sec_filings.xbrl_concepts import (
 from src.data_pipeline.contracts.sec_filings.xbrl_facts import XBRL_FACTS_ARROW_SCHEMA
 from src.data_pipeline.storage.iceberg import (
     PartitionColumn,
-    create_or_load_table,
-    silver_table_location,
+    SilverTableSpec,
 )
 
 XBRL_CONCEPTS_TABLE = "sec_filings.xbrl_concepts"
@@ -25,28 +24,22 @@ INSTANCE_BUCKET_PARTITION = (
 )
 
 
+XBRL_CONCEPTS_SPEC = SilverTableSpec(XBRL_CONCEPTS_TABLE, XBRL_CONCEPTS_ARROW_SCHEMA)
+XBRL_FACTS_SPEC = SilverTableSpec(
+    XBRL_FACTS_TABLE, XBRL_FACTS_ARROW_SCHEMA, INSTANCE_BUCKET_PARTITION
+)
+
+
 def open_xbrl_concepts_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
     """Load or create the unpartitioned `sec_filings.xbrl_concepts`."""
 
-    return create_or_load_table(
-        catalog,
-        XBRL_CONCEPTS_TABLE,
-        arrow_schema=XBRL_CONCEPTS_ARROW_SCHEMA,
-        location=silver_table_location(data_dir, XBRL_CONCEPTS_TABLE),
-        partition_by=(),
-    )
+    return XBRL_CONCEPTS_SPEC.open(catalog, data_dir)
 
 
 def open_xbrl_facts_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
     """Load or create `sec_filings.xbrl_facts`, bucketed by instance_id."""
 
-    return create_or_load_table(
-        catalog,
-        XBRL_FACTS_TABLE,
-        arrow_schema=XBRL_FACTS_ARROW_SCHEMA,
-        location=silver_table_location(data_dir, XBRL_FACTS_TABLE),
-        partition_by=INSTANCE_BUCKET_PARTITION,
-    )
+    return XBRL_FACTS_SPEC.open(catalog, data_dir)
 
 
 def read_concept_hashes(table: Table) -> dict[str, str]:

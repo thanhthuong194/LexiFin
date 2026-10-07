@@ -10,6 +10,8 @@ import pytest
 from pyiceberg.expressions import EqualTo
 
 from scripts.sec_filings.validate_silver import main
+from src.data_pipeline.contracts.sec_filings.xbrl_core import context_key_for
+from src.data_pipeline.contracts.sec_filings.xbrl_networks import network_id_for
 from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
     run_sec_filings_silver,
 )
@@ -23,6 +25,7 @@ from src.data_pipeline.storage.iceberg import (
     silver_table_location,
 )
 from src.data_pipeline.storage.sec_filings.filings import FILING_YEAR_PARTITION
+from tests.conftest import STATEMENT_ROLE
 
 pytestmark = pytest.mark.integration
 
@@ -37,7 +40,12 @@ TEN_K = "sec:0000320193-24-000123:document:0001"
 TEN_Q = "sec:0000320193-25-000057:document:0001"
 EIGHT_K = "sec:0000789019-25-000010:document:0001"
 EIGHT_K_TABLE = f"{EIGHT_K}:block:000005:table"
-SCHEMAS = {table.identifier: table.arrow_schema for table in SILVER_TABLES}
+FACTS = "sec_filings.xbrl_facts"
+DIMENSIONS = "sec_filings.xbrl_dimensions"
+RELATIONSHIPS = "sec_filings.xbrl_relationships"
+TEN_K_INSTANCE = "sec:0000320193-24-000123:xbrl:inline:default"
+PRESENTATION = network_id_for(TEN_K_INSTANCE, "presentation", STATEMENT_ROLE)
+SCHEMAS = {table.identifier: table.spec.arrow_schema for table in SILVER_TABLES}
 
 
 @pytest.fixture
@@ -192,6 +200,9 @@ def test_schema_mismatch_is_reported(silver: Path) -> None:
         (_rewrite(LINKS, "link_id", f"{EIGHT_K}:link:000003"), LINKS, "group"),
         (_rewrite(LINKS, "link_id", f"{EIGHT_K}:link:000002", {"target_document_id": None}), LINKS, "row_contract"),
         (_rewrite(LINKS, "link_id", f"{EIGHT_K}:link:000002", {"target_document_id": f"{TEN_K[:-4]}0002"}), LINKS, "group"),
+        (_rewrite(FACTS, "fact_id", f"{TEN_K_INSTANCE}:fact:00000001"), FACTS, "group"),
+        (_rewrite(DIMENSIONS, "context_key", context_key_for(TEN_K_INSTANCE, "FY_Widgets")), DIMENSIONS, "group"),
+        (_rewrite(RELATIONSHIPS, "network_id", PRESENTATION), RELATIONSHIPS, "group"),
     ],
     ids=[
         "duplicate-document-id",
@@ -208,6 +219,9 @@ def test_schema_mismatch_is_reported(silver: Path) -> None:
         "truncated-links",
         "resolved-link-without-target",
         "resolved-target-in-another-filing",
+        "instance-missing-a-fact",
+        "context-without-its-dimensions",
+        "network-without-relationships",
     ],
 )  # fmt: skip
 def test_broken_silver_is_reported_without_changes(

@@ -14,24 +14,25 @@ from src.data_pipeline.contracts.sec_filings.xbrl_fact_footnotes import (
     XBRL_FACT_FOOTNOTES_ARROW_SCHEMA,
 )
 from src.data_pipeline.storage.iceberg import (
-    create_or_load_table,
-    silver_table_location,
+    SilverTableSpec,
 )
 
 XBRL_DIMENSIONS_TABLE = "sec_filings.xbrl_dimensions"
 XBRL_FACT_FOOTNOTES_TABLE = "sec_filings.xbrl_fact_footnotes"
 
 
+XBRL_DIMENSIONS_SPEC = SilverTableSpec(
+    XBRL_DIMENSIONS_TABLE, XBRL_DIMENSIONS_ARROW_SCHEMA
+)
+XBRL_FACT_FOOTNOTES_SPEC = SilverTableSpec(
+    XBRL_FACT_FOOTNOTES_TABLE, XBRL_FACT_FOOTNOTES_ARROW_SCHEMA
+)
+
+
 def open_xbrl_dimensions_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
     """Load or create the unpartitioned `sec_filings.xbrl_dimensions`."""
 
-    return create_or_load_table(
-        catalog,
-        XBRL_DIMENSIONS_TABLE,
-        arrow_schema=XBRL_DIMENSIONS_ARROW_SCHEMA,
-        location=silver_table_location(data_dir, XBRL_DIMENSIONS_TABLE),
-        partition_by=(),
-    )
+    return XBRL_DIMENSIONS_SPEC.open(catalog, data_dir)
 
 
 def open_xbrl_fact_footnotes_table(
@@ -39,13 +40,7 @@ def open_xbrl_fact_footnotes_table(
 ) -> tuple[Table, bool]:
     """Load or create the unpartitioned `sec_filings.xbrl_fact_footnotes`."""
 
-    return create_or_load_table(
-        catalog,
-        XBRL_FACT_FOOTNOTES_TABLE,
-        arrow_schema=XBRL_FACT_FOOTNOTES_ARROW_SCHEMA,
-        location=silver_table_location(data_dir, XBRL_FACT_FOOTNOTES_TABLE),
-        partition_by=(),
-    )
+    return XBRL_FACT_FOOTNOTES_SPEC.open(catalog, data_dir)
 
 
 def read_contexts_by_instance(table: Table) -> dict[str, list[dict[str, Any]]]:

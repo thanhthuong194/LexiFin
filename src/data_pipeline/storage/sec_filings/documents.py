@@ -13,12 +13,16 @@ from src.data_pipeline.contracts.sec_filings.documents import (
 )
 from src.data_pipeline.storage.bronze import resolve_relative_path, sha256_bytes
 from src.data_pipeline.storage.iceberg import (
-    create_or_load_table,
-    silver_table_location,
+    SilverTableSpec,
 )
 from src.data_pipeline.storage.sec_filings.filings import FILING_YEAR_PARTITION
 
 DOCUMENTS_TABLE = "sec_filings.documents"
+
+
+DOCUMENTS_SPEC = SilverTableSpec(
+    DOCUMENTS_TABLE, DOCUMENTS_ARROW_SCHEMA, FILING_YEAR_PARTITION
+)
 
 
 @dataclass(frozen=True)
@@ -34,13 +38,7 @@ class StoredDocument:
 def open_documents_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
     """Load or create `sec_filings.documents`, returning whether it was created."""
 
-    return create_or_load_table(
-        catalog,
-        DOCUMENTS_TABLE,
-        arrow_schema=DOCUMENTS_ARROW_SCHEMA,
-        location=silver_table_location(data_dir, DOCUMENTS_TABLE),
-        partition_by=FILING_YEAR_PARTITION,
-    )
+    return DOCUMENTS_SPEC.open(catalog, data_dir)
 
 
 def read_document_groups(table: Table) -> dict[str, list[StoredDocument]]:

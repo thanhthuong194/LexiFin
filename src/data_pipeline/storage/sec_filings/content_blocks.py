@@ -10,24 +10,22 @@ from src.data_pipeline.contracts.sec_filings.content_blocks import (
     ContentBlockRecord,
 )
 from src.data_pipeline.storage.iceberg import (
-    create_or_load_table,
-    silver_table_location,
+    SilverTableSpec,
 )
 from src.data_pipeline.storage.sec_filings.filings import FILING_YEAR_PARTITION
 
 CONTENT_BLOCKS_TABLE = "sec_filings.content_blocks"
 
 
+CONTENT_BLOCKS_SPEC = SilverTableSpec(
+    CONTENT_BLOCKS_TABLE, CONTENT_BLOCKS_ARROW_SCHEMA, FILING_YEAR_PARTITION
+)
+
+
 def open_content_blocks_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
     """Load or create `sec_filings.content_blocks`, returning whether it was created."""
 
-    return create_or_load_table(
-        catalog,
-        CONTENT_BLOCKS_TABLE,
-        arrow_schema=CONTENT_BLOCKS_ARROW_SCHEMA,
-        location=silver_table_location(data_dir, CONTENT_BLOCKS_TABLE),
-        partition_by=FILING_YEAR_PARTITION,
-    )
+    return CONTENT_BLOCKS_SPEC.open(catalog, data_dir)
 
 
 def count_table_cell_blocks(table: Table) -> int:

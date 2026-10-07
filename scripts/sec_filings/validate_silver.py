@@ -40,7 +40,7 @@ def main() -> int:
         report = validate_silver(
             args.data_dir, verify_source_hashes=args.verify_source_hashes
         )
-    except Exception:  # noqa: BLE001 - logged as silver_audit_failed; exit code 2 reports it
+    except Exception:  # noqa: BLE001 - logged as silver_integrity_failed; exit code 2 reports it
         return 2
     return 0 if report.status == "passed" else 1
 
