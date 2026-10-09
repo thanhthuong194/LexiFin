@@ -1,31 +1,20 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
-
-from pydantic import ValidationError
 
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
 from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
-from src.data_pipeline.contracts.sec_filings.xbrl_dimensions import XbrlDimensionRecord
-from src.data_pipeline.contracts.sec_filings.xbrl_fact_footnotes import (
-    XbrlFactFootnoteRecord,
-)
+from src.data_pipeline.contracts.sec_filings.xbrl_facts import instance_of_fact
 from src.data_pipeline.pipelines.sec_filings.xbrl_facts_extraction import (
     entry_documents,
 )
 from src.data_pipeline.quality.sec_filings.xbrl_core import instance_problem
-from src.data_pipeline.quality.sec_filings.xbrl_enrichment import (
-    dimension_group_problem,
-    footnote_group_problem,
-    footnote_resources_problem,
-)
+from src.data_pipeline.storage.bronze import SecBronze
+from src.data_pipeline.storage.iceberg import GroupSummary
 from src.data_pipeline.storage.sec_filings.documents import read_document_content
-from src.data_pipeline.transforms.sec_filings.xbrl_dimensions import (
-    expected_dimension_count,
-)
 from src.data_pipeline.transforms.sec_filings.xbrl_sources import (
     INLINE_XBRL,
     LINK,
@@ -83,38 +72,38 @@ class EnrichmentPlan:
     conflicts: list[tuple[dict[str, str], str]] = field(default_factory=list)
 
 
-def _records[Record: (XbrlDimensionRecord, XbrlFactFootnoteRecord)](
-    model: type[Record], rows: Sequence[dict[str, Any]]
-) -> list[Record]:
-    try:
-        return [model.model_validate(row) for row in rows]
-    except ValidationError as error:
-        raise EnrichmentConflict(
-            f"stored row is invalid: {error.errors()[0]['msg']}"
-        ) from error
+@dataclass(frozen=True)
+class StoredEnrichment:
+    """Summaries of what the stage's parent and own tables hold, without rows.
+
+    `expected` maps each instance's context keys to the dimension members
+    their stored segment and scenario report; `fact_counts` counts stored
+    facts per instance; `dimensions` summarizes stored dimension rows by
+    context_key and `footnotes` stored footnote rows by fact_id.
+    """
+
+    expected: Mapping[str, Mapping[str, int]]
+    fact_counts: Mapping[str, int]
+    dimensions: Mapping[str, GroupSummary]
+    footnotes: Mapping[str, GroupSummary]
 
 
 def _dimensions_state(
-    contexts: Sequence[dict[str, Any]],
-    stored: StoredRows,
-    concept_ids: Collection[str],
+    expected: Mapping[str, int], dimensions: Mapping[str, GroupSummary]
 ) -> tuple[bool, bool]:
     """(complete, has_rows) of an instance's stored dimension groups."""
 
     reporting = present = 0
-    for context in contexts:
-        expected = expected_dimension_count(
-            context["segment_xml"], context["scenario_xml"]
-        )
-        reporting += expected > 0
-        rows = stored.get(context["context_key"], [])
-        if not rows:
+    for context_key, members in expected.items():
+        reporting += members > 0
+        group = dimensions.get(context_key)
+        if group is None:
             continue
-        problem = dimension_group_problem(
-            _records(XbrlDimensionRecord, rows), expected, concept_ids
-        )
-        if problem is not None:
-            raise EnrichmentConflict(f"context {context['context_ref']!r}: {problem}")
+        if not group.complete or group.rows != members:
+            raise EnrichmentConflict(
+                f"context {context_key}: {group.rows} stored dimensions, "
+                f"the context reports {members}"
+            )
         present += 1
     if present not in (0, reporting):
         raise EnrichmentConflict(
@@ -123,63 +112,56 @@ def _dimensions_state(
     return present == reporting, present > 0
 
 
-def _footnotes_state(fact_ids: Collection[str], stored: StoredRows) -> bool | None:
+def _footnotes_state(groups: Sequence[tuple[str, GroupSummary]]) -> bool | None:
     """True when an instance's stored footnote groups are complete, None if none."""
 
-    groups = [
-        _records(XbrlFactFootnoteRecord, stored[f]) for f in fact_ids if f in stored
-    ]
     if not groups:
         return None
-    for group in groups:
-        problem = footnote_group_problem(group)
-        if problem is not None:
-            raise EnrichmentConflict(f"fact {group[0].fact_id}: {problem}")
-    problem = footnote_resources_problem([row for group in groups for row in group])
-    if problem is not None:
-        raise EnrichmentConflict(problem)
+    for fact_id, group in groups:
+        if not group.complete:
+            raise EnrichmentConflict(f"fact {fact_id}: footnote ordinals are not 1..N")
     return True
 
 
 def classify_instances(
     instances: Sequence[XbrlInstanceRecord],
-    parents: EnrichmentParents,
-    stored_dimensions: StoredRows,
-    stored_footnotes: StoredRows,
+    documents: Mapping[str, DocumentRecord],
+    stored: StoredEnrichment,
 ) -> EnrichmentPlan:
     """Classify every instance against both tables before loading XBRL.
 
-    `stored_dimensions` groups rows by context_key and `stored_footnotes` by
-    fact_id. Rows of unknown contexts or facts, partial or invalid groups,
-    dimensions stored for only some contexts, and instances whose sources or
-    facts changed are conflicts.
+    Stored groups are judged by their summaries; `documents` holds at least
+    the instances' source documents. Rows of unknown contexts or instances,
+    partial groups, dimensions stored for only some contexts, and instances
+    whose sources or facts changed are conflicts. The integrity audit checks
+    the stored rows themselves.
     """
 
     plan = EnrichmentPlan()
-    context_keys = {
-        c["context_key"] for rows in parents.contexts.values() for c in rows
-    }
-    for key in sorted(stored_dimensions.keys() - context_keys):
+    known = {key for keys in stored.expected.values() for key in keys}
+    for key in sorted(stored.dimensions.keys() - known):
         plan.conflicts.append(({"context_key": key}, "dimensions have no context"))
-    fact_ids = {f for hashes in parents.fact_hashes.values() for f in hashes}
-    for fact_id in sorted(stored_footnotes.keys() - fact_ids):
-        plan.conflicts.append(({"fact_id": fact_id}, "footnotes have no fact"))
+    footnotes: dict[str, list[tuple[str, GroupSummary]]] = defaultdict(list)
+    instance_ids = {instance.instance_id for instance in instances}
+    for fact_id, group in sorted(stored.footnotes.items()):
+        if instance_of_fact(fact_id) in instance_ids:
+            footnotes[instance_of_fact(fact_id)].append((fact_id, group))
+        else:
+            plan.conflicts.append(({"fact_id": fact_id}, "footnotes have no fact"))
     for instance in instances:
         context = {"filing_id": instance.filing_id, "instance_id": instance.instance_id}
-        facts = parents.fact_hashes.get(instance.instance_id, {})
-        problem = instance_problem(instance, parents.documents)
-        if problem is None and len(facts) != instance.fact_count:
-            problem = f"xbrl_facts holds {len(facts)} of {instance.fact_count} facts"
+        facts = stored.fact_counts.get(instance.instance_id, 0)
+        problem = instance_problem(instance, documents)
+        if problem is None and facts != instance.fact_count:
+            problem = f"xbrl_facts holds {facts} of {instance.fact_count} facts"
         if problem is not None:
             plan.conflicts.append((context, problem))
             continue
         try:
             dimensions_stored, dimension_rows = _dimensions_state(
-                parents.contexts.get(instance.instance_id, []),
-                stored_dimensions,
-                parents.concept_ids,
+                stored.expected.get(instance.instance_id, {}), stored.dimensions
             )
-            footnotes_stored = _footnotes_state(facts, stored_footnotes)
+            footnotes_stored = _footnotes_state(footnotes[instance.instance_id])
         except EnrichmentConflict as error:
             plan.conflicts.append((context, str(error)))
             continue
@@ -197,7 +179,7 @@ def classify_instances(
 def declares_footnotes(
     instance: XbrlInstanceRecord,
     documents: Mapping[str, DocumentRecord],
-    data_dir: Path,
+    bronze: SecBronze,
 ) -> bool:
     """Whether the instance's own documents hold any footnote markup.
 
@@ -208,7 +190,7 @@ def declares_footnotes(
     return any(
         next(root.iter(*_FOOTNOTE_MARKUP), None) is not None
         for root in (
-            parse_xbrl_source(read_document_content(document, data_dir)).root
+            parse_xbrl_source(read_document_content(document, bronze)).root
             for document in entry_documents(instance, documents)
         )
     )

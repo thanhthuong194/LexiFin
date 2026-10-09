@@ -4,7 +4,6 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
 from src.data_pipeline.contracts.sec_filings.xbrl_concepts import (
@@ -18,6 +17,7 @@ from src.data_pipeline.pipelines.sec_filings.xbrl_facts_state import (
     ContentMaps,
     InstanceRefs,
 )
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.sec_filings.documents import read_document_content
 from src.data_pipeline.transforms.sec_filings.html_dom import parse_html
 from src.data_pipeline.transforms.sec_filings.xbrl_facts import (
@@ -94,7 +94,7 @@ def source_files(
     instance: XbrlInstanceRecord,
     documents: Mapping[str, DocumentRecord],
     filing_documents: Sequence[DocumentRecord],
-    data_dir: Path,
+    bronze: SecBronze,
 ) -> list[SourceFile]:
     """The instance's entry documents and its filing's taxonomy, read and verified."""
 
@@ -106,7 +106,7 @@ def source_files(
         SourceFile(
             d.document_id,
             d.filename or "",
-            read_document_content(d, data_dir),
+            read_document_content(d, bronze),
             is_entry=d in entries,
         )
         for d in (*entries, *taxonomy)
@@ -189,7 +189,7 @@ class ExtractionInputs:
     stored_concepts: Mapping[str, str]
     fact_concepts: Collection[str]
     content: Callable[[str], ContentMaps]
-    data_dir: Path
+    bronze: SecBronze
     settings: ProcessorSettings
     processed_at: datetime
 
@@ -203,7 +203,7 @@ def _extract_one(
     files = extraction.durations.run(
         "materialize_sources",
         lambda: source_files(
-            instance, inputs.documents, filing_documents, inputs.data_dir
+            instance, inputs.documents, filing_documents, inputs.bronze
         ),
     )
     logger.info("xbrl_source_documents_verified", documents=len(files))

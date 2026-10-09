@@ -2,15 +2,21 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from itertools import batched
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
+import pyarrow.compute as pc
 from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 
+from src.data_pipeline.contracts.sec_filings.documents import (
+    DOCUMENTS_ARROW_SCHEMA,
+    DocumentRecord,
+)
 from src.data_pipeline.contracts.sec_filings.xbrl_concepts import (
     XBRL_CONCEPTS_ARROW_SCHEMA,
 )
@@ -25,24 +31,27 @@ from src.data_pipeline.pipelines.sec_filings.xbrl_facts_extraction import (
     extract_instances,
 )
 from src.data_pipeline.pipelines.sec_filings.xbrl_facts_state import (
-    ContentIndex,
     InstanceRefs,
     classify_instances,
+    read_content,
     validate_built,
     verify_concepts,
 )
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import (
     append_rows,
     current_snapshot_id,
-    group_rows_by,
+    filing_dates_filter,
     open_silver_catalog,
+    read_groups_in,
+    read_rows_in,
+    scan_batches,
+    snapshot_total,
+    summarize_groups,
     verify_append,
     verify_written_groups,
 )
-from src.data_pipeline.storage.sec_filings.documents import (
-    open_documents_table,
-    read_documents,
-)
+from src.data_pipeline.storage.sec_filings.documents import open_documents_table
 from src.data_pipeline.storage.sec_filings.xbrl_core import (
     XBRL_CONTEXTS_TABLE,
     XBRL_INSTANCES_TABLE,
@@ -63,6 +72,9 @@ from src.utils.logger import get_logger, log_context
 from src.utils.timer import timed_operation
 
 logger = get_logger(__name__)
+
+# Instances loaded with their DTS, validated and committed together.
+INSTANCES_PER_COMMIT = 100
 
 
 @dataclass
@@ -115,32 +127,29 @@ def _count(
 ) -> None:
     concepts = list(extraction.concepts.values())
     kinds = Counter(fact.fact_kind for fact in facts)
-    summary.concepts_discovered = len(extraction.definitions)
-    summary.concepts_inserted = len(concepts)
-    summary.concepts_skipped = summary.concepts_discovered - len(concepts)
-    summary.extension_concepts = sum(c.is_extension for c in concepts)
-    summary.standard_concepts = len(concepts) - summary.extension_concepts
-    summary.facts_inserted = len(facts)
-    summary.numeric_facts = kinds["numeric"]
-    summary.nonnumeric_facts = kinds["non_numeric"]
-    summary.fraction_facts = kinds["fraction"]
-    summary.nil_facts = sum(fact.is_nil for fact in facts)
-    summary.hidden_facts = sum(fact.is_hidden for fact in facts)
-    summary.continued_facts = sum(bool(fact.continuation_refs) for fact in facts)
-    summary.aligned_block_facts = extraction.locations["block"]
-    summary.aligned_cell_facts = extraction.locations["cell"]
-    summary.unaligned_facts = extraction.locations["none"]
-    summary.instances_recovered = len(extraction.recovered)
-    summary.instances_inserted = len(extraction.facts) - len(extraction.recovered)
+    summary.concepts_inserted += len(concepts)
+    summary.extension_concepts += sum(c.is_extension for c in concepts)
+    summary.standard_concepts += len(concepts) - sum(c.is_extension for c in concepts)
+    summary.facts_inserted += len(facts)
+    summary.numeric_facts += kinds["numeric"]
+    summary.nonnumeric_facts += kinds["non_numeric"]
+    summary.fraction_facts += kinds["fraction"]
+    summary.nil_facts += sum(fact.is_nil for fact in facts)
+    summary.hidden_facts += sum(fact.is_hidden for fact in facts)
+    summary.continued_facts += sum(bool(fact.continuation_refs) for fact in facts)
+    summary.aligned_block_facts += extraction.locations["block"]
+    summary.aligned_cell_facts += extraction.locations["cell"]
+    summary.unaligned_facts += extraction.locations["none"]
+    summary.instances_recovered += len(extraction.recovered)
+    summary.instances_inserted += len(extraction.facts) - len(extraction.recovered)
 
 
 def _write(
     tables: tuple[Table, Table],
     extraction: FactsExtraction,
-    stored_counts: tuple[int, int],
     summary: XbrlFactsStageSummary,
 ) -> None:
-    """Append and verify new concepts, then the new fact groups."""
+    """Append and verify the batch's new concepts, then its fact groups."""
 
     concepts_table, facts_table = tables
     concepts = sorted(
@@ -150,12 +159,16 @@ def _write(
         (fact for group in extraction.facts.values() for fact in group),
         key=lambda f: (f.instance_id, f.fact_order),
     )
+    stored = (
+        snapshot_total(concepts_table, "total-records"),
+        snapshot_total(facts_table, "total-records"),
+    )
     if concepts:
         with timed_operation("xbrl_facts.write_concepts", records=len(concepts)):
             append_rows(concepts_table, concepts, XBRL_CONCEPTS_ARROW_SCHEMA)
     with timed_operation("xbrl_facts.verify", table=XBRL_CONCEPTS_TABLE):
         summary.concepts_snapshot_after = verify_concepts(
-            concepts_table, concepts, stored_counts[0], summary.concepts_snapshot_before
+            concepts_table, concepts, stored[0], summary.concepts_snapshot_after
         )
     if facts:
         with timed_operation("xbrl_facts.write_facts", records=len(facts)):
@@ -164,9 +177,9 @@ def _write(
         summary.facts_snapshot_after = verify_append(
             facts_table,
             key_column="fact_id",
-            expected_rows=stored_counts[1] + len(facts),
+            expected_rows=stored[1] + len(facts),
             inserted_keys=[fact.fact_id for fact in facts],
-            snapshot_before=summary.facts_snapshot_before,
+            snapshot_before=summary.facts_snapshot_after,
         )
         verify_written_groups(
             facts_table, facts, key_column="fact_id", group_column="instance_id"
@@ -174,20 +187,124 @@ def _write(
     _count(extraction, facts, summary)
     logger.info(
         "xbrl_instance_facts_inserted",
-        instances=summary.instances_inserted,
-        facts=summary.facts_inserted,
-        concepts=summary.concepts_inserted,
+        instances=len(extraction.facts) - len(extraction.recovered),
+        facts=len(facts),
+        concepts=len(concepts),
     )
-    logger.info("xbrl_instance_facts_recovered", instances=summary.instances_recovered)
+    logger.info("xbrl_instance_facts_recovered", instances=len(extraction.recovered))
+
+
+@dataclass
+class _Run:
+    """What every batch of one run shares and updates."""
+
+    catalog: Catalog
+    data_dir: Path
+    bronze: SecBronze
+    settings: ProcessorSettings
+    processed_at: datetime
+    instances: dict[str, XbrlInstanceRecord]
+    sources: dict[str, DocumentRecord]
+    concept_hashes: dict[str, str]
+    fact_concepts: set[str]
+    discovered: set[str] = field(default_factory=set)
+
+
+def _batch_inputs(run: _Run, batch: Sequence[XbrlInstanceRecord]) -> ExtractionInputs:
+    """Documents, refs and stored content of the batch's filings and instances."""
+
+    filings = {instance.filing_id for instance in batch}
+    dates = {
+        run.sources[document_id].filing_date
+        for instance in batch
+        for document_id in instance.source_document_ids
+        if document_id in run.sources
+    }
+    documents = {
+        row["document_id"]: DocumentRecord.model_validate(row)
+        for rows in read_groups_in(
+            open_documents_table(run.catalog, run.data_dir)[0],
+            "filing_id",
+            filings,
+            files=filing_dates_filter(dates),
+        ).values()
+        for row in rows
+    }
+    ids = {instance.instance_id for instance in batch}
+    refs = InstanceRefs(
+        contexts=read_refs_by_instance(
+            open_xbrl_core_table(run.catalog, run.data_dir, XBRL_CONTEXTS_TABLE)[0],
+            "context_ref",
+            ids,
+        ),
+        units=read_refs_by_instance(
+            open_xbrl_core_table(run.catalog, run.data_dir, XBRL_UNITS_TABLE)[0],
+            "unit_ref",
+            ids,
+        ),
+    )
+    sources = [
+        documents[document_id]
+        for instance in batch
+        for document_id in instance.source_document_ids
+        if document_id in documents
+    ]
+    return ExtractionInputs(
+        documents,
+        refs,
+        run.concept_hashes,
+        run.fact_concepts,
+        read_content(run.catalog, run.data_dir, sources),
+        run.bronze,
+        run.settings,
+        run.processed_at,
+    )
+
+
+def _run_batch(
+    run: _Run,
+    tables: tuple[Table, Table],
+    batch: Sequence[XbrlInstanceRecord],
+    summary: XbrlFactsStageSummary,
+) -> bool:
+    """Load, validate and commit one batch of instances; return whether written."""
+
+    inputs = _batch_inputs(run, batch)
+    with timed_operation("xbrl_facts.extract", instances=len(batch)):
+        extraction = extract_instances(batch, inputs)
+    run.discovered |= extraction.definitions.keys()
+    summary.facts_discovered += sum(map(len, extraction.facts.values()))
+    summary.normalization_warnings += extraction.unusable_values
+    summary.instances_failed += extraction.failures
+    summary.instances_conflicted += extraction.conflicts + extraction.incompatible
+    with timed_operation("xbrl_facts.validate", phase="built_records"):
+        summary.instances_conflicted += validate_built(
+            extraction.facts,
+            run.instances,
+            set(run.concept_hashes) | set(extraction.definitions),
+            inputs.refs,
+        )
+    if summary.instances_failed or summary.instances_conflicted:
+        return False
+    _write(tables, extraction, summary)
+    run.concept_hashes.update(
+        (c.concept_id, c.concept_definition_sha256)
+        for c in extraction.concepts.values()
+    )
+    run.fact_concepts.update(
+        fact.concept_id for group in extraction.facts.values() for fact in group
+    )
+    return True
 
 
 def _run_facts(
     catalog: Catalog,
-    data_dir: Path,
+    dirs: tuple[Path, SecBronze],
     settings: ProcessorSettings,
     processed_at: datetime,
     summary: XbrlFactsStageSummary,
 ) -> None:
+    data_dir, bronze = dirs
     tables = {}
     for identifier, opener in (
         (XBRL_CONCEPTS_TABLE, open_xbrl_concepts_table),
@@ -213,29 +330,37 @@ def _run_facts(
             ).values()
             for record in map(XbrlInstanceRecord.model_validate, rows)
         }
-        documents = {
-            d.document_id: d
-            for d in read_documents(open_documents_table(catalog, data_dir)[0])
+        sources = {
+            row["document_id"]: DocumentRecord.model_validate(row)
+            for row in read_rows_in(
+                open_documents_table(catalog, data_dir)[0],
+                "document_id",
+                {d for i in instances.values() for d in i.source_document_ids},
+                columns=DOCUMENTS_ARROW_SCHEMA.names,
+            )
         }
-        refs = InstanceRefs(
-            contexts=read_refs_by_instance(
-                open_xbrl_core_table(catalog, data_dir, XBRL_CONTEXTS_TABLE)[0],
-                "context_ref",
-            ),
-            units=read_refs_by_instance(
-                open_xbrl_core_table(catalog, data_dir, XBRL_UNITS_TABLE)[0], "unit_ref"
-            ),
+        stored_facts = summarize_groups(facts_table, "instance_id", "fact_order")
+        run = _Run(
+            catalog,
+            data_dir,
+            bronze,
+            settings,
+            processed_at,
+            instances,
+            sources,
+            read_concept_hashes(concepts_table),
+            {
+                concept_id
+                for batch in scan_batches(facts_table, ("concept_id",))
+                for concept_id in pc.unique(batch["concept_id"]).to_pylist()
+            },
         )
-        concept_hashes = read_concept_hashes(concepts_table)
-        stored_facts = group_rows_by(facts_table, "instance_id")
     summary.instances_considered = len(instances)
     logger.info("xbrl_instances_loaded", instances=len(instances))
 
     ordered = sorted(instances.values(), key=lambda i: (i.filing_id, i.instance_id))
     with timed_operation("xbrl_facts.validate", phase="existing_state"):
-        plan = classify_instances(
-            ordered, documents, stored_facts, concept_hashes, refs
-        )
+        plan = classify_instances(ordered, sources, stored_facts)
     for context, reason in plan.conflicts:
         logger.error("xbrl_instance_facts_conflict", reason=reason, **context)
     summary.instances_skipped = plan.skipped
@@ -243,48 +368,34 @@ def _run_facts(
     logger.info("xbrl_instance_facts_skipped", instances=plan.skipped)
     if plan.conflicts:
         return
-
-    inputs = ExtractionInputs(
-        documents,
-        refs,
-        concept_hashes,
-        {row["concept_id"] for rows in stored_facts.values() for row in rows},
-        ContentIndex(catalog, data_dir),
-        data_dir,
-        settings,
-        processed_at,
+    stored_concepts = len(run.concept_hashes)
+    for batch in batched(plan.candidates, INSTANCES_PER_COMMIT, strict=False):
+        if not _run_batch(run, (concepts_table, facts_table), batch, summary):
+            return
+    summary.concepts_discovered = len(run.discovered)
+    summary.concepts_skipped = len(run.discovered) - (
+        len(run.concept_hashes) - stored_concepts
     )
-    with timed_operation("xbrl_facts.extract", instances=len(plan.candidates)):
-        extraction = extract_instances(plan.candidates, inputs)
-    summary.facts_discovered = sum(map(len, extraction.facts.values()))
-    summary.normalization_warnings = extraction.unusable_values
-    summary.instances_failed = extraction.failures
-    summary.instances_conflicted += extraction.conflicts + extraction.incompatible
-    with timed_operation("xbrl_facts.validate", phase="built_records"):
-        summary.instances_conflicted += validate_built(
-            extraction.facts,
-            instances,
-            set(concept_hashes) | set(extraction.definitions),
-            refs,
-        )
-    if summary.instances_failed or summary.instances_conflicted:
-        return
-    stored_counts = (len(concept_hashes), sum(map(len, stored_facts.values())))
-    _write((concepts_table, facts_table), extraction, stored_counts, summary)
     summary.status = "completed"
 
 
 def run_xbrl_facts_stage(
-    data_dir: Path, processed_at: datetime, settings: ProcessorSettings
+    data_dir: Path,
+    processed_at: datetime,
+    settings: ProcessorSettings,
+    bronze: SecBronze | None = None,
 ) -> XbrlFactsStageSummary:
     """Build `xbrl_concepts` and `xbrl_facts` from the stored XBRL instances.
 
     Instances whose fact group is complete are skipped without loading XBRL.
     Every other instance is loaded with its DTS by the XBRL processor from
     its verified source documents; its concepts and fact occurrences must
-    agree with the XBRL core rows. The whole batch is validated before new
-    concepts, then facts, are appended and re-read. Any conflict, failure or
-    missing taxonomy rejects the batch; unexpected errors are logged and raised.
+    agree with the XBRL core rows. Stored fact groups are judged by their
+    summaries; any conflict rejects the run before the first write. Instances
+    are loaded and committed in batches of INSTANCES_PER_COMMIT: new concepts,
+    then facts, appended and re-read. A failure, conflict or missing taxonomy
+    rejects its batch; earlier batches stay committed. Unexpected errors are
+    logged and raised.
     """
 
     started = perf_counter()
@@ -300,7 +411,13 @@ def run_xbrl_facts_stage(
                 timed_operation("xbrl_facts.total"),
                 open_silver_catalog(data_dir) as catalog,
             ):
-                _run_facts(catalog, data_dir, settings, processed_at, summary)
+                _run_facts(
+                    catalog,
+                    (data_dir, bronze or SecBronze.under(data_dir)),
+                    settings,
+                    processed_at,
+                    summary,
+                )
         except Exception as error:
             logger.error(
                 "xbrl_facts_stage_failed",

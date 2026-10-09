@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 from src.data_pipeline.contracts.sec_filings.document_table_cells import (
     DocumentTableCellRecord,
@@ -15,6 +14,7 @@ from src.data_pipeline.pipelines.sec_filings.document_table_state import (
 from src.data_pipeline.quality.sec_filings.document_tables import (
     table_blocks_sync_problem,
 )
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.sec_filings.documents import read_document_content
 from src.data_pipeline.transforms.sec_filings.document_tables import (
     build_document_tables,
@@ -56,7 +56,7 @@ class TableExtraction:
 
 
 def _extract(
-    plan: TablePlan, data_dir: Path, result: TableExtraction
+    plan: TablePlan, bronze: SecBronze, result: TableExtraction
 ) -> dict[str, tuple[RawTable, ...]]:
     """Parse each candidate's verified HTML once and read its tables.
 
@@ -71,7 +71,7 @@ def _extract(
         context = document_context(parent)
         with log_context(document_id=parent.document_id, form=parent.document_type):
             try:
-                content = read_document_content(parent, data_dir)
+                content = read_document_content(parent, bronze)
                 verified_documents += 1
                 verified_bytes += len(content)
                 root = parse_html(content)
@@ -135,7 +135,7 @@ def _build(
 
 
 def extract_document_tables(
-    plan: TablePlan, data_dir: Path, processed_at: datetime
+    plan: TablePlan, bronze: SecBronze, processed_at: datetime
 ) -> TableExtraction:
     """Build table and cell records for the plan's candidate documents.
 
@@ -146,7 +146,7 @@ def extract_document_tables(
 
     result = TableExtraction()
     with timed_operation("tables.extract_tables", documents=len(plan.candidates)):
-        extracted = _extract(plan, data_dir, result)
+        extracted = _extract(plan, bronze, result)
     with timed_operation("tables.build_grid", documents=len(extracted)):
         _build(plan, extracted, processed_at, result)
     return result

@@ -1,6 +1,6 @@
 # SEC Silver data model (`sec_filings`)
 
-Tài liệu này mô tả model Silver **đúng như code đang ghi**: 19 bảng Iceberg trong namespace `sec_filings`, dựng từ SEC Bronze bằng `scripts/sec_filings/build_silver.py`. Nguồn sự thật là catalog và code: schema ở `src/data_pipeline/contracts/sec_filings/`, định nghĩa bảng (identifier + schema + partition) ở các `*_SPEC` của `src/data_pipeline/storage/sec_filings/`, thứ tự stage ở `SILVER_STAGES` (`pipelines/sec_filings/silver_stages.py`), kiểm tra toàn vẹn ở `quality/sec_filings/silver_audit.py`. `src/data_pipeline/bronze-silver.md` là ghi chú thiết kế ban đầu, không phải mô tả hiện trạng.
+Tài liệu này mô tả model Silver **đúng như code đang ghi**: 19 bảng Iceberg trong namespace `sec_filings`, dựng từ SEC Bronze bằng `scripts/sec_filings/build_silver.py`. Nguồn sự thật là catalog và code: schema ở `src/data_pipeline/contracts/sec_filings/`, định nghĩa bảng (identifier + schema + partition) ở các `*_SPEC` của `src/data_pipeline/storage/sec_filings/`, thứ tự stage ở `SILVER_STAGES` (`pipelines/sec_filings/silver_stages.py`), bảng/khoá/FK mà audit kiểm ở `quality/sec_filings/silver_model.py`, audit ở `quality/sec_filings/silver_audit.py`. `src/data_pipeline/bronze-silver.md` là ghi chú thiết kế ban đầu, không phải mô tả hiện trạng.
 
 Số liệu "Rows" là của `data/` (343 filing của 5 công ty), đo ngày 2026-10-07; mỗi bảng có đúng 1 snapshot.
 
@@ -168,16 +168,19 @@ erDiagram
 
 ## 6. Integrity audit
 
-`build_silver.py --check-only` (và stage cuối `integrity` của pipeline) chạy `validate_silver`, chỉ đọc: không tạo bảng, không ghi, snapshot trước/sau phải bằng nhau. Kiểm:
+Một cài đặt audit duy nhất (`quality/sec_filings/silver_audit*.py`; bảng, khoá và FK khai báo ở `silver_model.py`), chạy bởi stage cuối `integrity` của pipeline, `build_silver.py --check-only` và `scripts/sec_filings/audit_silver.py` (thêm `--sample-per-form`, `--batch-size`, `--verify-source-hashes`). Chỉ đọc: catalog mở read-only, không tạo bảng, metadata bảng và stat file catalog/warehouse trước/sau phải bằng nhau. Bộ nhớ không tăng theo số row: đọc từng file Parquet theo batch, cột khoá/lineage/group được chép vào một SQLite tạm trên đĩa và kiểm bằng SQL. Kiểm:
 
-- schema (thứ tự field, kiểu, nullability), partition spec và location của cả 19 bảng;
+- catalog đủ 19 bảng code định nghĩa (bảng lạ là warning), tên `sec_filings.documents`;
+- contract Pydantic ↔ schema Arrow ↔ schema Iceberg (field ID, kiểu, nullability) ↔ schema và field ID của từng file Parquet; partition spec, location, số file/record khớp snapshot summary;
+- contract từng row (giá trị cho phép, timestamp có timezone, định dạng hash, decimal hữu hạn, ID và hash dẫn xuất của row);
 - primary key và các khoá grain ở mục 1;
-- 32 foreign key kèm field copy từ cha (`filing_id`, `document_id`, `filing_date`, `source_document_sha256`, `source_path`…); FK nullable chỉ kiểm khi khác null; `source_document_id` của label/relationship phải là document đã lưu (relationship: của chính filing của instance) hoặc URL;
-- contract từng row (giá trị cho phép, timestamp có timezone, định dạng hash, decimal hữu hạn, ID dẫn xuất);
-- độ đầy đủ của từng group, dùng lại các `*_problem` của stage: document theo filing, section/block/table theo document, cell theo bảng, link theo document nguồn, exhibit theo filing, context/unit/fact theo instance, dimension theo context, footnote theo fact, network theo instance, relationship theo network (network phải có ít nhất 1 relationship);
-- `--verify-source-hashes` (chỉ ở `scripts/sec_filings/validate_silver.py`) hash lại Bronze.
+- 32 foreign key kèm field copy từ cha (`filing_id`, `document_id`, `filing_date`, `source_document_sha256`, `source_path`…); FK nullable chỉ kiểm khi khác null;
+- group: ordinal 1..N và count khai báo của mọi group; count do cha khai báo (`fact_count`, `context_count`, `unit_count`, `cell_count`, `relationship_count`, số member của context);
+- cardinality và ngữ nghĩa: mỗi filing có document, entity và đúng một primary document cùng form; narrative chỉ ở primary HTML; cây section (một root, không tự làm cha, level cha thấp hơn, range lồng nhau, start tăng dần, root phủ mọi block, block nằm trong section sâu nhất); block `table` trỏ tới `<table>` và có đúng một `document_tables`, không còn `table_cell`; số header và lưới của cell; link chỉ từ HTML; exhibit đọc từ primary document; nguồn instance thuộc filing, đúng thứ tự, `source_set_sha256` tính lại; fact từ document nguồn của instance; footnote resource nhất quán; thuộc tính relationship theo loại linkbase; `source_document_id` của label/relationship là document đã lưu (của chính filing) hoặc URL;
+- Bronze: file của mọi filing nằm trong `data_dir` và tồn tại; `--verify-source-hashes` hash lại mọi submission, primary document, span của document và entity;
+- lineage mẫu: filing mới nhất của mỗi form (10-K, 10-Q, 8-K) được dựng lại từ Bronze bằng code của stage (documents, entities, sections, blocks, tables, cells) và so với Silver; `section_text_sha256`, `table_content_sha256`, text block bằng cell nối lại và `network_hash` chỉ tính lại trên filing mẫu, vì cần text của cả group.
 
-Kết quả trên `data/`: 104 check, 2.216.683 row, 0 error, 150 warning (149 `public_document_count` không khớp số `<DOCUMENT>` thật, 1 nhóm link unresolved); ~64 s, RSS tối đa ~3,1 GB (bảng filing/document/HTML được đọc, kiểm, rồi giải phóng, chỉ giữ cột khoá cho phần XBRL).
+Kết quả trên `data/` (2026-10-07): 263 PASS, 2 WARN (149 `public_document_count`, 1.154 link unresolved), 0 FAIL, 1 SKIP (`source_hashes` khi không có `--verify-source-hashes`); ~80 s, RSS tối đa ~0,7 GB, SQLite tạm ~1,1 GB trên đĩa.
 
 ## 7. Đường join tiêu biểu
 
@@ -259,14 +262,14 @@ join filings f on f.filing_id = d.filing_id where b.block_id = ?;
 - `filings.accepted_at` là giờ naive như header EDGAR ghi (giờ miền Đông Mỹ, không có offset); không tự đổi sang UTC.
 - `filings.public_document_count` không đáng tin (149/343 filing lớn hơn số `<DOCUMENT>` thật): chỉ warning.
 - `inside_table` dư thừa với `source_table_xpath` (mục 5).
-- Integrity gate trong pipeline không hash lại Bronze; dùng `scripts/sec_filings/validate_silver.py --verify-source-hashes` khi cần.
-- Không có lock: không chạy hai build cùng `--data-dir`. Không có global rollback: stage bị reject không ghi gì, lần chạy sau resume từ phần đã commit.
+- Integrity gate chỉ hash lại Bronze của filing mẫu; dùng `scripts/sec_filings/audit_silver.py --verify-source-hashes` để hash lại mọi filing.
+- Không có lock: không chạy hai build cùng `--data-dir`. Không có global rollback: conflict khi phân loại làm stage reject trước lần ghi đầu; lỗi trong một lô chỉ chặn lô đó, các lô trước đã commit và được skip ở lần chạy sau.
 - `exhibits` phụ thuộc quy tắc nhận bảng Exhibit Index (AGENTS.md); đổi quy tắc thì filing có entry khác sẽ conflict cho tới khi rebuild có kiểm soát bảng `exhibits`.
 
 ## 9. Hiệu năng (đo trên `data/`, 2026-10-07)
 
-- Chạy lại toàn pipeline khi không có Bronze mới: ~2 phút, RSS tối đa ~5,5 GB. Theo stage: filings 7,0 s; documents 0,1 s; filing_entities 0,2 s; narrative 2,3 s; document_tables 25,3 s; document_links 8,6 s; exhibit_index 1,0 s; xbrl_core 1,7 s; xbrl_facts 10,1 s; xbrl_enrichment 4,4 s; xbrl_linkbases 2,1 s; integrity 59 s. Dựng từ đầu: xem AGENTS.md (các stage XBRL chiếm phần lớn, do Arelle nạp DTS).
-- `--check-only`: ~63 s, RSS ~3,1 GB.
+- Dựng từ đầu (offline, cache taxonomy ấm): ~41 phút, RSS tối đa ~2,6 GB; ba stage XBRL chiếm ~36 phút (Arelle nạp DTS mỗi instance). Chạy lại khi không có Bronze mới: ~1,5 phút, RSS tối đa ~0,75 GB; mỗi stage bảng 2–5 s và ≤ 0,4 GB, integrity ~75 s. Các stage đọc tóm tắt group thay vì row và commit theo lô, nên bộ nhớ theo kích thước lô và số group, không theo số row (AGENTS.md).
+- Audit (`--check-only`, stage `integrity`, `audit_silver.py`): ~80 s, RSS tối đa ~0,7 GB (đọc batch ~60 s, chủ yếu là validate contract từng row; SQL ~15 s; lineage 3 filing mẫu ~4 s), SQLite tạm ~1,1 GB trên đĩa.
 - Kích thước: toàn bộ ~98 MB Parquet. Lớn nhất là `xbrl_relationships` (26 MB, 1 file), `xbrl_facts` (23 MB, 32 file vì `bucket(32, instance_id)`), `xbrl_labels` (13 MB), `xbrl_concepts` (10 MB), `document_table_cells` (9 MB, 6 file theo năm). Mỗi bảng có 1 snapshot.
 - Query tiêu biểu (DuckDB trên Arrow, sau khi nạp đúng các cột cần ~0,4 s): 3–90 ms cho query 1–6 và 8, ~0,4–0,7 s cho query 7 (lọc label theo DTS).
 - Partition giữ nguyên: dữ liệu nhỏ, bảng partition theo năm có 6 file/bảng; `xbrl_facts` có 32 file nhỏ (~0,7 MB) nhưng chưa có query pattern đo được nào bị chậm vì việc đó. Chỉ đổi partition khi có query cụ thể và số đo.

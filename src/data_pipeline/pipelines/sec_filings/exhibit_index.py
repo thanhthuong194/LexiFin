@@ -3,12 +3,15 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from itertools import batched
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
 
 from pydantic import ValidationError
 from pyiceberg.catalog import Catalog
+from pyiceberg.expressions import BooleanExpression
+from pyiceberg.table import Table
 
 from src.data_pipeline.contracts.sec_filings.exhibits import (
     EXHIBITS_ARROW_SCHEMA,
@@ -18,9 +21,12 @@ from src.data_pipeline.contracts.sec_filings.filings import FilingRecord
 from src.data_pipeline.storage.iceberg import (
     append_rows,
     current_snapshot_id,
-    group_rows_by,
+    filing_dates_filter,
+    iter_rows,
     open_silver_catalog,
+    read_groups_in,
     read_rows_in,
+    snapshot_total,
     verify_append,
     verify_written_groups,
 )
@@ -57,6 +63,10 @@ from src.utils.logger import get_logger, log_context
 from src.utils.timer import timed_operation
 
 logger = get_logger(__name__)
+
+# Filings whose Exhibit Index entries are rebuilt, compared and committed
+# together; each batch reads only its filings' rows of the source tables.
+FILINGS_PER_COMMIT = 500
 
 
 @dataclass
@@ -102,20 +112,18 @@ def _regions(
 ) -> dict[str, _Region]:
     """Exhibit region sections, by section_id."""
 
-    rows = (
-        open_sections_table(catalog, data_dir)[0]
-        .scan(
-            selected_fields=(
+    rows = list(
+        iter_rows(
+            open_sections_table(catalog, data_dir)[0],
+            (
                 "section_id",
                 "filing_id",
                 "document_id",
                 "section_kind",
                 "section_code",
                 "parent_section_id",
-            )
+            ),
         )
-        .to_arrow()
-        .to_pylist()
     )
     codes = {row["section_id"]: row["section_code"] for row in rows}
     return {
@@ -131,7 +139,10 @@ def _regions(
 
 
 def _read_tables(
-    catalog: Catalog, data_dir: Path, regions: dict[str, _Region]
+    catalog: Catalog,
+    data_dir: Path,
+    regions: dict[str, _Region],
+    files: BooleanExpression,
 ) -> list[dict[str, Any]]:
     """The stored tables inside exhibit regions, in document and table order."""
 
@@ -142,6 +153,7 @@ def _read_tables(
             "section_id",
             regions,
             columns=("block_id", "block_type"),
+            files=files,
         )
         if row["block_type"] == "table"
     }
@@ -150,22 +162,32 @@ def _read_tables(
         "block_id",
         section_of,
         columns=("table_id", "document_id", "table_ordinal"),
+        files=files,
     )
     for table in tables:
         table["section_id"] = section_of[table["block_id"]]
     return sorted(tables, key=lambda t: (t["document_id"], t["table_ordinal"]))
 
 
-def _extract(catalog: Catalog, data_dir: Path, regions: dict[str, _Region]) -> None:
-    """Fill each region with the entries of its exhibit tables."""
+def _extract(
+    catalog: Catalog,
+    data_dir: Path,
+    regions: dict[str, _Region],
+    files: BooleanExpression,
+) -> None:
+    """Fill each region with the entries of its exhibit tables.
 
-    tables = _read_tables(catalog, data_dir, regions)
+    `files` prunes the reads to the partitions of the regions' filings.
+    """
+
+    tables = _read_tables(catalog, data_dir, regions, files)
     cells: dict[str, list[GridCell]] = defaultdict(list)
     for row in read_rows_in(
         open_document_table_cells_table(catalog, data_dir)[0],
         "table_id",
         {table["table_id"] for table in tables},
         columns=("row_ordinal", "column_ordinal", "colspan", "text", "source_xpath"),
+        files=files,
     ):
         cells[row.pop("table_id")].append(GridCell(**row))
     links: dict[str, list[CellLink]] = defaultdict(list)
@@ -174,6 +196,7 @@ def _extract(catalog: Catalog, data_dir: Path, regions: dict[str, _Region]) -> N
         "source_document_id",
         {table["document_id"] for table in tables},
         columns=("source_xpath", "href", "target_document_id"),
+        files=files,
     ):
         links[row.pop("source_document_id")].append(CellLink(**row))
     for table in tables:
@@ -264,6 +287,52 @@ def _compare(
     return new
 
 
+def _run_batch(
+    catalog: Catalog,
+    run: tuple[Path, datetime, Table],
+    regions: dict[str, _Region],
+    filings: dict[str, FilingRecord],
+    summary: ExhibitIndexStageSummary,
+) -> bool:
+    """Rebuild, compare and commit the entries of a batch of filings.
+
+    `filings` are the batch's filings: those with exhibit regions or stored
+    entries. Returns whether the batch was written.
+    """
+
+    data_dir, processed_at, table = run
+    files = filing_dates_filter({filing.filing_date for filing in filings.values()})
+    _extract(catalog, data_dir, regions, files)
+    built = _build(regions, filings, processed_at, summary)
+    summary.filings_with_exhibit_index += len(built)
+    stored = read_groups_in(table, "filing_id", filings, files=files)
+    new = _compare(built, stored, summary)
+    if summary.filings_conflicted:
+        return False
+    rows = snapshot_total(table, "total-records")
+    if new:
+        with timed_operation("exhibit_index.write", records=len(new)):
+            append_rows(table, new, EXHIBITS_ARROW_SCHEMA)
+    with timed_operation("exhibit_index.verify"):
+        summary.snapshot_after = verify_append(
+            table,
+            key_column="exhibit_id",
+            expected_rows=rows + len(new),
+            inserted_keys=[record.exhibit_id for record in new],
+            snapshot_before=summary.snapshot_after,
+        )
+        verify_written_groups(
+            table, new, key_column="exhibit_id", group_column="filing_id"
+        )
+    summary.filings_inserted += len({record.filing_id for record in new})
+    summary.entries_inserted += len(new)
+    summary.entries_with_href += sum(record.href is not None for record in new)
+    summary.entries_resolved += sum(
+        record.resolved_document_id is not None for record in new
+    )
+    return True
+
+
 def _run_exhibits(
     catalog: Catalog,
     data_dir: Path,
@@ -282,36 +351,30 @@ def _run_exhibits(
             for f in read_filings(open_filings_table(catalog, data_dir)[0])
         }
         regions = _regions(catalog, data_dir, {i: f.form for i, f in filings.items()})
-        stored = group_rows_by(table, "filing_id")
-    with timed_operation("exhibit_index.extract", regions=len(regions)):
-        _extract(catalog, data_dir, regions)
-        built = _build(regions, filings, processed_at, summary)
+        stored = {row["filing_id"] for row in iter_rows(table, ("filing_id",))}
     summary.filings_considered = len(filings)
-    summary.filings_with_exhibit_index = len(built)
-    with timed_operation("exhibit_index.validate"):
-        new = _compare(built, stored, summary)
-    if summary.filings_conflicted:
-        return
-    if new:
-        with timed_operation("exhibit_index.write", records=len(new)):
-            append_rows(table, new, EXHIBITS_ARROW_SCHEMA)
-    with timed_operation("exhibit_index.verify"):
-        summary.snapshot_after = verify_append(
-            table,
-            key_column="exhibit_id",
-            expected_rows=sum(map(len, stored.values())) + len(new),
-            inserted_keys=[record.exhibit_id for record in new],
-            snapshot_before=summary.snapshot_before,
-        )
-        verify_written_groups(
-            table, new, key_column="exhibit_id", group_column="filing_id"
-        )
-    summary.filings_inserted = len({record.filing_id for record in new})
-    summary.entries_inserted = len(new)
-    summary.entries_with_href = sum(record.href is not None for record in new)
-    summary.entries_resolved = sum(
-        record.resolved_document_id is not None for record in new
+    by_filing: dict[str, dict[str, _Region]] = defaultdict(dict)
+    for section_id, region in regions.items():
+        by_filing[region.section["filing_id"]][section_id] = region
+    batches = batched(
+        sorted(by_filing.keys() | stored), FILINGS_PER_COMMIT, strict=False
     )
+    with timed_operation("exhibit_index.extract", regions=len(regions)):
+        for batch in batches:
+            batch_regions = {
+                section_id: region
+                for filing_id in batch
+                for section_id, region in by_filing.get(filing_id, {}).items()
+            }
+            batch_filings = {filing_id: filings[filing_id] for filing_id in batch}
+            if not _run_batch(
+                catalog,
+                (data_dir, processed_at, table),
+                batch_regions,
+                batch_filings,
+                summary,
+            ):
+                return
     summary.status = "completed"
 
 
@@ -322,8 +385,10 @@ def run_exhibit_index_stage(
 
     Reads the exhibit regions of the stored sections and their tables,
     cells and links; no Bronze is read. Every run rebuilds each filing's
-    entries: filings not stored yet are appended, stored filings must match
-    exactly. Any conflict rejects the batch; unexpected errors are logged
+    entries in batches of FILINGS_PER_COMMIT filings, reading only their
+    partitions: filings not stored yet are appended, one commit per batch,
+    and stored filings must match exactly. A conflict rejects its batch and
+    the run; earlier batches stay committed. Unexpected errors are logged
     and raised.
     """
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from itertools import batched
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
@@ -17,18 +18,25 @@ from src.data_pipeline.contracts.sec_filings.documents import (
 )
 from src.data_pipeline.contracts.sec_filings.filings import FilingRecord
 from src.data_pipeline.quality.sec_filings.documents import documents_problem
-from src.data_pipeline.storage.bronze import resolve_relative_path, sha256_bytes
+from src.data_pipeline.storage.bronze import (
+    SecBronze,
+    sha256_bytes,
+)
 from src.data_pipeline.storage.iceberg import (
+    GroupSummary,
     append_rows,
     current_snapshot_id,
+    filing_dates_filter,
+    iter_rows,
     open_silver_catalog,
+    read_groups_in,
+    snapshot_total,
+    summarize_groups,
     verify_append,
 )
 from src.data_pipeline.storage.sec_filings.documents import (
     DOCUMENTS_TABLE,
-    StoredDocument,
     open_documents_table,
-    read_document_groups,
 )
 from src.data_pipeline.storage.sec_filings.filings import (
     open_filings_table,
@@ -42,6 +50,9 @@ from src.utils.logger import get_logger, log_context
 from src.utils.timer import timed_operation
 
 logger = get_logger(__name__)
+
+# Filings whose submissions are parsed, validated and committed together.
+FILINGS_PER_COMMIT = 500
 
 
 @dataclass
@@ -71,13 +82,32 @@ class DocumentsStageSummary:
     snapshot_after: int | None = None
 
 
+def _stored_problem(
+    parent: FilingRecord, group: GroupSummary, primaries: int
+) -> str | None:
+    """Why a stored group, known by its summary, is not one complete inventory."""
+
+    if not group.complete:
+        return "document ordinals are not exactly 1..N"
+    if group.value("source_submission_sha256") != parent.full_submission_sha256:
+        return "source submission SHA-256 differs from sec_filings.filings"
+    if primaries != 1:
+        return f"expected one primary_document, found {primaries}"
+    return None
+
+
 def _pending_parents(
     parents: Sequence[FilingRecord],
-    stored: Mapping[str, Sequence[StoredDocument]],
+    stored: Mapping[str, GroupSummary],
+    primaries: Mapping[str, int],
     summary: DocumentsStageSummary,
 ) -> list[FilingRecord]:
     """Skip filings whose stored group is complete, flag broken groups as
-    conflicts, and return the filings that have no documents yet."""
+    conflicts, and return the filings that have no documents yet.
+
+    Stored groups are judged by their summaries and primary counts; the
+    integrity audit checks their rows.
+    """
 
     for filing_id in sorted(set(stored) - {parent.filing_id for parent in parents}):
         summary.filings_conflicted += 1
@@ -92,10 +122,10 @@ def _pending_parents(
         if group is None:
             pending.append(parent)
             continue
-        problem = documents_problem(parent, group)
+        problem = _stored_problem(parent, group, primaries.get(parent.filing_id, 0))
         if problem is None:
             summary.filings_skipped += 1
-            summary.documents_skipped += len(group)
+            summary.documents_skipped += group.rows
         else:
             summary.filings_conflicted += 1
             logger.error(
@@ -112,10 +142,10 @@ def _pending_parents(
     return pending
 
 
-def _read_submission(parent: FilingRecord, data_dir: Path) -> bytes:
+def _read_submission(parent: FilingRecord, bronze: SecBronze) -> bytes:
     """Read a parent's full submission and check it against the parent row."""
 
-    raw = resolve_relative_path(parent.full_submission_path, data_dir).read_bytes()
+    raw = bronze.path(parent.full_submission_path).read_bytes()
     if not raw:
         raise ValueError("Full submission is empty")
     if sha256_bytes(raw) != parent.full_submission_sha256:
@@ -125,7 +155,7 @@ def _read_submission(parent: FilingRecord, data_dir: Path) -> bytes:
 
 def _parse_pending(
     parents: Sequence[FilingRecord],
-    data_dir: Path,
+    bronze: SecBronze,
     processed_at: datetime,
     summary: DocumentsStageSummary,
 ) -> list[DocumentRecord]:
@@ -136,7 +166,7 @@ def _parse_pending(
     for parent in parents:
         with log_context(filing_id=parent.filing_id):
             try:
-                raw = _read_submission(parent, data_dir)
+                raw = _read_submission(parent, bronze)
                 documents = build_document_records(parent, raw, processed_at)
                 check_document_offsets(documents, raw)
             except (OSError, ValueError) as error:
@@ -185,23 +215,63 @@ def _validate_new_groups(
             )
 
 
-def _verify_stored_groups(table: Table, parents: Sequence[FilingRecord]) -> None:
-    """Re-read every stored group: each needs a parent and a complete inventory."""
+def _verify_written_groups(table: Table, parents: Sequence[FilingRecord]) -> None:
+    """Re-read the batch's groups: each must be a complete inventory."""
 
-    parents_by_id = {parent.filing_id: parent for parent in parents}
-    for filing_id, group in read_document_groups(table).items():
-        parent = parents_by_id.get(filing_id)
-        if parent is None:
-            raise ValueError(f"Documents of {filing_id} have no parent filing")
-        problem = documents_problem(parent, group)
+    stored = read_groups_in(
+        table,
+        "filing_id",
+        {parent.filing_id for parent in parents},
+        files=filing_dates_filter({parent.filing_date for parent in parents}),
+    )
+    for parent in parents:
+        group = [
+            DocumentRecord.model_validate(row)
+            for row in stored.get(parent.filing_id, [])
+        ]
+        problem = documents_problem(parent, group) if group else "no documents stored"
         if problem is not None:
-            raise ValueError(f"Documents of {filing_id} after commit: {problem}")
+            raise ValueError(f"Documents of {parent.filing_id} after commit: {problem}")
+
+
+def _write_batch(
+    table: Table,
+    batch: Sequence[FilingRecord],
+    run: tuple[SecBronze, datetime],
+    summary: DocumentsStageSummary,
+) -> bool:
+    """Parse, validate and commit one batch of filings; return whether it was written."""
+
+    with timed_operation("documents.parse", filings=len(batch)):
+        records = _parse_pending(batch, *run, summary)
+    with timed_operation("documents.validate", records=len(records)):
+        _validate_new_groups(
+            records, {parent.filing_id: parent for parent in batch}, summary
+        )
+    if summary.documents_failed:
+        return False
+    rows = snapshot_total(table, "total-records")
+    with timed_operation("documents.write", records=len(records)):
+        append_rows(table, records, DOCUMENTS_ARROW_SCHEMA)
+    summary.filings_inserted += len(batch)
+    summary.documents_inserted += len(records)
+    logger.info("filing_documents_inserted", filings=len(batch), documents=len(records))
+    with timed_operation("documents.verify"):
+        summary.snapshot_after = verify_append(
+            table,
+            key_column="document_id",
+            expected_rows=rows + len(records),
+            inserted_keys=[record.document_id for record in records],
+            snapshot_before=summary.snapshot_after,
+        )
+        _verify_written_groups(table, batch)
+    return True
 
 
 def _run_documents(
     catalog: Catalog,
     data_dir: Path,
-    processed_at: datetime,
+    run: tuple[SecBronze, datetime],
     summary: DocumentsStageSummary,
 ) -> None:
     filings_table, _ = open_filings_table(catalog, data_dir)
@@ -216,52 +286,36 @@ def _run_documents(
         location=table.location(),
     )
     summary.snapshot_before = summary.snapshot_after = current_snapshot_id(table)
-    stored = read_document_groups(table)
-    pending = _pending_parents(parents, stored, summary)
-
-    with timed_operation("documents.parse", filings=len(pending)):
-        records = _parse_pending(pending, data_dir, processed_at, summary)
-    with timed_operation("documents.validate", records=len(records)):
-        _validate_new_groups(
-            records, {parent.filing_id: parent for parent in pending}, summary
-        )
-    if summary.documents_failed or summary.filings_conflicted:
-        return
-
-    records.sort(key=lambda r: (r.filing_date, r.filing_id, r.document_ordinal))
-    if records:
-        with timed_operation("documents.write", records=len(records)):
-            append_rows(table, records, DOCUMENTS_ARROW_SCHEMA)
-    summary.filings_inserted = len(pending)
-    summary.documents_inserted = len(records)
-    logger.info(
-        "filing_documents_inserted",
-        filings=summary.filings_inserted,
-        documents=summary.documents_inserted,
+    stored = summarize_groups(
+        table, "filing_id", "document_ordinal", uniform=("source_submission_sha256",)
     )
-
-    with timed_operation("documents.verify"):
-        summary.snapshot_after = verify_append(
-            table,
-            key_column="document_id",
-            expected_rows=sum(len(group) for group in stored.values()) + len(records),
-            inserted_keys=[record.document_id for record in records],
-            snapshot_before=summary.snapshot_before,
-        )
-        _verify_stored_groups(table, parents)
+    primaries = Counter(
+        row["filing_id"]
+        for row in iter_rows(table, ("filing_id", "role"))
+        if row["role"] == "primary_document"
+    )
+    pending = _pending_parents(parents, stored, primaries, summary)
+    if summary.filings_conflicted:
+        return
+    for batch in batched(pending, FILINGS_PER_COMMIT, strict=False):
+        if not _write_batch(table, batch, run, summary):
+            return
     summary.status = "completed"
 
 
 def run_documents_stage(
-    data_dir: Path, processed_at: datetime
+    data_dir: Path,
+    processed_at: datetime,
+    bronze: SecBronze | None = None,
 ) -> DocumentsStageSummary:
     """Inventory the `<DOCUMENT>` blocks of every filing in `sec_filings.filings`.
 
-    Filings whose documents are already stored completely are skipped without
-    re-reading Bronze; the others are parsed one submission at a time and all
-    their documents are appended in one commit. Any invalid filing or broken
-    stored group rejects the batch without writing; unexpected errors are
-    logged and re-raised.
+    Filings whose documents are already stored completely (judged by group
+    summaries) are skipped without re-reading Bronze; a broken stored group
+    rejects the run before the first write. The others are parsed one
+    submission at a time and committed in batches of FILINGS_PER_COMMIT. An
+    invalid filing rejects its batch before that batch's write; earlier
+    batches stay committed. Unexpected errors are logged and re-raised.
     """
 
     started = perf_counter()
@@ -273,7 +327,12 @@ def run_documents_stage(
                 timed_operation("documents.total"),
                 open_silver_catalog(data_dir) as catalog,
             ):
-                _run_documents(catalog, data_dir, processed_at, summary)
+                _run_documents(
+                    catalog,
+                    data_dir,
+                    (bronze or SecBronze.under(data_dir), processed_at),
+                    summary,
+                )
         except Exception as error:
             logger.error(
                 "documents_stage_failed",

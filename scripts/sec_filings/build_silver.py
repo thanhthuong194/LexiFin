@@ -20,7 +20,10 @@ from src.data_pipeline.pipelines.sec_filings.silver_stages import (
     SILVER_STAGES,
     select_stages,
 )
-from src.data_pipeline.quality.sec_filings.silver_audit import validate_silver
+from src.data_pipeline.quality.sec_filings.silver_audit import (
+    AuditOptions,
+    audit_silver,
+)
 from src.data_pipeline.transforms.sec_filings.xbrl_processor import ProcessorSettings
 from src.utils.logger import configure_logging
 
@@ -39,7 +42,14 @@ def parse_args() -> argparse.Namespace:
         "--data-dir",
         type=Path,
         default=REPOSITORY_ROOT / "data",
-        help="Data root (default: <repository_root>/data)",
+        help="Silver root: catalog and tables (default: <repository_root>/data)",
+    )
+    parser.add_argument(
+        "--bronze-dir",
+        type=Path,
+        default=None,
+        help="SEC Bronze directory (sec-edgar-filings/, _metadata/) "
+        "(default: <data-dir>/bronze/sec_filings)",
     )
     parser.add_argument(
         "--taxonomy-cache-dir",
@@ -137,20 +147,21 @@ def _print_summary(summary: Mapping[str, Any]) -> None:
         "rows_inserted",
         "rows_skipped",
         "snapshot_changes",
-        "tables_checked",
-        "rows_checked",
+        "tables_discovered",
+        "total_rows_scanned",
         "integrity_checks_run",
         "integrity_checks_passed",
         "integrity_checks_failed",
-        "checks_run",
         "checks_passed",
+        "checks_warned",
         "checks_failed",
-        "warnings",
+        "checks_skipped",
     ):
         if name in summary:
             print(f"{name}: {summary[name]}")
-    for failure in summary.get("failures", summary.get("integrity_failures", [])):
-        print(f"failure: {failure}")
+    for label, key in (("failure", "failures"), ("warning", "warnings")):
+        for check in summary.get(key) or summary.get(f"integrity_{key}") or []:
+            print(f"{label}: {check}")
 
 
 def main() -> int:
@@ -167,16 +178,19 @@ def main() -> int:
     configure_logging()
     if args.check_only:
         try:
-            report = validate_silver(args.data_dir)
+            report = audit_silver(
+                args.data_dir, AuditOptions(bronze_dir=args.bronze_dir)
+            )
         except FileNotFoundError:  # no catalog: logged as silver_integrity_failed
             return 2
         _print_summary(report.summary())
-        return 0 if report.status == "passed" else 1
+        return 1 if report.status == "FAIL" else 0
     result = run_sec_filings_silver(
         args.data_dir,
         from_stage=args.from_stage,
         to_stage=args.to_stage,
         taxonomy=_taxonomy(args),
+        bronze_dir=args.bronze_dir,
     )
     _print_summary(result.summary())
     return 0 if result.completed else 1

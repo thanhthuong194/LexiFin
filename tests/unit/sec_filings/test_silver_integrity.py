@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import sys
+from contextlib import closing
 from dataclasses import fields, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
-import pyarrow as pa
 import pytest
 
 from scripts.sec_filings import build_silver
@@ -17,16 +18,16 @@ from src.data_pipeline.pipelines.sec_filings.silver_stages import (
     prerequisite_tables,
     select_stages,
 )
-from src.data_pipeline.quality.sec_filings.silver_audit import SILVER_TABLES
-from src.data_pipeline.quality.sec_filings.silver_constraints import (
-    DOCUMENT_RELATIONS,
-    check_keys,
-    check_references,
-)
-from src.data_pipeline.quality.sec_filings.silver_report import (
+from src.data_pipeline.quality.sec_filings.silver_audit_report import (
     SAMPLE_IDS,
+    AuditCheck,
     SilverAuditReport,
 )
+from src.data_pipeline.quality.sec_filings.silver_audit_sql import (
+    ScratchDatabase,
+    run_sql_checks,
+)
+from src.data_pipeline.quality.sec_filings.silver_model import SILVER_TABLES
 from src.data_pipeline.storage.iceberg import SilverTableSpec
 
 pytestmark = pytest.mark.unit
@@ -39,7 +40,25 @@ STAGES = {stage.name: stage for stage in SILVER_STAGES}
 
 
 def _report() -> SilverAuditReport:
-    return SilverAuditReport(started_at=datetime.now(UTC))
+    return SilverAuditReport(data_dir="data", started_at=datetime.now(UTC))
+
+
+def _audit(
+    tmp_path: Path, rows: dict[str, list[dict[str, Any]]]
+) -> dict[str, AuditCheck]:
+    """Run the set-based checks on a scratch database holding only `rows`.
+
+    Columns a row leaves out are stored as null.
+    """
+
+    report = _report()
+    tmp_path.mkdir(exist_ok=True)
+    with closing(ScratchDatabase(tmp_path / "audit.db")) as scratch:
+        for identifier, table_rows in rows.items():
+            columns = scratch.columns[identifier]
+            scratch.insert(identifier, [dict.fromkeys(columns) | r for r in table_rows])
+        run_sql_checks(scratch, report)
+    return {f"{c.table}:{c.check_name}": c for c in report.checks}
 
 
 def _names(stages: tuple[SilverStage, ...]) -> list[str]:
@@ -119,108 +138,98 @@ def test_prerequisites_are_the_tables_of_every_unselected_ancestor() -> None:
     assert prerequisite_tables(SILVER_STAGES, SILVER_STAGES) == ()
 
 
-def test_duplicate_primary_and_grain_keys_are_counted_with_samples() -> None:
+def test_duplicate_primary_and_grain_keys_are_counted_with_samples(
+    tmp_path: Path,
+) -> None:
     blocks = [f"doc:block:{n}" for n in range(8)]
-    tables = pa.table(
+    # Two tables on one block break content_blocks 1 -- 0..1 tables.
+    tables = [
         {
-            "table_id": [f"{block}:table" for block in blocks] + ["doc:block:0:table"],
-            # Two tables on one block break content_blocks 1 -- 0..1 tables.
-            "block_id": [*blocks, "doc:block:0"],
-            "document_id": ["doc"] * 9,
-            "table_ordinal": [*range(1, 9), 9],
+            "table_id": f"{block}:table",
+            "block_id": block,
+            "document_id": "doc",
+            "table_ordinal": n,
         }
-    )
-    report = _report()
+        for n, block in enumerate([*blocks, "doc:block:0"], start=1)
+    ]
+    tables[-1]["table_id"] = "doc:block:0:table"
 
-    check_keys(
-        {TABLES: tables},
-        {TABLES: (("table_id",), ("block_id",), ("document_id", "table_ordinal"))},
-        report,
-    )
+    checks = _audit(tmp_path, {TABLES: tables})
 
-    assert report.duplicate_counts == {
-        "document_tables.table_id": 1,
-        "document_tables.block_id": 1,
-        "document_tables.document_id+table_ordinal": 0,
-    }
-    (failure,) = report.failures.values()
-    assert (failure.check_name, failure.table, failure.affected_count) == (
-        "duplicate_key",
-        TABLES,
-        2,
-    )
-    assert failure.sample_ids == ["doc:block:0:table", "doc:block:0"]
+    assert (
+        checks[f"{TABLES}:unique:table_id"].failed_count,
+        checks[f"{TABLES}:unique:table_id"].sample_ids,
+    ) == (1, ("doc:block:0:table",))
+    assert checks[f"{TABLES}:unique:block_id"].sample_ids == ("doc:block:0",)
+    assert checks[f"{TABLES}:unique:document_id+table_ordinal"].status == "PASS"
 
 
-def _filings_and_documents(document_dates: list[date]) -> dict[str, pa.Table]:
+def _filings_and_documents(
+    document_dates: list[date],
+) -> dict[str, list[dict[str, Any]]]:
     return {
-        FILINGS: pa.table(
+        FILINGS: [
             {
-                "filing_id": ["sec:1"],
-                "filing_date": [date(2025, 1, 2)],
-                "full_submission_path": ["bronze/1/full-submission.txt"],
-                "full_submission_sha256": ["a" * 64],
+                "filing_id": "sec:1",
+                "filing_date": date(2025, 1, 2),
+                "full_submission_path": "bronze/1/full-submission.txt",
+                "full_submission_sha256": "a" * 64,
             }
-        ),
-        DOCUMENTS: pa.table(
+        ],
+        DOCUMENTS: [
             {
-                "document_id": [f"sec:{n}:document:0001" for n in (1, 2)],
-                "filing_id": ["sec:1", "sec:2"],
-                "filing_date": document_dates,
-                "source_path": ["bronze/1/full-submission.txt"] * 2,
-                "source_submission_sha256": ["a" * 64] * 2,
+                "document_id": f"sec:{n}:document:0001",
+                "filing_id": f"sec:{n}",
+                "filing_date": filing_date,
+                "source_path": "bronze/1/full-submission.txt",
+                "source_submission_sha256": "a" * 64,
             }
-        ),
+            for n, filing_date in zip((1, 2), document_dates, strict=True)
+        ],
     }
 
 
-def test_orphans_and_copied_parent_fields_that_differ_are_errors() -> None:
-    data = _filings_and_documents([date(2025, 1, 3), date(2025, 1, 2)])
-    report = _report()
-
-    check_references(data, DOCUMENT_RELATIONS[:1], report)
-
-    failures = {(f.check_name, f.parent_table): f for f in report.failures.values()}
-    assert failures[("orphan", FILINGS)].sample_ids == ["sec:2:document:0001"]
-    lineage = failures[("lineage", FILINGS)]
-    assert (lineage.affected_count, lineage.sample_ids) == (1, ["sec:1:document:0001"])
-    assert report.orphan_counts == {"documents.filing_id -> filings": 1}
-
-
-def test_section_parents_must_exist_in_the_same_document() -> None:
-    sections = pa.table(
-        {
-            "section_id": ["a:section:0001", "a:section:0002", "b:section:0001", "b:section:0002"],
-            "document_id": ["a", "a", "b", "b"],
-            # b's second section points at a's root: a cross-document parent.
-            "parent_section_id": [None, "a:section:0001", None, "a:section:0001"],
-        }
-    )  # fmt: skip
-    relation = next(r for r in DOCUMENT_RELATIONS if r.child_key == "parent_section_id")
-    report = _report()
-
-    check_references({SECTIONS: sections}, [relation], report)
-
-    (failure,) = report.failures.values()
-    assert (failure.check_name, failure.sample_ids) == ("lineage", ["b:section:0002"])
-    orphaned = sections.set_column(
-        2, "parent_section_id", pa.array([None, "a:section:0009", None, None])
+def test_orphans_and_copied_parent_fields_that_differ_fail(tmp_path: Path) -> None:
+    checks = _audit(
+        tmp_path, _filings_and_documents([date(2025, 1, 3), date(2025, 1, 2)])
     )
-    report = _report()
-    check_references({SECTIONS: orphaned}, [relation], report)
-    assert [f.check_name for f in report.failures.values()] == ["orphan"]
+
+    orphan = checks[f"{DOCUMENTS}:orphan:documents.filing_id -> filings"]
+    assert (orphan.status, orphan.sample_ids) == ("FAIL", ("sec:2:document:0001",))
+    lineage = checks[f"{DOCUMENTS}:lineage:documents.filing_id -> filings"]
+    assert (lineage.failed_count, lineage.sample_ids) == (1, ("sec:1:document:0001",))
+
+
+def test_section_parents_must_exist_in_the_same_document(tmp_path: Path) -> None:
+    sections = [
+        {"section_id": "a:section:0001", "document_id": "a", "parent_section_id": None},
+        {"section_id": "a:section:0002", "document_id": "a", "parent_section_id": "a:section:0001"},
+        {"section_id": "b:section:0001", "document_id": "b", "parent_section_id": None},
+        # b's second section points at a's root: a cross-document parent.
+        {"section_id": "b:section:0002", "document_id": "b", "parent_section_id": "a:section:0001"},
+    ]  # fmt: skip
+    name = f"{SECTIONS}:lineage:sections.parent_section_id -> sections"
+
+    checks = _audit(tmp_path / "cross", {SECTIONS: sections})
+    sections[3]["parent_section_id"] = "a:section:0009"
+    orphaned = _audit(tmp_path / "orphan", {SECTIONS: sections})
+
+    assert checks[name].sample_ids == ("b:section:0002",)
+    orphan = orphaned[f"{SECTIONS}:orphan:sections.parent_section_id -> sections"]
+    assert (orphan.status, orphan.sample_ids) == ("FAIL", ("b:section:0002",))
 
 
 def test_failures_keep_a_bounded_sample_of_identifiers() -> None:
     report = _report()
-    for n in range(SAMPLE_IDS + 3):
-        report.add("error", "group", TABLES, "broken", f"id-{n}")
+    with report.check("complete_group", TABLES, "groups are complete") as run:
+        for n in range(SAMPLE_IDS + 3):
+            run.found(f"id-{n}")
 
-    (failure,) = report.failures.values()
-    assert failure.affected_count == SAMPLE_IDS + 3
-    assert failure.sample_ids == [f"id-{n}" for n in range(SAMPLE_IDS)]
+    (check,) = report.checks
+    assert check.failed_count == SAMPLE_IDS + 3
+    assert check.sample_ids == tuple(f"id-{n}" for n in range(SAMPLE_IDS))
     summary = report.summary()
-    assert (summary["checks_failed"], summary["status"]) == (1, "failed")
+    assert (summary["checks_failed"], summary["status"]) == (1, "FAIL")
 
 
 def test_check_only_never_writes(

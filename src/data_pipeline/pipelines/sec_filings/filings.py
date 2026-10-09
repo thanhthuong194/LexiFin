@@ -19,6 +19,7 @@ from src.data_pipeline.contracts.sec_filings.filings import (
     FILINGS_ARROW_SCHEMA,
     FilingRecord,
 )
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import (
     append_rows,
     current_snapshot_id,
@@ -74,12 +75,12 @@ class _WritePlan:
 
 def _parse_batch(
     filings: Sequence[BronzeFiling],
-    data_dir: Path,
+    bronze: SecBronze,
     processed_at: datetime,
 ) -> tuple[list[FilingRecord], int]:
     """Build a record for every filing; return the records and the failure count."""
 
-    manifest = index_manifest(load_filing_manifest(data_dir))
+    manifest = index_manifest(load_filing_manifest(bronze))
     accession_counts = Counter(filing.accession_number for filing in filings)
     records: list[FilingRecord] = []
     failed = 0
@@ -92,7 +93,7 @@ def _parse_batch(
             records.append(
                 build_filing_record(
                     filing,
-                    data_dir=data_dir,
+                    bronze=bronze,
                     manifest=manifest,
                     processed_at=processed_at,
                 )
@@ -168,15 +169,18 @@ def _write_batch(
 
 
 def _run_filings(
-    data_dir: Path, processed_at: datetime, summary: FilingsStageSummary
+    data_dir: Path,
+    bronze: SecBronze,
+    processed_at: datetime,
+    summary: FilingsStageSummary,
 ) -> None:
     with timed_operation("bronze.discovery"):
-        filings = discover_filings(data_dir)
+        filings = discover_filings(bronze)
     summary.discovered = len(filings)
     logger.info("bronze_filings_discovered", discovered=summary.discovered)
 
     with timed_operation("bronze.transform"):
-        records, summary.failed = _parse_batch(filings, data_dir, processed_at)
+        records, summary.failed = _parse_batch(filings, bronze, processed_at)
     summary.parsed = len(records)
     logger.info("bronze_filings_parsed", parsed=summary.parsed, failed=summary.failed)
     if summary.failed:
@@ -192,17 +196,20 @@ def _run_filings(
         _write_batch(table, records, summary)
 
 
-def run_filings_stage(data_dir: Path, processed_at: datetime) -> FilingsStageSummary:
+def run_filings_stage(
+    data_dir: Path, processed_at: datetime, bronze: SecBronze | None = None
+) -> FilingsStageSummary:
     """Build or incrementally update `sec_filings.filings` from all SEC Bronze filings.
 
-    The whole batch is validated before any write and new filings are appended
-    in one commit. Invalid filings or checksum conflicts reject the batch
-    without writing.
+    Bronze is read from `bronze` (default `<data_dir>/bronze/sec_filings`);
+    the Silver catalog lives under `data_dir`. The whole batch is validated
+    before any write and new filings are appended in one commit. Invalid
+    filings or checksum conflicts reject the batch without writing.
     """
 
     started = perf_counter()
     summary = FilingsStageSummary()
-    _run_filings(data_dir, processed_at, summary)
+    _run_filings(data_dir, bronze or SecBronze.under(data_dir), processed_at, summary)
     summary.duration_seconds = round(perf_counter() - started, 3)
     if summary.status == "completed":
         logger.info("filings_stage_completed", **asdict(summary))

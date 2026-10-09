@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import date, datetime
+from itertools import batched
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Literal
+from typing import Literal
 
-from pydantic import ValidationError
 from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 
@@ -22,27 +22,32 @@ from src.data_pipeline.pipelines.sec_filings.document_link_extraction import (
     source_context,
 )
 from src.data_pipeline.quality.sec_filings.document_links import links_problem
+from src.data_pipeline.quality.sec_filings.narrative import stored_group_problem
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import (
+    GroupSummary,
     append_rows,
     current_snapshot_id,
-    group_rows_by,
+    filing_dates_filter,
+    iter_rows,
     open_silver_catalog,
+    read_groups_in,
+    snapshot_total,
+    summarize_groups,
     verify_append,
 )
 from src.data_pipeline.storage.sec_filings.document_links import (
     DOCUMENT_LINKS_TABLE,
     open_document_links_table,
 )
-from src.data_pipeline.storage.sec_filings.documents import (
-    open_documents_table,
-    read_documents,
-)
+from src.data_pipeline.storage.sec_filings.documents import open_documents_table
 from src.utils.logger import get_logger, log_context
 from src.utils.timer import timed_operation
 
 logger = get_logger(__name__)
 
-StoredRows = Mapping[str, Sequence[dict[str, Any]]]
+# Filings whose HTML documents are parsed, validated and committed together.
+FILINGS_PER_COMMIT = 50
 LinkGroups = Mapping[str, Sequence[DocumentLinkRecord]]
 
 
@@ -76,25 +81,27 @@ class DocumentLinksStageSummary:
     snapshot_after: int | None = None
 
 
-def _stored_problem(
-    source: DocumentRecord,
-    rows: Sequence[dict[str, Any]],
-    documents: Mapping[str, DocumentRecord],
-) -> str | None:
-    try:
-        links = [DocumentLinkRecord.model_validate(row) for row in rows]
-    except ValidationError as error:
-        return f"stored row is invalid: {error.errors()[0]['msg']}"
-    return links_problem(source, links, documents)
+@dataclass(frozen=True)
+class _Source:
+    """What classifying an HTML source document needs from its row."""
+
+    document_id: str
+    filing_id: str
+    filing_date: date
+    source_path: str
+    content_sha256: str
 
 
 def _plan(
-    sources: Sequence[DocumentRecord],
-    stored: StoredRows,
-    documents: Mapping[str, DocumentRecord],
+    sources: Sequence[_Source],
+    stored: Mapping[str, GroupSummary],
     summary: DocumentLinksStageSummary,
-) -> list[DocumentRecord]:
-    """Skip complete stored groups and flag the others; return sources to parse."""
+) -> list[_Source]:
+    """Skip complete stored groups and flag the others; return sources to parse.
+
+    Stored groups are judged by their summaries (complete ordinals, the
+    source's lineage); the integrity audit checks their rows and targets.
+    """
 
     for document_id in sorted(set(stored) - {source.document_id for source in sources}):
         summary.documents_conflicted += 1
@@ -106,18 +113,27 @@ def _plan(
     candidates = []
     skipped_links = 0
     for source in sources:
-        rows = stored.get(source.document_id)
-        if rows is None:
+        group = stored.get(source.document_id)
+        if group is None:
             candidates.append(source)
             continue
-        problem = _stored_problem(source, rows, documents)
+        lineage = {
+            "filing_id": source.filing_id,
+            "filing_date": source.filing_date,
+            "source_document_sha256": source.content_sha256,
+        }
+        problem = stored_group_problem(group, lineage, "links")
         if problem is None:
             summary.documents_skipped += 1
-            skipped_links += len(rows)
+            skipped_links += group.rows
         else:
             summary.documents_conflicted += 1
             logger.error(
-                "document_links_conflict", reason=problem, **source_context(source)
+                "document_links_conflict",
+                reason=problem,
+                filing_id=source.filing_id,
+                source_document_id=source.document_id,
+                source_path=source.source_path,
             )
     logger.info(
         "document_links_skipped",
@@ -148,12 +164,14 @@ def _validate_built(
 def _verify_groups(
     table: Table, sources: Sequence[DocumentRecord], built: LinkGroups
 ) -> None:
-    """Re-read the table: no orphan group, and each built group stored exactly."""
+    """Re-read the batch's groups: each built group is stored exactly."""
 
-    stored = group_rows_by(table, "source_document_id")
-    orphans = set(stored) - {source.document_id for source in sources}
-    if orphans:
-        raise ValueError(f"Links without an HTML source: {sorted(orphans)[:5]}")
+    stored = read_groups_in(
+        table,
+        "source_document_id",
+        built,
+        files=filing_dates_filter({source.filing_date for source in sources}),
+    )
     for document_id, records in built.items():
         rows = sorted(stored.get(document_id, []), key=lambda row: row["link_ordinal"])
         for row in rows:
@@ -166,25 +184,23 @@ def _write(
     table: Table,
     sources: Sequence[DocumentRecord],
     built: LinkGroups,
-    stored_rows: int,
     summary: DocumentLinksStageSummary,
 ) -> None:
-    """Append every new group in one commit, then verify the table."""
+    """Append the batch's new groups in one commit, then verify them."""
 
-    new = sorted(
-        (record for records in built.values() for record in records),
-        key=lambda r: (r.filing_date, r.source_document_id, r.link_ordinal),
-    )
+    new = [record for records in built.values() for record in records]
+    stored_rows = snapshot_total(table, "total-records")
     if new:
         with timed_operation("document_links.write", records=len(new)):
             append_rows(table, new, DOCUMENT_LINKS_ARROW_SCHEMA)
     statuses = Counter(record.resolution_status for record in new)
-    summary.documents_inserted, summary.links_inserted = len(built), len(new)
-    summary.links_resolved = statuses["resolved"]
-    summary.links_unresolved = statuses["unresolved"]
-    summary.links_ambiguous = statuses["ambiguous"]
-    summary.links_not_applicable = statuses["not_applicable"]
-    summary.links_external = sum(r.link_kind == "external_url" for r in new)
+    summary.documents_inserted += len(built)
+    summary.links_inserted += len(new)
+    summary.links_resolved += statuses["resolved"]
+    summary.links_unresolved += statuses["unresolved"]
+    summary.links_ambiguous += statuses["ambiguous"]
+    summary.links_not_applicable += statuses["not_applicable"]
+    summary.links_external += sum(r.link_kind == "external_url" for r in new)
     logger.info("document_links_inserted", documents=len(built), links=len(new))
     with timed_operation("document_links.verify"):
         summary.snapshot_after = verify_append(
@@ -192,15 +208,71 @@ def _write(
             key_column="link_id",
             expected_rows=stored_rows + len(new),
             inserted_keys=[record.link_id for record in new],
-            snapshot_before=summary.snapshot_before,
+            snapshot_before=summary.snapshot_after,
         )
         _verify_groups(table, sources, built)
+
+
+def _run_batch(
+    tables: tuple[Table, Table],
+    batch: Sequence[_Source],
+    run: tuple[SecBronze, datetime],
+    summary: DocumentLinksStageSummary,
+) -> bool:
+    """Parse, resolve, validate and commit the sources of a few filings.
+
+    Links resolve within their filing, so the batch reads every document of
+    its filings. Returns whether the batch was written.
+    """
+
+    documents_table, links_table = tables
+    documents = {
+        row["document_id"]: DocumentRecord.model_validate(row)
+        for rows in read_groups_in(
+            documents_table,
+            "filing_id",
+            {source.filing_id for source in batch},
+            files=filing_dates_filter({s.filing_date for s in batch}),
+        ).values()
+        for row in rows
+    }
+    candidates = [documents[source.document_id] for source in batch]
+    extraction = extract_document_links(candidates, documents, *run)
+    summary.documents_failed += extraction.failures
+    summary.documents_without_links += extraction.without_links
+    with timed_operation("document_links.validate", phase="built_records"):
+        _validate_built(candidates, extraction.built, documents, summary)
+    if summary.documents_failed:
+        return False
+    _write(links_table, candidates, extraction.built, summary)
+    return True
+
+
+def _read_sources(documents_table: Table) -> list[_Source]:
+    """HTML documents with content, in (filing_date, document_id) order."""
+
+    columns = (
+        "document_id",
+        "filing_id",
+        "filing_date",
+        "source_path",
+        "content_sha256",
+    )
+    # DocumentRecord sets content offsets and checksum together.
+    return sorted(
+        (
+            _Source(*(row[column] for column in columns))
+            for row in iter_rows(documents_table, (*columns, "content_kind"))
+            if row["content_kind"] == "html" and row["content_sha256"] is not None
+        ),
+        key=lambda source: (source.filing_date, source.document_id),
+    )
 
 
 def _run_links(
     catalog: Catalog,
     data_dir: Path,
-    processed_at: datetime,
+    run: tuple[SecBronze, datetime],
     summary: DocumentLinksStageSummary,
 ) -> None:
     table, created = open_document_links_table(catalog, data_dir)
@@ -211,45 +283,43 @@ def _run_links(
     summary.snapshot_before = summary.snapshot_after = current_snapshot_id(table)
     with timed_operation("document_links.read"):
         documents_table, _ = open_documents_table(catalog, data_dir)
-        documents = {d.document_id: d for d in read_documents(documents_table)}
-        stored = group_rows_by(table, "source_document_id")
-    # DocumentRecord sets content offsets and checksum together.
-    sources = sorted(
-        (
-            d
-            for d in documents.values()
-            if d.content_kind == "html" and d.content_sha256 is not None
-        ),
-        key=lambda d: (d.filing_date, d.document_id),
-    )
+        sources = _read_sources(documents_table)
+        stored = summarize_groups(
+            table,
+            "source_document_id",
+            "link_ordinal",
+            declared="document_link_count",
+            uniform=("filing_id", "filing_date", "source_document_sha256"),
+        )
     summary.documents_considered = len(sources)
     logger.info("html_link_documents_loaded", documents=len(sources))
 
     with timed_operation("document_links.validate", phase="existing_state"):
-        candidates = _plan(sources, stored, documents, summary)
+        candidates = _plan(sources, stored, summary)
     if summary.documents_conflicted:
         return
-    extraction = extract_document_links(candidates, documents, data_dir, processed_at)
-    summary.documents_failed = extraction.failures
-    summary.documents_without_links = extraction.without_links
-    with timed_operation("document_links.validate", phase="built_records"):
-        _validate_built(candidates, extraction.built, documents, summary)
-    if summary.documents_failed:
-        return
-    _write(table, sources, extraction.built, sum(map(len, stored.values())), summary)
+    by_filing: dict[str, list[_Source]] = defaultdict(list)
+    for source in candidates:
+        by_filing[source.filing_id].append(source)
+    for filings in batched(by_filing.values(), FILINGS_PER_COMMIT, strict=False):
+        batch = [source for group in filings for source in group]
+        if not _run_batch((documents_table, table), batch, run, summary):
+            return
     summary.status = "completed"
 
 
 def run_document_links_stage(
-    data_dir: Path, processed_at: datetime
+    data_dir: Path, processed_at: datetime, bronze: SecBronze | None = None
 ) -> DocumentLinksStageSummary:
     """Build `sec_filings.document_links` from every HTML document.
 
-    Complete stored groups are skipped without reading Bronze; every other
-    HTML document is read by offsets, verified, parsed once and its `<a href>`
-    elements resolved against the documents of its filing. Any conflict or
-    invalid source rejects the batch before the single append; unexpected
-    errors are logged and re-raised.
+    Complete stored groups, judged by their summaries, are skipped without
+    reading Bronze; any conflict rejects the run before the first write.
+    Every other HTML document is read by offsets, verified, parsed once and
+    its `<a href>` elements resolved against the documents of its filing, in
+    batches of FILINGS_PER_COMMIT filings, one commit each. An invalid source
+    rejects its batch before that batch's write; earlier batches stay
+    committed. Unexpected errors are logged and re-raised.
     """
 
     started = perf_counter()
@@ -261,7 +331,12 @@ def run_document_links_stage(
                 timed_operation("document_links.total"),
                 open_silver_catalog(data_dir) as catalog,
             ):
-                _run_links(catalog, data_dir, processed_at, summary)
+                _run_links(
+                    catalog,
+                    data_dir,
+                    (bronze or SecBronze.under(data_dir), processed_at),
+                    summary,
+                )
         except Exception as error:
             logger.error(
                 "document_links_stage_failed",

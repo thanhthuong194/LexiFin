@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from itertools import batched
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
 
 from pydantic import BaseModel
 from pyiceberg.catalog import Catalog
+from pyiceberg.expressions import BooleanExpression
 from pyiceberg.table import Table
 
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
+from src.data_pipeline.contracts.sec_filings.filings import FilingRecord
 from src.data_pipeline.pipelines.sec_filings.xbrl_core_extraction import (
     BuiltFiling,
     build_rows,
@@ -28,17 +31,19 @@ from src.data_pipeline.quality.sec_filings.xbrl_core import (
     instance_problem,
     units_problem,
 )
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import (
     append_rows,
+    count_groups,
     current_snapshot_id,
-    group_rows_by,
+    filing_dates_filter,
     open_silver_catalog,
+    read_groups_in,
+    snapshot_total,
     verify_append,
+    verify_written_values,
 )
-from src.data_pipeline.storage.sec_filings.documents import (
-    open_documents_table,
-    read_documents,
-)
+from src.data_pipeline.storage.sec_filings.documents import open_documents_table
 from src.data_pipeline.storage.sec_filings.filings import (
     open_filings_table,
     read_filings,
@@ -60,6 +65,15 @@ _KEYS = {
     XBRL_INSTANCES_TABLE: "instance_id",
     XBRL_CONTEXTS_TABLE: "context_key",
     XBRL_UNITS_TABLE: "unit_key",
+}
+
+
+# Filings whose XBRL sources are parsed, validated and committed together.
+FILINGS_PER_COMMIT = 200
+# Columns that pin down a written context or unit for read-back verification.
+_PINNED = {
+    XBRL_CONTEXTS_TABLE: ("instance_id", "context_ref", "context_hash"),
+    XBRL_UNITS_TABLE: ("instance_id", "unit_ref", "normalized_expression"),
 }
 
 
@@ -158,35 +172,37 @@ def _order(*columns: str) -> Callable[[BaseModel], tuple[str, ...]]:
     return lambda row: tuple(getattr(row, column) for column in columns)
 
 
-def _verify_groups(table: Table, identifier: str, written: Sequence[BaseModel]) -> None:
-    """Re-read the table: every group written now is stored exactly."""
+def _verify_written(
+    table: Table, identifier: str, written: Sequence[BaseModel]
+) -> None:
+    """Re-read the rows written now: each is stored with the same values.
 
-    is_instances = identifier == XBRL_INSTANCES_TABLE
-    group_key = "filing_id" if is_instances else "instance_id"
-    stored = (
-        read_instance_groups(table) if is_instances else group_rows_by(table, group_key)
+    Instances are compared whole; contexts and units by the columns that pin
+    them down (their hashes and refs), read without the other columns.
+    """
+
+    if identifier == XBRL_INSTANCES_TABLE:
+        stored = read_instance_groups(table)
+        for row in written:
+            values = row.model_dump(exclude={"processed_at"})
+            found = [
+                {k: v for k, v in r.items() if k != "processed_at"}
+                for r in stored.get(values["filing_id"], [])
+                if r["instance_id"] == values["instance_id"]
+            ]
+            if found != [values]:
+                raise ValueError(
+                    f"{identifier} row {values['instance_id']} differs after commit"
+                )
+        return
+    verify_written_values(
+        table, written, key_column=_KEYS[identifier], columns=_PINNED[identifier]
     )
-    key = _KEYS[identifier]
-    expected: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-    for row in written:
-        expected[getattr(row, group_key)][getattr(row, key)] = row.model_dump(
-            exclude={"processed_at"}
-        )
-    for group, rows in expected.items():
-        found = {
-            row[key]: {
-                name: value for name, value in row.items() if name != "processed_at"
-            }
-            for row in stored.get(group, [])
-        }
-        if found != rows:
-            raise ValueError(f"{identifier} rows of {group} differ after commit")
 
 
 def _write(
     tables: Mapping[str, Table],
     rows: Mapping[str, list[BaseModel]],
-    stored_counts: Mapping[str, int],
     snapshots: dict[str, int | None],
 ) -> None:
     """Append and verify instances, then contexts, then units (parent first)."""
@@ -197,6 +213,7 @@ def _write(
         (XBRL_UNITS_TABLE, "xbrl_core.write_units"),
     ):
         new = rows[identifier]
+        stored = snapshot_total(tables[identifier], "total-records")
         if new:
             with timed_operation(timer, records=len(new)):
                 append_rows(tables[identifier], new, XBRL_CORE_SCHEMAS[identifier])
@@ -204,11 +221,11 @@ def _write(
             snapshots[identifier] = verify_append(
                 tables[identifier],
                 key_column=_KEYS[identifier],
-                expected_rows=stored_counts[identifier] + len(new),
+                expected_rows=stored + len(new),
                 inserted_keys=[getattr(row, _KEYS[identifier]) for row in new],
                 snapshot_before=snapshots[identifier],
             )
-            _verify_groups(tables[identifier], identifier, new)
+            _verify_written(tables[identifier], identifier, new)
 
 
 def _count_inserted(
@@ -217,27 +234,96 @@ def _count_inserted(
     instances = rows[XBRL_INSTANCES_TABLE]
     periods = Counter(context.period_type for context in rows[XBRL_CONTEXTS_TABLE])
     kinds = Counter(unit.unit_kind for unit in rows[XBRL_UNITS_TABLE])
-    summary.instances_inserted = len(instances)
-    summary.contexts_inserted = len(rows[XBRL_CONTEXTS_TABLE])
-    summary.units_inserted = len(rows[XBRL_UNITS_TABLE])
-    summary.inline_instances = sum(i.is_inline for i in instances)
-    summary.xml_only_instances = len(instances) - summary.inline_instances
-    summary.default_targets = sum(
-        i.is_inline and i.target_name is None for i in instances
+    inline = sum(i.is_inline for i in instances)
+    default = sum(i.is_inline and i.target_name is None for i in instances)
+    summary.instances_inserted += len(instances)
+    summary.contexts_inserted += len(rows[XBRL_CONTEXTS_TABLE])
+    summary.units_inserted += len(rows[XBRL_UNITS_TABLE])
+    summary.inline_instances += inline
+    summary.xml_only_instances += len(instances) - inline
+    summary.default_targets += default
+    summary.named_targets += inline - default
+    summary.instant_contexts += periods["instant"]
+    summary.duration_contexts += periods["duration"]
+    summary.forever_contexts += periods["forever"]
+    summary.simple_units += kinds["simple"]
+    summary.divide_units += kinds["divide"]
+
+
+def _read_documents(
+    table: Table,
+    column: str,
+    values: Collection[str],
+    files: BooleanExpression | None = None,
+) -> list[DocumentRecord]:
+    groups = (
+        read_groups_in(table, column, values)
+        if files is None
+        else read_groups_in(table, column, values, files=files)
     )
-    summary.named_targets = summary.inline_instances - summary.default_targets
-    summary.instant_contexts = periods["instant"]
-    summary.duration_contexts = periods["duration"]
-    summary.forever_contexts = periods["forever"]
-    summary.simple_units, summary.divide_units = kinds["simple"], kinds["divide"]
+    return [
+        DocumentRecord.model_validate(row) for rows in groups.values() for row in rows
+    ]
+
+
+def _run_batch(
+    tables: Mapping[str, Table],
+    batch: Sequence[FilingRecord],
+    plan: XbrlPlan,
+    run: tuple[SecBronze, datetime, Table],
+    summary: XbrlCoreStageSummary,
+) -> bool:
+    """Parse, validate and commit one batch of filings; return whether it was written."""
+
+    bronze, processed_at, documents_table = run
+    by_filing: dict[str, list[DocumentRecord]] = defaultdict(list)
+    for document in _read_documents(
+        documents_table,
+        "filing_id",
+        {filing.filing_id for filing in batch},
+        filing_dates_filter({filing.filing_date for filing in batch}),
+    ):
+        by_filing[document.filing_id].append(document)
+    with timed_operation("xbrl_core.parse", filings=len(batch)):
+        extraction = extract_filings(batch, by_filing, bronze)
+    summary.filings_conflicted += extraction.conflicts
+    summary.filings_failed += extraction.failures
+    summary.filings_without_xbrl += extraction.without_xbrl
+    built = build_rows(extraction.discovered, processed_at)
+    documents = {d.document_id: d for group in by_filing.values() for d in group}
+    with timed_operation("xbrl_core.validate", phase="built_records"):
+        _validate(built, plan, documents, summary)
+    if summary.filings_conflicted or summary.filings_failed:
+        return False
+    rows = _new_rows(built, plan)
+    snapshots = {
+        XBRL_INSTANCES_TABLE: summary.instances_snapshot_after,
+        XBRL_CONTEXTS_TABLE: summary.contexts_snapshot_after,
+        XBRL_UNITS_TABLE: summary.units_snapshot_after,
+    }
+    _write(tables, rows, snapshots)
+    summary.instances_snapshot_after = snapshots[XBRL_INSTANCES_TABLE]
+    summary.contexts_snapshot_after = snapshots[XBRL_CONTEXTS_TABLE]
+    summary.units_snapshot_after = snapshots[XBRL_UNITS_TABLE]
+    new_ids = {filing.filing_id for filing in plan.new}
+    summary.filings_inserted += sum(
+        1
+        for filing in batch
+        if filing.filing_id in new_ids
+        and built.get(filing.filing_id)
+        and built[filing.filing_id].instances
+    )
+    _count_inserted(rows, summary)
+    return True
 
 
 def _run_xbrl(
     catalog: Catalog,
     data_dir: Path,
-    processed_at: datetime,
+    run_inputs: tuple[SecBronze, datetime],
     summary: XbrlCoreStageSummary,
 ) -> None:
+    bronze, processed_at = run_inputs
     tables = {}
     for identifier in XBRL_CORE_SCHEMAS:
         tables[identifier], created = open_xbrl_core_table(
@@ -259,18 +345,28 @@ def _run_xbrl(
             read_filings(open_filings_table(catalog, data_dir)[0]),
             key=lambda f: (f.filing_date, f.filing_id),
         )
-        documents = {
-            d.document_id: d
-            for d in read_documents(open_documents_table(catalog, data_dir)[0])
-        }
+        documents_table, _ = open_documents_table(catalog, data_dir)
         stored = read_instance_groups(tables[XBRL_INSTANCES_TABLE])
+        sources = {
+            d.document_id: d
+            for d in _read_documents(
+                documents_table,
+                "document_id",
+                {
+                    i
+                    for rows in stored.values()
+                    for r in rows
+                    for i in r["source_document_ids"]
+                },
+            )
+        }
         children = {
-            table: group_rows_by(tables[table], "instance_id")
+            table: count_groups(tables[table], "instance_id")
             for table in (XBRL_CONTEXTS_TABLE, XBRL_UNITS_TABLE)
         }
     summary.filings_considered = len(filings)
     with timed_operation("xbrl_core.validate", phase="existing_state"):
-        plan = classify_filings(filings, documents, stored, children)
+        plan = classify_filings(filings, sources, stored, children)
     for context, reason in plan.conflicts:
         logger.error("xbrl_instance_conflict", reason=reason, **context)
     summary.filings_conflicted, summary.filings_skipped = (
@@ -281,35 +377,13 @@ def _run_xbrl(
     if plan.conflicts:
         return
 
-    by_filing: dict[str, list[DocumentRecord]] = defaultdict(list)
-    for document in documents.values():
-        by_filing[document.filing_id].append(document)
     candidates = plan.new + [f for f in filings if f.filing_id in plan.recover]
-    with timed_operation("xbrl_core.parse", filings=len(candidates)):
-        extraction = extract_filings(candidates, by_filing, data_dir)
-    summary.filings_conflicted += extraction.conflicts
-    summary.filings_failed = extraction.failures
-    summary.filings_without_xbrl = extraction.without_xbrl
-    built = build_rows(extraction.discovered, processed_at)
-    with timed_operation("xbrl_core.validate", phase="built_records"):
-        _validate(built, plan, documents, summary)
-    if summary.filings_conflicted or summary.filings_failed:
-        return
-
-    rows = _new_rows(built, plan)
-    stored_counts = {
-        XBRL_INSTANCES_TABLE: sum(map(len, stored.values())),
-        **{table: sum(map(len, groups.values())) for table, groups in children.items()},
-    }
-    _write(tables, rows, stored_counts, snapshots)
-    summary.instances_snapshot_after = snapshots[XBRL_INSTANCES_TABLE]
-    summary.contexts_snapshot_after = snapshots[XBRL_CONTEXTS_TABLE]
-    summary.units_snapshot_after = snapshots[XBRL_UNITS_TABLE]
+    for batch in batched(candidates, FILINGS_PER_COMMIT, strict=False):
+        if not _run_batch(
+            tables, batch, plan, (bronze, processed_at, documents_table), summary
+        ):
+            return
     summary.filings_recovered = len(plan.recover)
-    summary.filings_inserted = sum(
-        1 for f in plan.new if built.get(f.filing_id) and built[f.filing_id].instances
-    )
-    _count_inserted(rows, summary)
     logger.info(
         "xbrl_instance_inserted",
         filings=summary.filings_inserted,
@@ -319,16 +393,21 @@ def _run_xbrl(
     summary.status = "completed"
 
 
-def run_xbrl_core_stage(data_dir: Path, processed_at: datetime) -> XbrlCoreStageSummary:
+def run_xbrl_core_stage(
+    data_dir: Path, processed_at: datetime, bronze: SecBronze | None = None
+) -> XbrlCoreStageSummary:
     """Build `xbrl_instances`, `xbrl_contexts` and `xbrl_units` from XBRL sources.
 
     Filings are classified against the three tables before reading Bronze:
     complete ones are skipped, recoverable ones re-parsed to append missing
     context or unit groups. Each candidate filing's Inline and XML instance
-    documents are verified by offsets and checksum and parsed once. The
-    whole batch is validated before writing instances, then contexts, then
-    units, each in one append with read-back verification. Any conflict or
-    invalid filing rejects the batch; unexpected errors are logged and raised.
+    documents are verified by offsets and checksum and parsed once. Stored
+    contexts and units are judged by their row counts; any conflict rejects
+    the run before the first write. Candidates are validated and committed
+    in batches of FILINGS_PER_COMMIT filings: instances, then contexts, then
+    units, each verified after its append. An invalid filing rejects its
+    batch; earlier batches stay committed. Unexpected errors are logged and
+    raised.
     """
 
     started = perf_counter()
@@ -340,7 +419,12 @@ def run_xbrl_core_stage(data_dir: Path, processed_at: datetime) -> XbrlCoreStage
                 timed_operation("xbrl_core.total"),
                 open_silver_catalog(data_dir) as catalog,
             ):
-                _run_xbrl(catalog, data_dir, processed_at, summary)
+                _run_xbrl(
+                    catalog,
+                    data_dir,
+                    (bronze or SecBronze.under(data_dir), processed_at),
+                    summary,
+                )
         except Exception as error:
             logger.error(
                 "xbrl_core_stage_failed",

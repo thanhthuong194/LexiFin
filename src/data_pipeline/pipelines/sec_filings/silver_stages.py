@@ -29,7 +29,11 @@ from src.data_pipeline.pipelines.sec_filings.xbrl_facts import run_xbrl_facts_st
 from src.data_pipeline.pipelines.sec_filings.xbrl_linkbases import (
     run_xbrl_linkbases_stage,
 )
-from src.data_pipeline.quality.sec_filings.silver_audit import validate_silver
+from src.data_pipeline.quality.sec_filings.silver_audit import (
+    AuditOptions,
+    audit_silver,
+)
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import SilverTableSpec
 from src.data_pipeline.storage.sec_filings.content_blocks import CONTENT_BLOCKS_SPEC
 from src.data_pipeline.storage.sec_filings.document_links import DOCUMENT_LINKS_SPEC
@@ -64,7 +68,7 @@ from src.data_pipeline.transforms.sec_filings.xbrl_processor import ProcessorSet
 
 # Statuses of a stage that let its dependents run: a table stage completed
 # (written, or nothing to write) or the integrity audit passed.
-SUCCEEDED = frozenset({"completed", "passed"})
+SUCCEEDED = frozenset({"completed", "PASS", "WARN"})
 
 
 class StageOutcome(Protocol):
@@ -79,6 +83,7 @@ class StageContext:
     """What every stage of one run receives."""
 
     data_dir: Path
+    bronze: SecBronze
     processed_at: datetime
     taxonomy: ProcessorSettings
 
@@ -103,37 +108,37 @@ _TABLE_STAGES = (
         "filings",
         (),
         (FILINGS_SPEC,),
-        lambda c: run_filings_stage(c.data_dir, c.processed_at),
+        lambda c: run_filings_stage(c.data_dir, c.processed_at, c.bronze),
     ),
     SilverStage(
         "documents",
         ("filings",),
         (DOCUMENTS_SPEC,),
-        lambda c: run_documents_stage(c.data_dir, c.processed_at),
+        lambda c: run_documents_stage(c.data_dir, c.processed_at, c.bronze),
     ),
     SilverStage(
         "filing_entities",
         ("filings",),
         (FILING_ENTITIES_SPEC,),
-        lambda c: run_filing_entities_stage(c.data_dir, c.processed_at),
+        lambda c: run_filing_entities_stage(c.data_dir, c.processed_at, c.bronze),
     ),
     SilverStage(
         "narrative",
         ("documents",),
         (SECTIONS_SPEC, CONTENT_BLOCKS_SPEC),
-        lambda c: run_narrative_stage(c.data_dir, c.processed_at),
+        lambda c: run_narrative_stage(c.data_dir, c.processed_at, c.bronze),
     ),
     SilverStage(
         "document_tables",
         ("documents", "narrative"),
         (DOCUMENT_TABLES_SPEC, DOCUMENT_TABLE_CELLS_SPEC),
-        lambda c: run_document_tables_stage(c.data_dir, c.processed_at),
+        lambda c: run_document_tables_stage(c.data_dir, c.processed_at, c.bronze),
     ),
     SilverStage(
         "document_links",
         ("documents",),
         (DOCUMENT_LINKS_SPEC,),
-        lambda c: run_document_links_stage(c.data_dir, c.processed_at),
+        lambda c: run_document_links_stage(c.data_dir, c.processed_at, c.bronze),
     ),
     SilverStage(
         "exhibit_index",
@@ -145,26 +150,32 @@ _TABLE_STAGES = (
         "xbrl_core",
         ("filings", "documents"),
         (XBRL_INSTANCES_SPEC, XBRL_CONTEXTS_SPEC, XBRL_UNITS_SPEC),
-        lambda c: run_xbrl_core_stage(c.data_dir, c.processed_at),
+        lambda c: run_xbrl_core_stage(c.data_dir, c.processed_at, c.bronze),
     ),
     SilverStage(
         "xbrl_facts",
         # Facts are aligned with the stored narrative blocks and table cells.
         ("documents", "narrative", "document_tables", "xbrl_core"),
         (XBRL_CONCEPTS_SPEC, XBRL_FACTS_SPEC),
-        lambda c: run_xbrl_facts_stage(c.data_dir, c.processed_at, c.taxonomy),
+        lambda c: run_xbrl_facts_stage(
+            c.data_dir, c.processed_at, c.taxonomy, c.bronze
+        ),
     ),
     SilverStage(
         "xbrl_enrichment",
         ("documents", "xbrl_core", "xbrl_facts"),
         (XBRL_DIMENSIONS_SPEC, XBRL_FACT_FOOTNOTES_SPEC),
-        lambda c: run_xbrl_enrichment_stage(c.data_dir, c.processed_at, c.taxonomy),
+        lambda c: run_xbrl_enrichment_stage(
+            c.data_dir, c.processed_at, c.taxonomy, c.bronze
+        ),
     ),
     SilverStage(
         "xbrl_linkbases",
         ("documents", "xbrl_core", "xbrl_facts"),
         (XBRL_LABELS_SPEC, XBRL_NETWORKS_SPEC, XBRL_RELATIONSHIPS_SPEC),
-        lambda c: run_xbrl_linkbases_stage(c.data_dir, c.processed_at, c.taxonomy),
+        lambda c: run_xbrl_linkbases_stage(
+            c.data_dir, c.processed_at, c.taxonomy, c.bronze
+        ),
     ),
 )
 # The stages in run order; the read-only integrity audit of every table last.
@@ -174,7 +185,7 @@ SILVER_STAGES = (
         "integrity",
         tuple(stage.name for stage in _TABLE_STAGES),
         (),
-        lambda c: validate_silver(c.data_dir),
+        lambda c: audit_silver(c.data_dir, AuditOptions(bronze_dir=c.bronze.root)),
     ),
 )
 

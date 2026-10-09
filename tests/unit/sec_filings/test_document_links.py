@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from src.data_pipeline.contracts.sec_filings.document_links import DocumentLinkRecord
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.sec_filings.documents import read_document_content
 from src.data_pipeline.transforms.sec_filings.document_links import (
     build_document_links,
@@ -233,7 +234,7 @@ def test_source_content_must_match_its_recorded_checksum(tmp_path: Path) -> None
     path.parent.mkdir(parents=True)
     path.write_bytes(b"0123456789" + content + b"0123456789")
 
-    assert read_document_content(source, tmp_path) == content
+    assert read_document_content(source, SecBronze.under(tmp_path)) == content
     path.write_bytes(b"0123456789" + content.replace(b"#a", b"#b") + b"0123456789")
     with pytest.raises(ValueError, match="SHA-256 differs"):
-        read_document_content(source, tmp_path)
+        read_document_content(source, SecBronze.under(tmp_path))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from itertools import pairwise
 
 from src.data_pipeline.contracts.sec_filings.content_blocks import (
@@ -9,6 +9,7 @@ from src.data_pipeline.contracts.sec_filings.content_blocks import (
 )
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
 from src.data_pipeline.contracts.sec_filings.sections import SectionRecord
+from src.data_pipeline.storage.iceberg import GroupSummary
 from src.data_pipeline.transforms.sec_filings.narrative import (
     deepest_section_ordinals,
 )
@@ -41,6 +42,23 @@ def declared_count_problem(
         return f"{len(ordinals)} {rows} but declared counts {sorted(declared)}"
     if sorted(ordinals) != list(range(1, len(ordinals) + 1)):
         return f"{rows} ordinals are not exactly 1..{len(ordinals)}"
+    return None
+
+
+def stored_group_problem(
+    summary: GroupSummary, lineage: Mapping[str, object], rows: str
+) -> str | None:
+    """Why a stored group, known only by its summary, is not complete, or None.
+
+    Its ordinals must be exactly 1..N of its declared count, and every row
+    must carry the `lineage` values (column -> the parent's value).
+    """
+
+    if not summary.complete:
+        return f"stored {rows} are incomplete: ordinals or declared counts are not 1..N"
+    differing = sorted(c for c, v in lineage.items() if summary.value(c) != v)
+    if differing:
+        return f"stored {rows} do not carry their parent's {differing}"
     return None
 
 

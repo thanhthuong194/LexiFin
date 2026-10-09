@@ -5,7 +5,8 @@ import json
 import os
 import tempfile
 from collections.abc import Iterable
-from pathlib import Path
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -46,6 +47,46 @@ def resolve_relative_path(relative_path: str, root: Path) -> Path:
     candidate = (root / relative_path).resolve()
     relative_to_root(candidate, root)
     return candidate
+
+
+# Stored Bronze paths are relative to the data directory of the ingest that
+# wrote them, as the filing manifest records them; SEC Bronze sits under this
+# prefix there.
+SEC_BRONZE_PREFIX = PurePosixPath("bronze/sec_filings")
+
+
+@dataclass(frozen=True)
+class SecBronze:
+    """The SEC Bronze directory a Silver build reads: `sec-edgar-filings/`,
+    `_metadata/`.
+
+    Stored paths keep the `bronze/sec_filings/...` form of the filing
+    manifest and resolve under `root`, wherever it lives, so Bronze can be
+    moved or renamed apart from Silver.
+    """
+
+    root: Path
+
+    @classmethod
+    def under(cls, data_dir: Path) -> SecBronze:
+        """The default layout: `<data_dir>/bronze/sec_filings`."""
+
+        return cls(data_dir / SEC_BRONZE_PREFIX)
+
+    def path(self, stored: str) -> Path:
+        """The file a stored path names; it must stay inside `root`."""
+
+        relative = PurePosixPath(stored)
+        if relative.parts[: len(SEC_BRONZE_PREFIX.parts)] != SEC_BRONZE_PREFIX.parts:
+            raise ValueError(f"Not an SEC Bronze path: {stored}")
+        return resolve_relative_path(
+            relative.relative_to(SEC_BRONZE_PREFIX).as_posix(), self.root
+        )
+
+    def stored(self, path: Path) -> str:
+        """The stored form of a file inside `root`."""
+
+        return (SEC_BRONZE_PREFIX / relative_to_root(path, self.root)).as_posix()
 
 
 def atomic_write_bytes(

@@ -14,6 +14,7 @@ from src.data_pipeline.contracts.sec_filings.filings import (
 from src.data_pipeline.storage.iceberg import (
     PartitionColumn,
     SilverTableSpec,
+    iter_rows,
 )
 
 FILINGS_TABLE = "sec_filings.filings"
@@ -45,25 +46,19 @@ def open_filings_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
 def read_stored_checksums(table: Table) -> dict[str, StoredChecksums]:
     """Return the checksums of every filing_id in the table's current snapshot."""
 
-    rows = table.scan(
-        selected_fields=(
-            "filing_id",
-            "full_submission_sha256",
-            "primary_document_sha256",
-        )
-    ).to_arrow()
+    rows = iter_rows(
+        table, ("filing_id", "full_submission_sha256", "primary_document_sha256")
+    )
     return {
         row["filing_id"]: StoredChecksums(
             full_submission_sha256=row["full_submission_sha256"],
             primary_document_sha256=row["primary_document_sha256"],
         )
-        for row in rows.to_pylist()
+        for row in rows
     }
 
 
 def read_filings(table: Table) -> list[FilingRecord]:
     """Return every row of the table's current snapshot as a FilingRecord."""
 
-    return [
-        FilingRecord.model_validate(row) for row in table.scan().to_arrow().to_pylist()
-    ]
+    return [FilingRecord.model_validate(row) for row in iter_rows(table)]

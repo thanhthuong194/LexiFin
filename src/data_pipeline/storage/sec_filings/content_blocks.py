@@ -7,10 +7,10 @@ from pyiceberg.table import Table
 
 from src.data_pipeline.contracts.sec_filings.content_blocks import (
     CONTENT_BLOCKS_ARROW_SCHEMA,
-    ContentBlockRecord,
 )
 from src.data_pipeline.storage.iceberg import (
     SilverTableSpec,
+    iter_rows,
 )
 from src.data_pipeline.storage.sec_filings.filings import FILING_YEAR_PARTITION
 
@@ -35,14 +35,6 @@ def count_table_cell_blocks(table: Table) -> int:
     ranges differ from what the current parser builds.
     """
 
-    rows = table.scan(
-        row_filter="block_type == 'table_cell'", selected_fields=("block_id",)
+    return sum(
+        row["block_type"] == "table_cell" for row in iter_rows(table, ("block_type",))
     )
-    return len(rows.to_arrow())
-
-
-def read_table_blocks(table: Table) -> list[ContentBlockRecord]:
-    """Return the `table` blocks of the current snapshot, validated."""
-
-    rows = table.scan(row_filter="block_type == 'table'").to_arrow()
-    return [ContentBlockRecord.model_validate(row) for row in rows.to_pylist()]

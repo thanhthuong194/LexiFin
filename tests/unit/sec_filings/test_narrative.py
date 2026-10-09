@@ -20,6 +20,7 @@ from src.data_pipeline.quality.sec_filings.narrative import (
     narrative_problem,
     sections_problem,
 )
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.sec_filings.documents import read_document_content
 from src.data_pipeline.transforms.sec_filings.html_blocks import (
     HtmlBlock,
@@ -474,13 +475,14 @@ def test_records_match_exact_arrow_schemas() -> None:
 
 
 def test_read_document_content_checks_offsets_size_and_checksum(tmp_path: Path) -> None:
-    source = tmp_path / "bronze" / "full-submission.txt"
+    bronze = SecBronze(tmp_path / "moved")
+    source = bronze.root / "full-submission.txt"
     source.parent.mkdir()
     source.write_bytes(b"0123456789<html>body</html>tail")
     content = b"<html>body</html>"
     parent = _parent().model_copy(
         update={
-            "source_path": "bronze/full-submission.txt",
+            "source_path": "bronze/sec_filings/full-submission.txt",
             "content_start_byte": 10,
             "content_end_byte": 27,
             "content_size_bytes": 17,
@@ -488,16 +490,21 @@ def test_read_document_content_checks_offsets_size_and_checksum(tmp_path: Path) 
         }
     )
 
-    assert read_document_content(parent, tmp_path) == content
+    assert read_document_content(parent, bronze) == content
     with pytest.raises(ValueError, match="outside"):
         read_document_content(
-            parent.model_copy(update={"content_end_byte": 99}), tmp_path
+            parent.model_copy(update={"content_end_byte": 99}), bronze
         )
     with pytest.raises(ValueError, match="SHA-256 differs"):
         read_document_content(
-            parent.model_copy(update={"content_sha256": "0" * 64}), tmp_path
+            parent.model_copy(update={"content_sha256": "0" * 64}), bronze
         )
     with pytest.raises(ValueError, match="escapes"):
         read_document_content(
-            parent.model_copy(update={"source_path": "../x.txt"}), tmp_path
+            parent.model_copy(update={"source_path": "bronze/sec_filings/../x.txt"}),
+            bronze,
+        )
+    with pytest.raises(ValueError, match="Not an SEC Bronze path"):
+        read_document_content(
+            parent.model_copy(update={"source_path": "elsewhere/x.txt"}), bronze
         )

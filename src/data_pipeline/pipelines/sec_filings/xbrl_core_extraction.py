@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from time import perf_counter_ns
 
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
@@ -13,6 +12,7 @@ from src.data_pipeline.contracts.sec_filings.xbrl_core import (
     XbrlInstanceRecord,
     XbrlUnitRecord,
 )
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.sec_filings.documents import read_document_content
 from src.data_pipeline.transforms.sec_filings.xbrl_core import (
     LogicalInstance,
@@ -58,7 +58,7 @@ class BuiltFiling:
 
 
 def _sources(
-    filing: FilingRecord, documents: Sequence[DocumentRecord], data_dir: Path
+    filing: FilingRecord, documents: Sequence[DocumentRecord], bronze: SecBronze
 ) -> tuple[list[SourceDocument], list[SourceDocument], int]:
     """Read, verify and parse a filing's Inline and XML instance candidates.
 
@@ -74,7 +74,7 @@ def _sources(
         is_html = document.content_kind == "html"
         if not is_html and document.role != "xbrl_instance":
             continue
-        content = read_document_content(document, data_dir)
+        content = read_document_content(document, bronze)
         size += len(content)
         if is_html and INLINE_XBRL.encode() not in content:
             continue
@@ -118,7 +118,7 @@ def _log_discovered(instances: Sequence[LogicalInstance]) -> None:
 def extract_filings(
     filings: Sequence[FilingRecord],
     documents: Mapping[str, list[DocumentRecord]],
-    data_dir: Path,
+    bronze: SecBronze,
 ) -> XbrlExtraction:
     """Discover each filing's logical instances, parsing every source once.
 
@@ -131,7 +131,7 @@ def extract_filings(
         context = {"filing_id": filing.filing_id}
         try:
             started = perf_counter_ns()
-            inline, xml, size = _sources(filing, documents[filing.filing_id], data_dir)
+            inline, xml, size = _sources(filing, documents[filing.filing_id], bronze)
             read_ns += perf_counter_ns() - started
             verified_bytes += size
             instances = build_logical_instances(filing.filing_id, inline, xml)

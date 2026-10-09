@@ -15,7 +15,7 @@ from src.data_pipeline.contracts.sec_filings.filing_entities import (
     FilingEntityRecord,
 )
 from src.data_pipeline.contracts.sec_filings.filings import FilingRecord
-from src.data_pipeline.storage.bronze import resolve_relative_path
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import (
     append_rows,
     current_snapshot_id,
@@ -70,14 +70,14 @@ class FilingEntitiesStageSummary:
     snapshot_after: int | None = None
 
 
-def _read_header(parent: FilingRecord, data_dir: Path) -> RawSecHeader:
+def _read_header(parent: FilingRecord, bronze: SecBronze) -> RawSecHeader:
     """Read only the SEC header of a parent's full submission.
 
     The filings stage of the same run has just verified the file's SHA-256, so
     the whole submission is not hashed again here.
     """
 
-    path = resolve_relative_path(parent.full_submission_path, data_dir)
+    path = bronze.path(parent.full_submission_path)
     if path.stat().st_size == 0:
         raise ValueError("Full submission is empty")
     return read_raw_sec_header(path)
@@ -85,7 +85,7 @@ def _read_header(parent: FilingRecord, data_dir: Path) -> RawSecHeader:
 
 def _parse_headers(
     parents: Sequence[FilingRecord],
-    data_dir: Path,
+    bronze: SecBronze,
     processed_at: datetime,
     summary: FilingEntitiesStageSummary,
 ) -> dict[str, list[FilingEntityRecord]]:
@@ -94,7 +94,7 @@ def _parse_headers(
     parsed: dict[str, list[FilingEntityRecord]] = {}
     for parent in parents:
         try:
-            header = _read_header(parent, data_dir)
+            header = _read_header(parent, bronze)
             records = build_filing_entity_records(parent, header, processed_at)
             check_entity_offsets(records, header)
         except (OSError, ValueError) as error:
@@ -212,6 +212,7 @@ def _verify_stored_groups(table: Table, parsed: EntityGroups) -> None:
 def _run_filing_entities(
     catalog: Catalog,
     data_dir: Path,
+    bronze: SecBronze,
     processed_at: datetime,
     summary: FilingEntitiesStageSummary,
 ) -> None:
@@ -230,7 +231,7 @@ def _run_filing_entities(
     stored = read_filing_entity_groups(table)
 
     with timed_operation("filing_entities.parse", filings=len(parents)):
-        parsed = _parse_headers(parents, data_dir, processed_at, summary)
+        parsed = _parse_headers(parents, bronze, processed_at, summary)
     with timed_operation("filing_entities.validate"):
         new = _plan_inserts(
             {parent.filing_id for parent in parents}, parsed, stored, summary
@@ -263,7 +264,9 @@ def _run_filing_entities(
 
 
 def run_filing_entities_stage(
-    data_dir: Path, processed_at: datetime
+    data_dir: Path,
+    processed_at: datetime,
+    bronze: SecBronze | None = None,
 ) -> FilingEntitiesStageSummary:
     """Record the entity-role blocks of every filing in `sec_filings.filings`.
 
@@ -282,7 +285,13 @@ def run_filing_entities_stage(
                 timed_operation("filing_entities.total"),
                 open_silver_catalog(data_dir) as catalog,
             ):
-                _run_filing_entities(catalog, data_dir, processed_at, summary)
+                _run_filing_entities(
+                    catalog,
+                    data_dir,
+                    bronze or SecBronze.under(data_dir),
+                    processed_at,
+                    summary,
+                )
         except Exception as error:
             logger.error(
                 "filing_entities_stage_failed",

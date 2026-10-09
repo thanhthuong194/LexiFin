@@ -1,23 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
 from src.data_pipeline.contracts.sec_filings.filings import FilingRecord
-from src.data_pipeline.contracts.sec_filings.xbrl_core import (
-    XbrlContextRecord,
-    XbrlInstanceRecord,
-    XbrlUnitRecord,
-)
-from src.data_pipeline.quality.sec_filings.xbrl_core import (
-    contexts_problem,
-    instance_problem,
-    units_problem,
-)
+from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
+from src.data_pipeline.quality.sec_filings.xbrl_core import instance_problem
 from src.data_pipeline.storage.sec_filings.xbrl_core import (
     XBRL_CONTEXTS_TABLE,
     XBRL_UNITS_TABLE,
@@ -43,22 +35,12 @@ class XbrlPlan:
     conflicts: list[tuple[dict[str, str], str]] = field(default_factory=list)
 
 
-def _validated[Record: BaseModel](
-    rows: Sequence[dict[str, Any]], model: type[Record]
-) -> list[Record]:
-    return [model.model_validate(row) for row in rows]
-
-
-def _group_problem[Record: BaseModel](
-    instance: XbrlInstanceRecord,
-    rows: Sequence[dict[str, Any]],
-    model: type[Record],
-    check: Callable[[XbrlInstanceRecord, list[Record]], str | None],
+def _children_problem(
+    instance: XbrlInstanceRecord, table: str, stored: int, declared: int
 ) -> str | None:
-    try:
-        return check(instance, _validated(rows, model))
-    except ValidationError as error:
-        return f"stored row is invalid: {error.errors()[0]['msg']}"
+    if stored in (0, declared):
+        return None
+    return f"{instance.instance_id} in {table}: {stored} rows, the instance declares {declared}"
 
 
 def _classify_stored(
@@ -66,12 +48,17 @@ def _classify_stored(
     filing: FilingRecord,
     rows: Sequence[dict[str, Any]],
     documents: Mapping[str, DocumentRecord],
-    children: Mapping[str, StoredRows],
+    children: Mapping[str, Mapping[str, int]],
 ) -> str | None:
-    """Place a filing with stored instances in the plan; return a conflict reason."""
+    """Place a filing with stored instances in the plan; return a conflict reason.
+
+    Context and unit groups are judged by their row counts: a group is
+    missing (recovered now) or holds exactly the declared count; the
+    integrity audit checks the rows themselves.
+    """
 
     try:
-        instances = _validated(rows, XbrlInstanceRecord)
+        instances = [XbrlInstanceRecord.model_validate(row) for row in rows]
     except ValidationError as error:
         return f"stored instance is invalid: {error.errors()[0]['msg']}"
     missing = set()
@@ -79,25 +66,16 @@ def _classify_stored(
         problem = instance_problem(instance, documents)
         if problem is not None:
             return f"{instance.instance_id}: {problem}"
-        contexts = children[XBRL_CONTEXTS_TABLE].get(instance.instance_id, [])
-        units = children[XBRL_UNITS_TABLE].get(instance.instance_id, [])
-        problems = {
-            XBRL_CONTEXTS_TABLE: None
-            if not contexts and instance.context_count
-            else _group_problem(
-                instance, contexts, XbrlContextRecord, contexts_problem
-            ),
-            XBRL_UNITS_TABLE: None
-            if not units and instance.unit_count
-            else _group_problem(instance, units, XbrlUnitRecord, units_problem),
-        }
-        for table, problem in problems.items():
+        for table, declared in (
+            (XBRL_CONTEXTS_TABLE, instance.context_count),
+            (XBRL_UNITS_TABLE, instance.unit_count),
+        ):
+            stored = children[table].get(instance.instance_id, 0)
+            problem = _children_problem(instance, table, stored, declared)
             if problem is not None:
-                return f"{instance.instance_id} in {table}: {problem}"
-        if not contexts and instance.context_count:
-            missing.add((instance.instance_id, XBRL_CONTEXTS_TABLE))
-        if not units and instance.unit_count:
-            missing.add((instance.instance_id, XBRL_UNITS_TABLE))
+                return problem
+            if declared and not stored:
+                missing.add((instance.instance_id, table))
     if missing:
         plan.recover[filing.filing_id] = instances
         plan.missing |= missing
@@ -110,14 +88,15 @@ def classify_filings(
     filings: Sequence[FilingRecord],
     documents: Mapping[str, DocumentRecord],
     stored_instances: StoredRows,
-    children: Mapping[str, StoredRows],
+    children: Mapping[str, Mapping[str, int]],
 ) -> XbrlPlan:
     """Classify every filing against the three tables before reading Bronze.
 
     `stored_instances` groups instance rows by filing_id; `children` maps the
-    contexts and units tables to their rows grouped by instance_id. Child rows
-    without a stored instance, instances of unknown filings, partial or
-    invalid groups and changed source sets are conflicts.
+    contexts and units tables to their row counts by instance_id;
+    `documents` holds at least the stored instances' source documents.
+    Child rows without a stored instance, instances of unknown filings,
+    invalid instances, partial groups and changed source sets are conflicts.
     """
 
     plan = XbrlPlan()

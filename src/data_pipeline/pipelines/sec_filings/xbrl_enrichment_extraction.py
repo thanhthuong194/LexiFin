@@ -4,7 +4,6 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -28,6 +27,7 @@ from src.data_pipeline.quality.sec_filings.xbrl_enrichment import (
     footnote_group_problem,
     footnote_resources_problem,
 )
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.transforms.sec_filings.xbrl_dimensions import (
     dimension_records,
     expected_dimension_count,
@@ -60,7 +60,7 @@ class EnrichmentInputs:
     refs: InstanceRefs
     stored_dimensions: StoredRows
     stored_footnotes: StoredRows
-    data_dir: Path
+    bronze: SecBronze
     settings: ProcessorSettings
     processed_at: datetime
 
@@ -201,7 +201,7 @@ def _extract_one(
 
     instance = state.instance
     files = source_files(
-        instance, inputs.parents.documents, filing_documents, inputs.data_dir
+        instance, inputs.parents.documents, filing_documents, inputs.bronze
     )
     loaded = extraction.durations.run(
         "load_arelle",

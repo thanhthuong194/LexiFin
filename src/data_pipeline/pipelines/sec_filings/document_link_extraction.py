@@ -4,13 +4,13 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from time import perf_counter_ns
 
 from pydantic import ValidationError
 
 from src.data_pipeline.contracts.sec_filings.document_links import DocumentLinkRecord
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.sec_filings.documents import read_document_content
 from src.data_pipeline.transforms.sec_filings.document_links import (
     HtmlLink,
@@ -49,7 +49,7 @@ def source_context(source: DocumentRecord) -> dict[str, str]:
 
 
 def _extract(
-    candidates: Sequence[DocumentRecord], data_dir: Path, result: LinkExtraction
+    candidates: Sequence[DocumentRecord], bronze: SecBronze, result: LinkExtraction
 ) -> dict[str, list[HtmlLink]]:
     """Read, verify and parse each candidate once, keeping only its links.
 
@@ -63,7 +63,7 @@ def _extract(
     for source in candidates:
         try:
             started = perf_counter_ns()
-            content = read_document_content(source, data_dir)
+            content = read_document_content(source, bronze)
             verified_bytes += len(content)
             read_at = perf_counter_ns()
             root = parse_html(content)
@@ -159,7 +159,7 @@ def _build(
 def extract_document_links(
     candidates: Sequence[DocumentRecord],
     documents: Mapping[str, DocumentRecord],
-    data_dir: Path,
+    bronze: SecBronze,
     processed_at: datetime,
 ) -> LinkExtraction:
     """Build the link records of every candidate HTML document.
@@ -172,7 +172,7 @@ def extract_document_links(
 
     result = LinkExtraction()
     with timed_operation("document_links.extract", documents=len(candidates)):
-        extracted = _extract(candidates, data_dir, result)
+        extracted = _extract(candidates, bronze, result)
     with timed_operation("document_links.resolve", documents=len(extracted)):
         _build(candidates, extracted, documents, processed_at, result)
     return result

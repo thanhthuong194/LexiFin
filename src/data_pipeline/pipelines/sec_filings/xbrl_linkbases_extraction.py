@@ -4,7 +4,6 @@ from collections import Counter, defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
 from src.data_pipeline.contracts.sec_filings.xbrl_labels import XbrlLabelRecord
@@ -21,6 +20,7 @@ from src.data_pipeline.quality.sec_filings.xbrl_linkbases import (
     network_problem,
     relationship_attributes_problem,
 )
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.transforms.sec_filings.xbrl_linkbases import (
     label_records,
     network_records,
@@ -42,7 +42,7 @@ class LinkbaseInputs:
 
     documents: Mapping[str, DocumentRecord]
     concept_ids: Collection[str]
-    data_dir: Path
+    bronze: SecBronze
     settings: ProcessorSettings
     processed_at: datetime
 
@@ -130,7 +130,7 @@ def _extract_one(
     """Load an instance once and add its new rows to the extraction."""
 
     instance = state.instance
-    files = source_files(instance, inputs.documents, filing_documents, inputs.data_dir)
+    files = source_files(instance, inputs.documents, filing_documents, inputs.bronze)
     loaded = extraction.durations.run(
         "load_arelle",
         lambda: load_instance(

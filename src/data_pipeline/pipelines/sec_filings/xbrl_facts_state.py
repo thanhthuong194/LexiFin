@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import pyarrow as pa
-import pyarrow.compute as pc
-from pydantic import ValidationError
 from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 
@@ -18,14 +15,19 @@ from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
 from src.data_pipeline.contracts.sec_filings.xbrl_facts import XbrlFactRecord
 from src.data_pipeline.quality.sec_filings.xbrl_core import instance_problem
 from src.data_pipeline.quality.sec_filings.xbrl_facts import facts_problem
-from src.data_pipeline.storage.iceberg import verify_append
+from src.data_pipeline.storage.iceberg import (
+    GroupSummary,
+    filing_dates_filter,
+    read_rows_in,
+    verify_append,
+    verify_written_values,
+)
 from src.data_pipeline.storage.sec_filings.content_blocks import (
     open_content_blocks_table,
 )
 from src.data_pipeline.storage.sec_filings.document_table_cells import (
     open_document_table_cells_table,
 )
-from src.data_pipeline.storage.sec_filings.xbrl_facts import read_concept_hashes
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -62,31 +64,18 @@ class FactsPlan:
     conflicts: list[tuple[dict[str, str], str]] = field(default_factory=list)
 
 
-def _stored_problem(
-    instance: XbrlInstanceRecord,
-    rows: Sequence[dict[str, Any]],
-    concept_ids: Collection[str],
-    refs: InstanceRefs,
-) -> str | None:
-    try:
-        facts = [XbrlFactRecord.model_validate(row) for row in rows]
-    except ValidationError as error:
-        return f"stored fact is invalid: {error.errors()[0]['msg']}"
-    return facts_problem(instance, facts, concept_ids, refs.of(instance.instance_id))
-
-
 def classify_instances(
     instances: Sequence[XbrlInstanceRecord],
     documents: Mapping[str, DocumentRecord],
-    stored_facts: StoredRows,
-    concept_ids: Collection[str],
-    refs: InstanceRefs,
+    stored_facts: Mapping[str, GroupSummary],
 ) -> FactsPlan:
     """Classify every instance against `xbrl_facts` before reading Bronze.
 
-    `stored_facts` groups fact rows by instance_id. Facts of unknown
-    instances, partial or invalid groups, and instances whose source
-    documents changed are conflicts.
+    `stored_facts` summarizes the fact rows of each instance and `documents`
+    holds at least the instances' source documents. A stored group is
+    complete when its fact orders are exactly 1..fact_count; facts of
+    unknown instances, partial groups and instances whose source documents
+    changed are conflicts. The integrity audit checks the fact rows.
     """
 
     plan = FactsPlan()
@@ -96,53 +85,52 @@ def classify_instances(
     for instance in instances:
         context = {"filing_id": instance.filing_id, "instance_id": instance.instance_id}
         problem = instance_problem(instance, documents)
-        rows = stored_facts.get(instance.instance_id, [])
-        if problem is None and (rows or instance.fact_count == 0):
-            problem = _stored_problem(instance, rows, concept_ids, refs)
-            if problem is None:
-                plan.skipped += 1
-                continue
+        group = stored_facts.get(instance.instance_id)
+        if problem is None and group is not None:
+            problem = (
+                None
+                if group.complete and group.rows == instance.fact_count
+                else f"{group.rows} stored facts are not orders 1..{instance.fact_count}"
+            )
         if problem is not None:
             plan.conflicts.append((context, problem))
+        elif group is not None or instance.fact_count == 0:
+            plan.skipped += 1
         else:
             plan.candidates.append(instance)
     return plan
 
 
-class ContentIndex:
-    """Stored narrative blocks and table cells of a document, by XPath.
+def read_content(
+    catalog: Catalog, data_dir: Path, documents: Sequence[DocumentRecord]
+) -> Callable[[str], ContentMaps]:
+    """Look up the stored cells and non-table blocks of `documents`, by XPath.
 
-    Both tables are read once, on the first lookup, so runs that skip every
-    instance never read them.
+    Only those documents' rows are read, from their partitions.
     """
 
-    def __init__(self, catalog: Catalog, data_dir: Path) -> None:
-        self._catalog, self._data_dir = catalog, data_dir
-        self._rows: tuple[pa.Table, pa.Table] | None = None
-
-    def __call__(self, document_id: str) -> ContentMaps:
-        """Cell IDs and block IDs (non-table blocks) of a document, by XPath."""
-
-        if self._rows is None:
-            blocks = open_content_blocks_table(self._catalog, self._data_dir)[0]
-            cells = open_document_table_cells_table(self._catalog, self._data_dir)[0]
-            self._rows = (
-                blocks.scan(
-                    row_filter="block_type != 'table'",
-                    selected_fields=("document_id", "block_id", "source_xpath"),
-                ).to_arrow(),
-                cells.scan(
-                    selected_fields=("document_id", "cell_id", "source_xpath")
-                ).to_arrow(),
-            )
-        blocks_rows, cells_rows = (
-            rows.filter(pc.equal(rows["document_id"], document_id)).to_pylist()
-            for rows in self._rows
-        )
-        block_ids: dict[str, list[str]] = defaultdict(list)
-        for row in blocks_rows:
-            block_ids[row["source_xpath"]].append(row["block_id"])
-        return {row["source_xpath"]: row["cell_id"] for row in cells_rows}, block_ids
+    ids = {document.document_id for document in documents}
+    files = filing_dates_filter({document.filing_date for document in documents})
+    cells: dict[str, dict[str, str]] = defaultdict(dict)
+    for row in read_rows_in(
+        open_document_table_cells_table(catalog, data_dir)[0],
+        "document_id",
+        ids,
+        columns=("cell_id", "source_xpath"),
+        files=files,
+    ):
+        cells[row["document_id"]][row["source_xpath"]] = row["cell_id"]
+    blocks: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for row in read_rows_in(
+        open_content_blocks_table(catalog, data_dir)[0],
+        "document_id",
+        ids,
+        columns=("block_id", "block_type", "source_xpath"),
+        files=files,
+    ):
+        if row["block_type"] != "table":
+            blocks[row["document_id"]][row["source_xpath"]].append(row["block_id"])
+    return lambda document_id: (cells.get(document_id, {}), blocks.get(document_id, {}))
 
 
 def validate_built(
@@ -169,7 +157,7 @@ def validate_built(
 def verify_concepts(
     table: Table, written: Sequence[XbrlConceptRecord], stored: int, before: int | None
 ) -> int | None:
-    """Re-read concepts: one row per ID, and each new concept stored exactly."""
+    """Re-read concepts: each new concept stored once, with its definition hash."""
 
     snapshot = verify_append(
         table,
@@ -178,7 +166,7 @@ def verify_concepts(
         inserted_keys=[concept.concept_id for concept in written],
         snapshot_before=before,
     )
-    hashes = read_concept_hashes(table)
-    if any(hashes[c.concept_id] != c.concept_definition_sha256 for c in written):
-        raise ValueError("xbrl_concepts rows differ after commit")
+    verify_written_values(
+        table, written, key_column="concept_id", columns=("concept_definition_sha256",)
+    )
     return snapshot

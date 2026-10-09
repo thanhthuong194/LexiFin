@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ from src.data_pipeline.contracts.sec_filings.xbrl_core import (
     XBRL_INSTANCES_ARROW_SCHEMA,
     XBRL_UNITS_ARROW_SCHEMA,
 )
-from src.data_pipeline.storage.iceberg import SilverTableSpec, group_rows_by
+from src.data_pipeline.storage.iceberg import SilverTableSpec, scan_batches
 
 XBRL_INSTANCES_TABLE = "sec_filings.xbrl_instances"
 XBRL_CONTEXTS_TABLE = "sec_filings.xbrl_contexts"
@@ -45,10 +46,12 @@ def read_instance_groups(table: Table) -> dict[str, list[dict[str, Any]]]:
     """Stored `xbrl_instances` rows grouped by filing_id, maps as dicts.
 
     Arrow returns a map column as (key, value) pairs; rows are not validated.
+    Instances are one or two per filing, so the table is read whole.
     """
 
-    groups = group_rows_by(table, "filing_id")
-    for rows in groups.values():
-        for row in rows:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for batch in scan_batches(table):
+        for row in batch.to_pylist():
             row["namespace_map"] = dict(row["namespace_map"])
-    return groups
+            groups[row["filing_id"]].append(row)
+    return dict(groups)

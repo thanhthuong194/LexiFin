@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import Any
 
-from pydantic import ValidationError
 from pyiceberg.table import Table
 
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
@@ -14,10 +13,8 @@ from src.data_pipeline.contracts.sec_filings.xbrl_labels import (
     XbrlLabelRecord,
 )
 from src.data_pipeline.contracts.sec_filings.xbrl_networks import XbrlNetworkRecord
-from src.data_pipeline.quality.sec_filings.narrative import declared_count_problem
 from src.data_pipeline.quality.sec_filings.xbrl_core import instance_problem
-from src.data_pipeline.quality.sec_filings.xbrl_linkbases import network_problem
-from src.data_pipeline.storage.iceberg import read_rows_by_key
+from src.data_pipeline.storage.iceberg import GroupSummary, read_rows_in
 
 StoredRows = Mapping[str, Sequence[dict[str, Any]]]
 # Label columns compared with a stored label of the same ID.
@@ -26,19 +23,12 @@ LABEL_PAYLOAD = tuple(
     for name in XBRL_LABELS_ARROW_SCHEMA.names
     if name not in {"label_id", "processed_at"}
 )
+# The payload read back from stored labels: the text is pinned by its hash.
+LABEL_COMPARED = tuple(name for name in LABEL_PAYLOAD if name != "label_text")
 
 
 class LinkbaseConflict(ValueError):
     """Stored rows, or the source, disagree with the parent or sibling rows."""
-
-
-class RelationshipRow(NamedTuple):
-    """The identity and place of a stored relationship in its network."""
-
-    relationship_id: str
-    relationship_ordinal: int
-    network_relationship_count: int
-    relationship_hash: str
 
 
 @dataclass(frozen=True)
@@ -60,62 +50,74 @@ class LinkbasesPlan:
 
 
 def _stored_networks(
-    rows: Sequence[dict[str, Any]], heads: StoredRows
-) -> list[XbrlNetworkRecord] | None:
-    """An instance's stored networks if none has relationships yet; None if complete."""
+    summary: GroupSummary | None,
+    networks: Sequence[tuple[str, int]],
+    relationships: Mapping[str, GroupSummary],
+) -> bool | None:
+    """Whether an instance's networks are complete (True), stored without any
+    relationship yet (False, as a failed relationships commit leaves them), or
+    absent (None). Other states raise LinkbaseConflict.
 
-    try:
-        networks = [XbrlNetworkRecord.model_validate(row) for row in rows]
-    except ValidationError as error:
-        raise LinkbaseConflict(
-            f"stored network is invalid: {error.errors()[0]['msg']}"
-        ) from error
-    problem = declared_count_problem(
-        [n.network_ordinal for n in networks],
-        {n.instance_network_count for n in networks},
-        "networks",
-    )
-    if problem is not None:
-        raise LinkbaseConflict(problem)
-    filled = [n for n in networks if n.network_id in heads]
+    `networks` holds (network_id, relationship_count) of the stored networks.
+    """
+
+    if summary is None:
+        return None
+    if not summary.complete:
+        raise LinkbaseConflict("network ordinals are not 1..N of their count")
+    filled = [(n, count) for n, count in networks if n in relationships]
     if not filled:
-        return networks
+        return False
     if len(filled) != len(networks):
         raise LinkbaseConflict(
             f"relationships are stored for {len(filled)} of {len(networks)} networks"
         )
-    for network in networks:
-        relationships = [RelationshipRow(**row) for row in heads[network.network_id]]
-        problem = network_problem(network, relationships)
-        if problem is not None:
-            raise LinkbaseConflict(f"network {network.network_id}: {problem}")
-    return None
+    for network_id, count in networks:
+        group = relationships[network_id]
+        if not group.complete or group.rows != count:
+            raise LinkbaseConflict(
+                f"network {network_id}: {group.rows} relationships, declares {count}"
+            )
+    return True
+
+
+@dataclass(frozen=True)
+class StoredLinkbases:
+    """Summaries of the stored networks and relationships, without their rows.
+
+    `networks` summarizes network rows by instance_id and `heads` lists each
+    instance's (network_id, relationship_count); `relationships` summarizes
+    relationship rows by network_id.
+    """
+
+    networks: Mapping[str, GroupSummary]
+    heads: Mapping[str, Sequence[tuple[str, int]]]
+    relationships: Mapping[str, GroupSummary]
 
 
 def classify_instances(
     instances: Sequence[XbrlInstanceRecord],
     documents: Mapping[str, DocumentRecord],
-    stored_networks: StoredRows,
-    relationship_heads: StoredRows,
+    stored: StoredLinkbases,
 ) -> LinkbasesPlan:
     """Classify every instance against the stored networks before loading XBRL.
 
-    `stored_networks` groups network rows by instance_id and
-    `relationship_heads` relationship rows by network_id. Complete instances
-    are skipped; networks or relationships without a parent, partial or
-    changed groups, and instances whose sources changed are conflicts.
+    Stored groups are judged by their summaries; `documents` holds at least
+    the instances' source documents. Complete instances are skipped;
+    networks or relationships without a parent, partial groups, and
+    instances whose sources changed are conflicts. Instances to load get
+    their stored networks later, in their batch. The integrity audit checks
+    the stored rows, and network hashes on its sampled filings.
     """
 
     plan = LinkbasesPlan()
     known = {instance.instance_id for instance in instances}
-    for instance_id in sorted(stored_networks.keys() - known):
+    for instance_id in sorted(stored.networks.keys() - known):
         plan.conflicts.append(
             ({"instance_id": instance_id}, "networks have no instance")
         )
-    network_ids = {
-        row["network_id"] for rows in stored_networks.values() for row in rows
-    }
-    for network_id in sorted(relationship_heads.keys() - network_ids):
+    network_ids = {n for heads in stored.heads.values() for n, _ in heads}
+    for network_id in sorted(stored.relationships.keys() - network_ids):
         plan.conflicts.append(
             ({"network_id": network_id}, "relationships have no network")
         )
@@ -125,31 +127,41 @@ def classify_instances(
         if problem is not None:
             plan.conflicts.append((context, problem))
             continue
-        rows = stored_networks.get(instance.instance_id, [])
         try:
-            networks = _stored_networks(rows, relationship_heads) if rows else []
+            complete = _stored_networks(
+                stored.networks.get(instance.instance_id),
+                stored.heads.get(instance.instance_id, ()),
+                stored.relationships,
+            )
         except LinkbaseConflict as error:
             plan.conflicts.append((context, str(error)))
             continue
-        if networks is None:
+        if complete:
             plan.skipped += 1
         else:
-            plan.candidates.append(InstanceState(instance, networks))
+            plan.candidates.append(InstanceState(instance, []))
     return plan
 
 
 def new_labels(
     table: Table, labels: Mapping[str, XbrlLabelRecord], stored_ids: set[str]
 ) -> tuple[list[XbrlLabelRecord], list[str]]:
-    """Labels not stored yet, and IDs of stored labels that differ from the source."""
+    """Labels not stored yet, and IDs of stored labels that differ from the source.
 
-    stored = read_rows_by_key(
-        table, labels.keys() & stored_ids, key_column="label_id", columns=LABEL_PAYLOAD
-    )
+    Only stored labels of the same IDs are read, without their text: the ID
+    hashes `label_text_sha256`, which the record contract ties to the text.
+    """
+
+    stored = {
+        row.pop("label_id"): row
+        for row in read_rows_in(
+            table, "label_id", labels.keys() & stored_ids, columns=LABEL_COMPARED
+        )
+    }
     differ = sorted(
         label_id
         for label_id, row in stored.items()
-        if row != labels[label_id].model_dump(include=set(LABEL_PAYLOAD))
+        if row != labels[label_id].model_dump(include=set(LABEL_COMPARED))
     )
     new = [
         label

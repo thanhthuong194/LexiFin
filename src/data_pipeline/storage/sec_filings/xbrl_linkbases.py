@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from pathlib import Path
-from typing import Any
 
 import pyarrow.compute as pc
 from pyiceberg.catalog import Catalog
@@ -13,7 +11,7 @@ from src.data_pipeline.contracts.sec_filings.xbrl_networks import (
     XBRL_NETWORKS_ARROW_SCHEMA,
     XBRL_RELATIONSHIPS_ARROW_SCHEMA,
 )
-from src.data_pipeline.storage.iceberg import SilverTableSpec
+from src.data_pipeline.storage.iceberg import SilverTableSpec, iter_rows, scan_batches
 
 XBRL_LABELS_TABLE = "sec_filings.xbrl_labels"
 XBRL_NETWORKS_TABLE = "sec_filings.xbrl_networks"
@@ -46,9 +44,7 @@ def open_xbrl_linkbase_table(
 def read_label_ids(table: Table) -> set[str]:
     """IDs of the stored labels."""
 
-    return set(
-        table.scan(selected_fields=("label_id",)).to_arrow()["label_id"].to_pylist()
-    )
+    return {row["label_id"] for row in iter_rows(table, ("label_id",))}
 
 
 def read_concept_references(labels: Table, relationships: Table) -> set[str]:
@@ -62,17 +58,6 @@ def read_concept_references(labels: Table, relationships: Table) -> set[str]:
     return {
         concept_id
         for table, column in columns
-        for concept_id in pc.unique(
-            table.scan(selected_fields=(column,)).to_arrow()[column]
-        ).to_pylist()
+        for batch in scan_batches(table, (column,))
+        for concept_id in pc.unique(batch[column]).to_pylist()
     }
-
-
-def read_relationship_heads(table: Table) -> dict[str, list[dict[str, Any]]]:
-    """RELATIONSHIP_HEAD_COLUMNS of the stored relationships, by network_id."""
-
-    rows = table.scan(selected_fields=("network_id", *RELATIONSHIP_HEAD_COLUMNS))
-    heads: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows.to_arrow().to_pylist():
-        heads[row.pop("network_id")].append(row)
-    return dict(heads)

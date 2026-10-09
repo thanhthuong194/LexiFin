@@ -11,7 +11,7 @@ from src.data_pipeline.contracts.sec_filings.xbrl_networks import (
 from src.data_pipeline.quality.sec_filings.narrative import declared_count_problem
 
 # Relationship attributes, and the linkbase types they apply to.
-_APPLICABLE = {
+RELATIONSHIP_ATTRIBUTE_LINKBASES = {
     "weight": "calculation",
     "preferred_label_role": "presentation",
     "target_role_uri": "definition",
@@ -72,7 +72,7 @@ def relationship_attributes_problem(
 
     wrong = sorted(
         name
-        for name, linkbase_type in _APPLICABLE.items()
+        for name, linkbase_type in RELATIONSHIP_ATTRIBUTE_LINKBASES.items()
         if getattr(relationship, name) is not None
         and linkbase_type != network.linkbase_type
     )

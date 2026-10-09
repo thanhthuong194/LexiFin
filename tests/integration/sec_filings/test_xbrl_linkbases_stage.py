@@ -318,12 +318,30 @@ def _change_network(data_dir: Path) -> None:
         append_rows(table, [changed], XBRL_NETWORKS_ARROW_SCHEMA)
 
 
+def test_changed_network_content_fails_the_integrity_gate(
+    tmp_path: Path, write_sec_filing
+) -> None:
+    # The stage judges stored networks by their counts and ordinals; only the
+    # audit's sampled filings recompute network_hash from the relationships.
+    _write(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    _change_network(tmp_path)
+
+    result = run_sec_filings_silver(tmp_path)
+
+    assert result.xbrl_linkbases is not None
+    assert result.xbrl_linkbases.status == "completed"
+    assert result.failed_stage == "integrity"
+    (failure,) = result.summary()["integrity_failures"]
+    assert failure["check_name"] == "sample_xbrl"
+    assert "network_hash does not match" in failure["message"]
+
+
 @pytest.mark.parametrize(
     "case",
     [
-        ("partial-relationships", "1 relationships but declared counts [2]"),
+        ("partial-relationships", "1 relationships, declares 2"),
         ("relationships-without-network", "relationships have no network"),
-        ("network-hash-differs", "network_hash does not match"),
         ("concept-missing", "stored rows refer to missing concepts"),
     ],
 )
@@ -347,8 +365,6 @@ def test_damaged_linkbase_state_rejects_the_batch_before_any_write(
         _delete(tmp_path, RELATIONSHIPS, "relationship_id", first)
     elif damage == "relationships-without-network":
         _delete(tmp_path, NETWORKS, "network_id", presentation)
-    elif damage == "network-hash-differs":
-        _change_network(tmp_path)
     else:
         _delete(
             tmp_path,

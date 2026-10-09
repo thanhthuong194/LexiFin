@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
@@ -42,7 +42,8 @@ from src.data_pipeline.pipelines.sec_filings.xbrl_facts import XbrlFactsStageSum
 from src.data_pipeline.pipelines.sec_filings.xbrl_linkbases import (
     XbrlLinkbasesStageSummary,
 )
-from src.data_pipeline.quality.sec_filings.silver_report import SilverAuditReport
+from src.data_pipeline.quality.sec_filings.silver_audit_report import SilverAuditReport
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import (
     SilverTableSpec,
     open_silver_catalog,
@@ -205,16 +206,31 @@ class SilverRunResult:
                 if (before and before.snapshot_id)
                 != ((after := self.tables_after[table]) and after.snapshot_id)
             },
-            "integrity_checks_run": None if audit is None else len(audit.checks_run),
-            "integrity_checks_passed": (
-                None if audit is None else len(audit.checks_run) - audit.checks_failed
-            ),
-            "integrity_checks_failed": None if audit is None else audit.checks_failed,
-            "integrity_failures": (
-                [] if audit is None else [asdict(f) for f in audit.failures.values()]
-            ),
-            "warnings": None if audit is None else audit.warnings,
+            **_integrity_summary(audit),
         }
+
+
+def _integrity_summary(audit: SilverAuditReport | None) -> dict[str, Any]:
+    """The integrity audit's counts, failed and warning checks; None when it did not run."""
+
+    if audit is None:
+        return dict.fromkeys(
+            (
+                "integrity_checks_run",
+                "integrity_checks_passed",
+                "integrity_checks_failed",
+                "integrity_failures",
+                "warnings",
+            )
+        )
+    summary = audit.summary()
+    return {
+        "integrity_checks_run": len(audit.checks),
+        "integrity_checks_passed": summary["checks_passed"],
+        "integrity_checks_failed": summary["checks_failed"],
+        "integrity_failures": summary["failures"],
+        "warnings": summary["warnings"],
+    }
 
 
 def _catalog_exists(data_dir: Path) -> bool:
@@ -323,6 +339,7 @@ def run_sec_filings_silver(
     from_stage: str | None = None,
     to_stage: str | None = None,
     taxonomy: ProcessorSettings | None = None,
+    bronze_dir: Path | None = None,
 ) -> SilverRunResult:
     """Build or incrementally update the SEC Silver tables from all SEC Bronze.
 
@@ -330,10 +347,12 @@ def run_sec_filings_silver(
     (default: all, ending with the read-only integrity audit) in their
     dependency order. A stage before `from_stage` is not run: the tables of
     every stage the run depends on must already exist with their contract
-    definition, otherwise nothing runs. Each stage validates its whole batch
-    before its appends, so a rejected stage writes nothing, later stages do
-    not run, and a rerun completes whatever is missing; there is no global
-    rollback. The XBRL stages resolve taxonomies as `taxonomy` says (default:
+    definition, otherwise nothing runs. A stage rejects conflicts before its
+    first append and commits in batches, so a failed batch writes nothing,
+    later stages do not run, and a rerun completes whatever is missing; there
+    is no global rollback. Bronze is read from `bronze_dir` (default
+    `<data_dir>/bronze/sec_filings`); the catalog and tables live under
+    `data_dir`. The XBRL stages resolve taxonomies as `taxonomy` says (default:
     offline, from `<data_dir>/_cache/arelle`). An unknown stage or an empty
     range raises ValueError; unexpected errors are logged and re-raised.
     """
@@ -343,6 +362,9 @@ def run_sec_filings_silver(
     started_at = datetime.now(UTC)
     context = StageContext(
         data_dir=data_dir,
+        bronze=SecBronze.under(data_dir)
+        if bronze_dir is None
+        else SecBronze(bronze_dir.expanduser().resolve()),
         processed_at=started_at,
         taxonomy=taxonomy
         or ProcessorSettings(

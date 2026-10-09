@@ -9,7 +9,7 @@ from pathlib import Path
 from src.data_pipeline.connectors.sec_filings.bronze import BronzeFiling
 from src.data_pipeline.contracts.ingestion import FilingManifestEntry
 from src.data_pipeline.contracts.sec_filings.filings import FilingRecord, filing_id_for
-from src.data_pipeline.storage.bronze import relative_to_root, sha256_file
+from src.data_pipeline.storage.bronze import SecBronze, sha256_file
 
 # Header lines look like "ACCESSION NUMBER:\t\t0000320193-24-000123", indented
 # under FILER/SUBJECT COMPANY blocks for per-entity keys such as the CIK.
@@ -219,7 +219,7 @@ def _nonempty_file(path: Path) -> Path:
 def build_filing_record(
     filing: BronzeFiling,
     *,
-    data_dir: Path,
+    bronze: SecBronze,
     manifest: ManifestIndex,
     processed_at: datetime,
 ) -> FilingRecord:
@@ -233,13 +233,13 @@ def build_filing_record(
     header = parse_sec_header(read_sec_header(full_submission))
     check_header_matches_folder(header, filing)
 
-    full_path = relative_to_root(full_submission, data_dir)
+    full_path = bronze.stored(full_submission)
     full_sha256 = sha256_file(full_submission)
     artifacts = {(full_path, full_sha256)}
     primary_path = primary_sha256 = None
     if filing.primary_document.exists():
         primary_document = _nonempty_file(filing.primary_document)
-        primary_path = relative_to_root(primary_document, data_dir)
+        primary_path = bronze.stored(primary_document)
         primary_sha256 = sha256_file(primary_document)
         artifacts.add((primary_path, primary_sha256))
 

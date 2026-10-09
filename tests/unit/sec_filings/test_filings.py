@@ -13,6 +13,7 @@ from src.data_pipeline.contracts.sec_filings.filings import (
     FILINGS_ARROW_SCHEMA,
     FilingRecord,
 )
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.transforms.sec_filings.filings import (
     build_filing_record,
     index_manifest,
@@ -29,7 +30,7 @@ PROCESSED_AT = datetime(2026, 10, 4, 8, 0, tzinfo=UTC)
 
 
 def _only_filing(data_dir: Path):
-    (filing,) = discover_filings(data_dir)
+    (filing,) = discover_filings(SecBronze.under(data_dir))
     return filing
 
 
@@ -51,7 +52,10 @@ def test_discovery_finds_supported_forms_in_deterministic_order(
     (filings_root / ".DS_Store").write_bytes(b"finder")
     (filings_root / CIK / "10-K" / ".partial").mkdir()
 
-    found = [(f.cik, f.form, f.accession_number) for f in discover_filings(tmp_path)]
+    found = [
+        (f.cik, f.form, f.accession_number)
+        for f in discover_filings(SecBronze.under(tmp_path))
+    ]
 
     assert found == [
         (CIK, "10-K", "0000320193-24-000123"),
@@ -71,7 +75,7 @@ def test_discovery_rejects_file_where_accession_folder_expected(
     (directory.parent / "stray.txt").write_text("not a filing")
 
     with pytest.raises(ValueError, match="Expected only directories"):
-        discover_filings(tmp_path)
+        discover_filings(SecBronze.under(tmp_path))
 
 
 def test_parse_sec_header_reads_submission_fields(
@@ -185,7 +189,10 @@ def test_build_filing_record_derives_ids_paths_checksums_and_run_id(
     )
 
     record = build_filing_record(
-        filing, data_dir=tmp_path, manifest=manifest, processed_at=PROCESSED_AT
+        filing,
+        bronze=SecBronze.under(tmp_path),
+        manifest=manifest,
+        processed_at=PROCESSED_AT,
     )
 
     assert record.filing_id == f"sec:{ACCESSION}"
@@ -222,7 +229,7 @@ def test_build_filing_record_rejects_header_that_disagrees_with_folder(
     with pytest.raises(ValueError, match=message):
         build_filing_record(
             _only_filing(tmp_path),
-            data_dir=tmp_path,
+            bronze=SecBronze.under(tmp_path),
             manifest={},
             processed_at=PROCESSED_AT,
         )
@@ -242,7 +249,7 @@ def test_build_filing_record_allows_missing_primary_document_and_manifest(
 
     record = build_filing_record(
         _only_filing(tmp_path),
-        data_dir=tmp_path,
+        bronze=SecBronze.under(tmp_path),
         manifest={},
         processed_at=PROCESSED_AT,
     )
@@ -267,7 +274,7 @@ def test_build_filing_record_rejects_empty_primary_document(
     with pytest.raises(ValueError, match="Missing or empty file"):
         build_filing_record(
             _only_filing(tmp_path),
-            data_dir=tmp_path,
+            bronze=SecBronze.under(tmp_path),
             manifest={},
             processed_at=PROCESSED_AT,
         )
@@ -281,7 +288,7 @@ def test_record_fields_match_exact_arrow_schema(
     )
     record = build_filing_record(
         _only_filing(tmp_path),
-        data_dir=tmp_path,
+        bronze=SecBronze.under(tmp_path),
         manifest={},
         processed_at=PROCESSED_AT,
     )

@@ -81,6 +81,12 @@ def fact_id_for(instance_id: str, fact_order: int) -> str:
     return f"{instance_id}:fact:{fact_order:08d}"
 
 
+def instance_of_fact(fact_id: str) -> str:
+    """The instance_id a fact_id was derived from (see `fact_id_for`)."""
+
+    return fact_id.rsplit(":fact:", 1)[0]
+
+
 def fact_sha256(values: dict[str, Any]) -> str:
     """Hash the FACT_HASHED_FIELDS of a fact as canonical JSON."""
 

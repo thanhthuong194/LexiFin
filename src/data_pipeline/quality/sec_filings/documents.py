@@ -8,7 +8,7 @@ from src.data_pipeline.contracts.sec_filings.filings import FilingRecord
 
 
 class DocumentGroupMember(Protocol):
-    """Document fields shared by new DocumentRecords and StoredDocuments."""
+    """The document fields a filing's inventory is judged by."""
 
     @property
     def document_id(self) -> str: ...

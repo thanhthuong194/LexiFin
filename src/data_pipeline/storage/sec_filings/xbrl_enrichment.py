@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ from src.data_pipeline.contracts.sec_filings.xbrl_fact_footnotes import (
 )
 from src.data_pipeline.storage.iceberg import (
     SilverTableSpec,
+    read_rows_in,
+    values_filter,
 )
 
 XBRL_DIMENSIONS_TABLE = "sec_filings.xbrl_dimensions"
@@ -43,11 +46,12 @@ def open_xbrl_fact_footnotes_table(
     return XBRL_FACT_FOOTNOTES_SPEC.open(catalog, data_dir)
 
 
-def read_contexts_by_instance(table: Table) -> dict[str, list[dict[str, Any]]]:
-    """Identity, hash and dimension XML of each stored context, by instance_id."""
+def read_contexts_by_instance(
+    table: Table, instance_ids: Collection[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Identity, hash and dimension XML of the given instances' contexts, by instance."""
 
-    fields = (
-        "instance_id",
+    columns = (
         "context_key",
         "context_ref",
         "context_hash",
@@ -55,16 +59,26 @@ def read_contexts_by_instance(table: Table) -> dict[str, list[dict[str, Any]]]:
         "scenario_xml",
     )
     contexts: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in table.scan(selected_fields=fields).to_arrow().to_pylist():
+    for row in read_rows_in(table, "instance_id", instance_ids, columns=columns):
         contexts[row["instance_id"]].append(row)
     return dict(contexts)
 
 
-def read_fact_hashes(table: Table) -> dict[str, dict[str, str]]:
-    """The fact_sha256 of each stored fact, by instance_id then fact_id."""
+def read_fact_hashes(
+    table: Table, instance_ids: Collection[str]
+) -> dict[str, dict[str, str]]:
+    """The fact_sha256 of the given instances' facts, by instance_id then fact_id.
 
-    fields = ("instance_id", "fact_id", "fact_sha256")
+    Only the instances' buckets of `xbrl_facts` are read.
+    """
+
     hashes: dict[str, dict[str, str]] = defaultdict(dict)
-    for row in table.scan(selected_fields=fields).to_arrow().to_pylist():
+    for row in read_rows_in(
+        table,
+        "instance_id",
+        instance_ids,
+        columns=("fact_id", "fact_sha256"),
+        files=values_filter("instance_id", instance_ids),
+    ):
         hashes[row["instance_id"]][row["fact_id"]] = row["fact_sha256"]
     return dict(hashes)

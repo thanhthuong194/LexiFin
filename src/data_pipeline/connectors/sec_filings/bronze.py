@@ -6,6 +6,7 @@ from typing import get_args
 
 from src.data_pipeline.contracts.ingestion import FilingManifestEntry, FormType
 from src.data_pipeline.pipelines.sec_state import load_manifest
+from src.data_pipeline.storage.bronze import SecBronze
 
 SUPPORTED_FORMS: frozenset[str] = frozenset(get_args(FormType))
 FULL_SUBMISSION_NAME = "full-submission.txt"
@@ -34,12 +35,6 @@ class BronzeFiling:
         return self.directory / PRIMARY_DOCUMENT_NAME
 
 
-def sec_bronze_root(data_dir: Path) -> Path:
-    """Return the SEC Bronze source folder inside a data directory."""
-
-    return data_dir / "bronze" / "sec_filings"
-
-
 def _visible_directories(parent: Path) -> list[Path]:
     """Return non-hidden children of a filing-tree level, which must be folders."""
 
@@ -52,7 +47,7 @@ def _visible_directories(parent: Path) -> list[Path]:
     return children
 
 
-def discover_filings(data_dir: Path) -> tuple[BronzeFiling, ...]:
+def discover_filings(bronze: SecBronze) -> tuple[BronzeFiling, ...]:
     """Find every supported `<CIK>/<FORM>/<ACCESSION>` directory in SEC Bronze.
 
     Results are sorted by CIK, form and accession number. Hidden entries are
@@ -60,7 +55,7 @@ def discover_filings(data_dir: Path) -> tuple[BronzeFiling, ...]:
     layout expects a directory raises ValueError.
     """
 
-    filings_root = sec_bronze_root(data_dir) / "sec-edgar-filings"
+    filings_root = bronze.root / "sec-edgar-filings"
     if not filings_root.is_dir():
         raise FileNotFoundError(f"SEC Bronze filings folder not found: {filings_root}")
 
@@ -79,9 +74,7 @@ def discover_filings(data_dir: Path) -> tuple[BronzeFiling, ...]:
     )
 
 
-def load_filing_manifest(data_dir: Path) -> tuple[FilingManifestEntry, ...]:
+def load_filing_manifest(bronze: SecBronze) -> tuple[FilingManifestEntry, ...]:
     """Load the append-only SEC Bronze filing manifest; empty when absent."""
 
-    return load_manifest(
-        sec_bronze_root(data_dir) / "_metadata" / "filing_manifest.jsonl"
-    )
+    return load_manifest(bronze.root / "_metadata" / "filing_manifest.jsonl")

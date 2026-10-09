@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from itertools import batched
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
@@ -23,12 +24,18 @@ from src.data_pipeline.contracts.sec_filings.sections import (
 from src.data_pipeline.quality.sec_filings.narrative import (
     narrative_problem,
     sections_problem,
+    stored_group_problem,
 )
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import (
+    GroupSummary,
     append_rows,
     current_snapshot_id,
-    group_rows_by,
+    filing_dates_filter,
     open_silver_catalog,
+    read_groups_in,
+    snapshot_total,
+    summarize_groups,
     verify_append,
 )
 from src.data_pipeline.storage.sec_filings.content_blocks import (
@@ -56,6 +63,12 @@ from src.utils.logger import get_logger, log_context
 from src.utils.timer import timed_operation
 
 logger = get_logger(__name__)
+
+# Documents parsed, validated and committed together: memory holds one
+# batch's sections and blocks, and each batch is one commit per table.
+DOCUMENTS_PER_COMMIT = 200
+# Columns every row of a document's groups repeats from the document.
+_LINEAGE_COLUMNS = ("filing_id", "filing_date", "source_document_sha256")
 
 StoredRows = Mapping[str, Sequence[dict[str, Any]]]
 
@@ -98,17 +111,45 @@ class NarrativeStageSummary:
 
 @dataclass
 class _Plan:
-    """All parent documents, and those to parse: new and resumed ones."""
+    """All parent documents, and those to parse: new and resumed ones.
+
+    Resumed documents have complete stored sections and no blocks.
+    """
 
     parents: Sequence[DocumentRecord]
     new: list[DocumentRecord] = field(default_factory=list)
-    resumed: list[tuple[DocumentRecord, list[SectionRecord]]] = field(
-        default_factory=list
-    )
+    resumed: list[DocumentRecord] = field(default_factory=list)
 
     @property
     def candidates(self) -> list[DocumentRecord]:
-        return self.new + [parent for parent, _ in self.resumed]
+        """Documents to parse in this run, in parent order."""
+
+        resumed = {parent.document_id for parent in self.resumed}
+        new = {parent.document_id for parent in self.new}
+        return [
+            parent
+            for parent in self.parents
+            if parent.document_id in new or parent.document_id in resumed
+        ]
+
+
+@dataclass(frozen=True)
+class _Run:
+    """What every batch of one run shares."""
+
+    sections_table: Table
+    blocks_table: Table
+    bronze: SecBronze
+    processed_at: datetime
+    summary: NarrativeStageSummary
+
+
+def _context(parent: DocumentRecord) -> dict[str, str]:
+    return {
+        "filing_id": parent.filing_id,
+        "document_id": parent.document_id,
+        "source_path": parent.source_path,
+    }
 
 
 def _conflict(summary: NarrativeStageSummary, reason: str, **context: object) -> None:
@@ -134,37 +175,53 @@ def _stored_state(
     return sections, problem
 
 
+def _summary_problem(
+    parent: DocumentRecord, sections: GroupSummary, blocks: GroupSummary | None
+) -> str | None:
+    lineage = {
+        "filing_id": parent.filing_id,
+        "filing_date": parent.filing_date,
+        "source_document_sha256": parent.content_sha256,
+    }
+    return stored_group_problem(sections, lineage, "sections") or (
+        None
+        if blocks is None
+        else stored_group_problem(blocks, lineage, "content blocks")
+    )
+
+
 def _classify(
     parents: Sequence[DocumentRecord],
-    stored_sections: StoredRows,
-    stored_blocks: StoredRows,
+    stored_sections: Mapping[str, GroupSummary],
+    stored_blocks: Mapping[str, GroupSummary],
     summary: NarrativeStageSummary,
 ) -> _Plan:
-    """Sort documents into new, skipped, resumable and conflicting before parsing."""
+    """Sort documents into new, skipped, resumable and conflicting before parsing.
+
+    Stored groups are judged by their summaries (complete ordinals, the
+    parent's lineage); the integrity audit checks their rows.
+    """
 
     plan = _Plan(parents)
     known = {parent.document_id for parent in parents}
     for document_id in sorted((set(stored_sections) | set(stored_blocks)) - known):
         _conflict(summary, "rows have no primary HTML parent", document_id=document_id)
     for parent in parents:
-        context = {
-            "filing_id": parent.filing_id,
-            "document_id": parent.document_id,
-            "source_path": parent.source_path,
-        }
-        section_rows = stored_sections.get(parent.document_id)
-        block_rows = stored_blocks.get(parent.document_id)
-        if section_rows is None:
-            if block_rows is None:
+        sections = stored_sections.get(parent.document_id)
+        blocks = stored_blocks.get(parent.document_id)
+        if sections is None:
+            if blocks is None:
                 plan.new.append(parent)
             else:
-                _conflict(summary, "content blocks exist without sections", **context)
+                _conflict(
+                    summary, "content blocks exist without sections", **_context(parent)
+                )
             continue
-        sections, problem = _stored_state(parent, section_rows, block_rows)
+        problem = _summary_problem(parent, sections, blocks)
         if problem is not None:
-            _conflict(summary, problem, **context)
-        elif block_rows is None:
-            plan.resumed.append((parent, sections))
+            _conflict(summary, problem, **_context(parent))
+        elif blocks is None:
+            plan.resumed.append(parent)
         else:
             summary.documents_skipped += 1
     logger.info("document_narrative_skipped", documents=summary.documents_skipped)
@@ -205,7 +262,7 @@ def _record_metrics(
 
 def _build_candidates(
     candidates: Sequence[DocumentRecord],
-    data_dir: Path,
+    bronze: SecBronze,
     processed_at: datetime,
     summary: NarrativeStageSummary,
 ) -> dict[str, DocumentNarrative]:
@@ -220,7 +277,7 @@ def _build_candidates(
             form=parent.document_type,
         ):
             try:
-                content = read_document_content(parent, data_dir)
+                content = read_document_content(parent, bronze)
                 verified_documents += 1
                 verified_bytes += len(content)
                 blocks = extract_blocks(parse_html(content)).blocks
@@ -265,132 +322,164 @@ def _section_difference(
 
 
 def _validate_built(
-    plan: _Plan, built: Mapping[str, DocumentNarrative], summary: NarrativeStageSummary
+    batch: Sequence[DocumentRecord],
+    built: Mapping[str, DocumentNarrative],
+    stored_sections: Mapping[str, Sequence[SectionRecord]],
+    summary: NarrativeStageSummary,
 ) -> None:
     """Check every built group; resumed sections must equal the stored ones."""
 
-    stored_by_id = {parent.document_id: sections for parent, sections in plan.resumed}
-    for parent in plan.candidates:
+    for parent in batch:
         narrative = built.get(parent.document_id)
         if narrative is None:
             continue
-        context = {
-            "filing_id": parent.filing_id,
-            "document_id": parent.document_id,
-            "source_path": parent.source_path,
-        }
         problem = sections_problem(parent, narrative.sections) or narrative_problem(
             parent, narrative.sections, narrative.blocks
         )
         if problem is not None:
             summary.documents_failed += 1
-            logger.error("document_narrative_invalid", error=problem, **context)
-        elif parent.document_id in stored_by_id:
+            logger.error(
+                "document_narrative_invalid", error=problem, **_context(parent)
+            )
+        elif parent.document_id in stored_sections:
             difference = _section_difference(
-                stored_by_id[parent.document_id], narrative.sections
+                stored_sections[parent.document_id], narrative.sections
             )
             if difference is not None:
-                _conflict(summary, difference, **context)
+                _conflict(summary, difference, **_context(parent))
+
+
+def _read_groups(table: Table, parents: Sequence[DocumentRecord]) -> StoredRows:
+    """The stored rows of the given documents, reading only their partitions."""
+
+    return read_groups_in(
+        table,
+        "document_id",
+        {parent.document_id for parent in parents},
+        files=filing_dates_filter({parent.filing_date for parent in parents}),
+    )
+
+
+def _read_resumed(
+    run: _Run, batch: Sequence[DocumentRecord], resumed: set[str]
+) -> dict[str, list[SectionRecord]]:
+    """The stored sections of the batch's resumed documents; problems conflict."""
+
+    parents = [parent for parent in batch if parent.document_id in resumed]
+    rows = _read_groups(run.sections_table, parents)
+    stored = {}
+    for parent in parents:
+        sections, problem = _stored_state(
+            parent, rows.get(parent.document_id, ()), None
+        )
+        if problem is not None:
+            _conflict(run.summary, problem, **_context(parent))
+        stored[parent.document_id] = sections
+    return stored
 
 
 def _verify_written(
-    sections_table: Table,
-    blocks_table: Table | None,
-    parents: Sequence[DocumentRecord],
+    run: _Run,
+    batch: Sequence[DocumentRecord],
     built: Mapping[str, DocumentNarrative],
+    *,
+    with_blocks: bool,
 ) -> None:
-    """Re-read both tables: no rows outside `parents`, and every group built in
-    this run is stored exactly. With `blocks_table` None only sections are read.
+    """Re-read the batch's groups: every group built now is stored exactly.
+
+    Without blocks only sections are read. Raises ValueError.
     """
 
-    known = {parent.document_id for parent in parents}
-    stored_sections = group_rows_by(sections_table, "document_id")
-    stored_blocks = (
-        {} if blocks_table is None else group_rows_by(blocks_table, "document_id")
-    )
-    orphans = (set(stored_sections) | set(stored_blocks)) - known
-    if orphans:
-        raise ValueError(
-            f"Narrative rows without a parent document: {sorted(orphans)[:5]}"
-        )
-    for parent in parents:
-        narrative = built.get(parent.document_id)
-        if narrative is None:
-            continue
-        sections, problem = _stored_state(
+    sections = _read_groups(run.sections_table, batch)
+    blocks = _read_groups(run.blocks_table, batch) if with_blocks else {}
+    for parent in batch:
+        narrative = built[parent.document_id]
+        stored, problem = _stored_state(
             parent,
-            stored_sections.get(parent.document_id, ()),
-            None if blocks_table is None else stored_blocks.get(parent.document_id, []),
+            sections.get(parent.document_id, ()),
+            blocks.get(parent.document_id, []) if with_blocks else None,
         )
-        problem = problem or _section_difference(sections, narrative.sections)
+        problem = problem or _section_difference(stored, narrative.sections)
         if problem is not None:
             raise ValueError(f"{parent.document_id} after commit: {problem}")
 
 
 def _write(
-    tables: tuple[Table, Table],
-    plan: _Plan,
+    run: _Run,
+    batch: Sequence[DocumentRecord],
     built: Mapping[str, DocumentNarrative],
-    stored_rows: tuple[int, int],
-    summary: NarrativeStageSummary,
+    resumed: set[str],
 ) -> None:
-    """Append new sections, verify them, then append and verify the blocks."""
+    """Append the batch's new sections, verify them, then its blocks."""
 
-    sections_table, blocks_table = tables
-    new_sections = sorted(
-        (
-            section
-            for parent in plan.new
-            for section in built[parent.document_id].sections
-        ),
-        key=lambda s: (s.filing_date, s.document_id, s.section_ordinal),
-    )
-    new_blocks = sorted(
-        (
-            block
-            for parent in plan.candidates
-            for block in built[parent.document_id].blocks
-        ),
-        key=lambda b: (b.filing_date, b.document_id, b.block_ordinal),
+    summary = run.summary
+    new_sections = [
+        section
+        for parent in batch
+        if parent.document_id not in resumed
+        for section in built[parent.document_id].sections
+    ]
+    new_blocks = [block for p in batch for block in built[p.document_id].blocks]
+    rows = (
+        snapshot_total(run.sections_table, "total-records"),
+        snapshot_total(run.blocks_table, "total-records"),
     )
     if new_sections:
         with timed_operation("narrative.write_sections", records=len(new_sections)):
-            append_rows(sections_table, new_sections, SECTIONS_ARROW_SCHEMA)
+            append_rows(run.sections_table, new_sections, SECTIONS_ARROW_SCHEMA)
     with timed_operation("narrative.verify", table=SECTIONS_TABLE):
         summary.sections_snapshot_after = verify_append(
-            sections_table,
+            run.sections_table,
             key_column="section_id",
-            expected_rows=stored_rows[0] + len(new_sections),
+            expected_rows=rows[0] + len(new_sections),
             inserted_keys=[section.section_id for section in new_sections],
-            snapshot_before=summary.sections_snapshot_before,
+            snapshot_before=summary.sections_snapshot_after,
         )
-        _verify_written(sections_table, None, plan.parents, built)
+        _verify_written(run, batch, built, with_blocks=False)
     if new_blocks:
         with timed_operation("narrative.write_blocks", records=len(new_blocks)):
-            append_rows(blocks_table, new_blocks, CONTENT_BLOCKS_ARROW_SCHEMA)
+            append_rows(run.blocks_table, new_blocks, CONTENT_BLOCKS_ARROW_SCHEMA)
     with timed_operation("narrative.verify", table=CONTENT_BLOCKS_TABLE):
         summary.content_blocks_snapshot_after = verify_append(
-            blocks_table,
+            run.blocks_table,
             key_column="block_id",
-            expected_rows=stored_rows[1] + len(new_blocks),
+            expected_rows=rows[1] + len(new_blocks),
             inserted_keys=[block.block_id for block in new_blocks],
-            snapshot_before=summary.content_blocks_snapshot_before,
+            snapshot_before=summary.content_blocks_snapshot_after,
         )
-        _verify_written(sections_table, blocks_table, plan.parents, built)
-    summary.documents_inserted, summary.documents_resumed = (
-        len(plan.new),
-        len(plan.resumed),
-    )
-    summary.sections_inserted, summary.blocks_inserted = (
-        len(new_sections),
-        len(new_blocks),
-    )
+        _verify_written(run, batch, built, with_blocks=True)
+    summary.sections_inserted += len(new_sections)
+    summary.blocks_inserted += len(new_blocks)
+
+
+def _run_batch(run: _Run, batch: Sequence[DocumentRecord], resumed: set[str]) -> bool:
+    """Parse, validate and commit one batch; return whether it was written.
+
+    A conflicting or invalid document rejects the batch before its first write.
+    """
+
+    summary = run.summary
+    stored_sections = _read_resumed(run, batch, resumed)
+    if summary.documents_conflicted:
+        return False
+    with timed_operation("narrative.parse_html", documents=len(batch)):
+        built = _build_candidates(batch, run.bronze, run.processed_at, summary)
+    with timed_operation("narrative.validate", phase="built_records"):
+        _validate_built(batch, built, stored_sections, summary)
+    if summary.documents_failed or summary.documents_conflicted:
+        return False
+    _write(run, batch, built, resumed)
+    resumed_now = sum(parent.document_id in resumed for parent in batch)
+    summary.documents_inserted += len(batch) - resumed_now
+    summary.documents_resumed += resumed_now
     logger.info(
-        "document_narrative_inserted",
-        documents=summary.documents_inserted,
+        "document_narrative_committed",
+        documents=len(batch),
+        resumed=resumed_now,
         sections=summary.sections_inserted,
+        blocks=summary.blocks_inserted,
     )
-    logger.info("document_narrative_resumed", documents=summary.documents_resumed)
+    return True
 
 
 def _open_tables(catalog: Catalog, data_dir: Path) -> tuple[Table, Table]:
@@ -412,9 +501,10 @@ def _open_tables(catalog: Catalog, data_dir: Path) -> tuple[Table, Table]:
 def _run_narrative(
     catalog: Catalog,
     data_dir: Path,
-    processed_at: datetime,
+    run_inputs: tuple[SecBronze, datetime],
     summary: NarrativeStageSummary,
 ) -> None:
+    bronze, processed_at = run_inputs
     documents_table, _ = open_documents_table(catalog, data_dir)
     sections_table, blocks_table = _open_tables(catalog, data_dir)
     summary.sections_snapshot_before = summary.sections_snapshot_after = (
@@ -439,8 +529,20 @@ def _run_narrative(
             read_primary_html_documents(documents_table),
             key=lambda parent: (parent.filing_date, parent.document_id),
         )
-        stored_sections = group_rows_by(sections_table, "document_id")
-        stored_blocks = group_rows_by(blocks_table, "document_id")
+        stored_sections = summarize_groups(
+            sections_table,
+            "document_id",
+            "section_ordinal",
+            declared="document_section_count",
+            uniform=_LINEAGE_COLUMNS,
+        )
+        stored_blocks = summarize_groups(
+            blocks_table,
+            "document_id",
+            "block_ordinal",
+            declared="document_block_count",
+            uniform=_LINEAGE_COLUMNS,
+        )
     summary.documents_considered = len(parents)
     logger.info("primary_documents_loaded", documents=len(parents))
 
@@ -448,32 +550,27 @@ def _run_narrative(
         plan = _classify(parents, stored_sections, stored_blocks, summary)
     if summary.documents_conflicted:
         return
-    with timed_operation("narrative.parse_html", documents=len(plan.candidates)):
-        built = _build_candidates(plan.candidates, data_dir, processed_at, summary)
-    with timed_operation("narrative.validate", phase="built_records"):
-        _validate_built(plan, built, summary)
-    if summary.documents_failed or summary.documents_conflicted:
-        return
-
-    stored_rows = (
-        sum(len(rows) for rows in stored_sections.values()),
-        sum(len(rows) for rows in stored_blocks.values()),
-    )
-    _write((sections_table, blocks_table), plan, built, stored_rows, summary)
+    run = _Run(sections_table, blocks_table, bronze, processed_at, summary)
+    resumed = {parent.document_id for parent in plan.resumed}
+    for batch in batched(plan.candidates, DOCUMENTS_PER_COMMIT, strict=False):
+        if not _run_batch(run, batch, resumed):
+            return
     summary.status = "completed"
 
 
 def run_narrative_stage(
-    data_dir: Path, processed_at: datetime
+    data_dir: Path, processed_at: datetime, bronze: SecBronze | None = None
 ) -> NarrativeStageSummary:
     """Build `sec_filings.sections` and `sec_filings.content_blocks` together.
 
     Every primary HTML document of `sec_filings.documents` is classified
-    against both tables before any parsing; documents to build are parsed
-    once and validated as a batch. Sections are appended first and verified,
-    then blocks, so a failed blocks commit is resumed by the next run. Any
-    conflict or invalid document rejects the batch before the first write;
-    unexpected errors are logged and re-raised.
+    against summaries of both tables before any parsing; any conflict
+    rejects the run before the first write. Documents to build are parsed,
+    validated and committed in batches of DOCUMENTS_PER_COMMIT: sections
+    first, verified, then blocks, so a failed blocks commit is resumed by the
+    next run. An invalid document rejects its batch before that batch's first
+    write; earlier batches stay committed and are skipped by the next run.
+    Unexpected errors are logged and re-raised.
     """
 
     started = perf_counter()
@@ -485,7 +582,12 @@ def run_narrative_stage(
                 timed_operation("narrative.total"),
                 open_silver_catalog(data_dir) as catalog,
             ):
-                _run_narrative(catalog, data_dir, processed_at, summary)
+                _run_narrative(
+                    catalog,
+                    data_dir,
+                    (bronze or SecBronze.under(data_dir), processed_at),
+                    summary,
+                )
         except Exception as error:
             logger.error(
                 "narrative_stage_failed",

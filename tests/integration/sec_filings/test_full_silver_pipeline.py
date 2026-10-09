@@ -14,10 +14,8 @@ from scripts.sec_filings.build_silver import main
 from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
     run_sec_filings_silver,
 )
-from src.data_pipeline.quality.sec_filings.silver_audit import (
-    SILVER_TABLES,
-    validate_silver,
-)
+from src.data_pipeline.quality.sec_filings.silver_audit import audit_silver
+from src.data_pipeline.quality.sec_filings.silver_model import SILVER_TABLES
 from src.data_pipeline.storage.iceberg import open_silver_catalog
 from src.data_pipeline.storage.sec_filings.xbrl_facts import XBRL_FACTS_SPEC
 
@@ -107,11 +105,12 @@ def test_one_command_builds_the_whole_model_and_a_rerun_changes_nothing(
         for table in SILVER_TABLES:
             loaded = catalog.load_table(table.identifier)
             assert table.spec.definition_problem(loaded) is None
-    report = validate_silver(tmp_path)
-    assert (report.status, report.errors) == ("passed", 0)
-    assert set(report.duplicate_counts.values()) == {0}
-    assert set(report.orphan_counts.values()) == {0}
-    assert all(report.row_counts[t.identifier] > 0 for t in SILVER_TABLES)
+    report = audit_silver(tmp_path)
+    # The fixture's unresolved links are valid data, reported as a warning.
+    assert report.status == "WARN"
+    assert {c.status for c in report.checks if c.check_name.startswith(("unique:", "orphan:", "lineage:"))} == {"PASS"}  # fmt: skip
+    rows = {name: table.row_count for name, table in report.tables.items()}
+    assert all(rows[t.identifier] > 0 for t in SILVER_TABLES)
     snapshots = _snapshots(tmp_path)
 
     rerun = run_sec_filings_silver(tmp_path)
@@ -119,10 +118,10 @@ def test_one_command_builds_the_whole_model_and_a_rerun_changes_nothing(
     assert rerun.completed
     assert rerun.stages_completed == rerun.stages_requested
     assert rerun.rows_inserted == {}
-    assert rerun.rows_skipped == sum(report.row_counts.values())
+    assert rerun.rows_skipped == sum(rows.values())
     assert rerun.summary()["snapshot_changes"] == {}
     assert rerun.integrity is not None
-    assert rerun.integrity.row_counts == report.row_counts
+    assert rerun.integrity.rows_scanned == report.rows_scanned == sum(rows.values())
     assert _snapshots(tmp_path) == snapshots
 
 
@@ -324,14 +323,47 @@ def test_corrupted_state_fails_the_integrity_gate(
     assert result.failed_stage == "integrity"
     assert result.stages_completed == result.stages_requested[:-1]
     assert result.integrity is not None
-    (failure,) = result.integrity.failures.values()
-    assert (failure.check_name, failure.table, failure.parent_table) == (
-        "orphan",
+    (failure,) = result.summary()["integrity_failures"]
+    assert (failure["check_name"], failure["table"]) == (
+        "orphan:xbrl_facts.block_id -> content_blocks",
         "sec_filings.xbrl_facts",
-        "sec_filings.content_blocks",
     )
-    assert failure.sample_ids == [row["fact_id"]]
+    assert failure["sample_ids"] == (row["fact_id"],)
     assert _cli(monkeypatch, "--data-dir", str(silver)) == 1
+    assert _cli(monkeypatch, "--data-dir", str(silver), "--check-only") == 1
+
+
+def test_bronze_and_silver_can_live_in_separate_directories(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Bronze written under one root, then moved and renamed apart from Silver.
+    _write(tmp_path / "ingest", write_sec_filing)
+    bronze = tmp_path / "bronze" / "sec_filings_3"
+    bronze.parent.mkdir()
+    (tmp_path / "ingest" / "bronze" / "sec_filings").rename(bronze)
+    silver = tmp_path / "silver" / "sec_filings_3"
+
+    assert (
+        _cli(monkeypatch, "--data-dir", str(silver), "--bronze-dir", str(bronze)) == 0
+    )
+
+    assert not (silver / "bronze").exists()
+    (filing, *_) = _rows(silver, "sec_filings.filings")
+    assert filing["full_submission_path"].startswith(
+        "bronze/sec_filings/sec-edgar-filings/"
+    )
+    assert (
+        _cli(
+            monkeypatch,
+            "--data-dir",
+            str(silver),
+            "--bronze-dir",
+            str(bronze),
+            "--check-only",
+        )
+        == 0
+    )
+    # Without its Bronze directory the audit cannot find the files.
     assert _cli(monkeypatch, "--data-dir", str(silver), "--check-only") == 1
 
 

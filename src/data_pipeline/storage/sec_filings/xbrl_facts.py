@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Collection
 from pathlib import Path
 
 from pyiceberg.catalog import Catalog
@@ -14,6 +15,8 @@ from src.data_pipeline.contracts.sec_filings.xbrl_facts import XBRL_FACTS_ARROW_
 from src.data_pipeline.storage.iceberg import (
     PartitionColumn,
     SilverTableSpec,
+    iter_rows,
+    read_rows_in,
 )
 
 XBRL_CONCEPTS_TABLE = "sec_filings.xbrl_concepts"
@@ -45,20 +48,16 @@ def open_xbrl_facts_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool
 def read_concept_hashes(table: Table) -> dict[str, str]:
     """Stored concept IDs and their definition hashes."""
 
-    rows = table.scan(selected_fields=("concept_id", "concept_definition_sha256"))
-    return {
-        row["concept_id"]: row["concept_definition_sha256"]
-        for row in rows.to_arrow().to_pylist()
-    }
+    rows = iter_rows(table, ("concept_id", "concept_definition_sha256"))
+    return {row["concept_id"]: row["concept_definition_sha256"] for row in rows}
 
 
-def read_refs_by_instance(table: Table, ref_column: str) -> dict[str, set[str]]:
-    """The context or unit refs (`ref_column`) of each instance of an XBRL core table."""
+def read_refs_by_instance(
+    table: Table, ref_column: str, instance_ids: Collection[str]
+) -> dict[str, set[str]]:
+    """The context or unit refs (`ref_column`) of the given instances, by instance."""
 
     refs: dict[str, set[str]] = defaultdict(set)
-    rows = (
-        table.scan(selected_fields=("instance_id", ref_column)).to_arrow().to_pylist()
-    )
-    for row in rows:
+    for row in read_rows_in(table, "instance_id", instance_ids, columns=(ref_column,)):
         refs[row["instance_id"]].add(row[ref_column])
     return dict(refs)
