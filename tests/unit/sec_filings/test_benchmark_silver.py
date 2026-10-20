@@ -189,3 +189,20 @@ def test_report_projects_time_linearly_and_shows_peak_memory_per_half_run(
     # the halves split at 1.5 s.
     assert _filings_row(report).endswith("| 300 / 280 | 100.0 s |")
     assert "## Lỗi" not in report
+
+
+def test_report_needs_samples_of_different_sizes_to_show_scaling(
+    tmp_path: Path,
+) -> None:
+    settings = benchmark.Settings(tmp_path, tmp_path, False, 1, 1.0, {})
+    samples = ((0.0, 100 * MIB), (1.0, 300 * MIB))
+
+    report = benchmark.render_report(
+        [_scenario(5, 5.0, samples), _scenario(5, 6.0, samples)],
+        [],
+        settings,
+        tmp_path,
+        1000,
+    )
+
+    assert "cùng số filing" in report

@@ -509,6 +509,13 @@ def _scaling(builds: Sequence[Scenario], project_filings: int | None) -> list[st
     if len(builds) < 2:
         return ["## 3. Scaling", "", "Cần ít nhất hai mức `--fractions`.", ""]
     low, high = builds[0], builds[-1]
+    if low.sample.filings == high.sample.filings:
+        return [
+            "## 3. Scaling",
+            "",
+            "Mức nhỏ nhất và lớn nhất có cùng số filing: chọn `--fractions` cách xa hơn.",
+            "",
+        ]
     header = [
         *(f"t {b.sample.label} (s)" for b in builds),
         *(f"RAM {b.sample.label} (MiB)" for b in builds),
@@ -759,6 +766,11 @@ def main() -> int:
         sample = sample_bronze(
             bronze_dir, fraction, work_dir / "bronze" / sample_label(fraction)
         )
+        if sample.filings == 0:
+            print(
+                f"--fractions {fraction:g}: the sample holds no filing", file=sys.stderr
+            )
+            return 2
         silver = work_dir / "silver" / sample.label
         builds.append(
             run_scenario(
