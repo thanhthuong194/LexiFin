@@ -370,6 +370,40 @@ def test_bronze_and_silver_can_live_in_separate_directories(
     assert _cli(monkeypatch, "--data-dir", str(silver), "--check-only") == 1
 
 
+def test_xbrl_workers_build_the_same_rows(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / "ingest", write_sec_filing)
+    bronze = tmp_path / "ingest" / "bronze" / "sec_filings"
+    serial, parallel = tmp_path / "serial", tmp_path / "parallel"
+
+    assert (
+        _cli(monkeypatch, "--data-dir", str(serial), "--bronze-dir", str(bronze)) == 0
+    )
+    assert (
+        _cli(
+            monkeypatch,
+            "--data-dir",
+            str(parallel),
+            "--bronze-dir",
+            str(bronze),
+            "--xbrl-workers",
+            "2",
+        )
+        == 0
+    )
+
+    def content(data_dir: Path, identifier: str) -> list[str]:
+        return sorted(
+            repr(sorted((k, v) for k, v in row.items() if k != "processed_at"))
+            for row in _rows(data_dir, identifier)
+        )
+
+    for table in SILVER_TABLES:
+        assert content(parallel, table.identifier) == content(serial, table.identifier)
+    assert _rows(serial, "sec_filings.xbrl_relationships")
+
+
 def test_check_only_reads_without_writing(
     silver: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

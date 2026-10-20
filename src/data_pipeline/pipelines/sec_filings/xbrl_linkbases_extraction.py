@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Collection, Mapping, Sequence
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -11,7 +12,10 @@ from src.data_pipeline.contracts.sec_filings.xbrl_networks import (
     XbrlNetworkRecord,
     XbrlRelationshipRecord,
 )
-from src.data_pipeline.pipelines.sec_filings.xbrl_facts_extraction import source_files
+from src.data_pipeline.pipelines.sec_filings.xbrl_instance_loading import (
+    InstanceLoad,
+    load_ahead,
+)
 from src.data_pipeline.pipelines.sec_filings.xbrl_linkbases_state import (
     InstanceState,
     LinkbaseConflict,
@@ -28,7 +32,6 @@ from src.data_pipeline.transforms.sec_filings.xbrl_linkbases import (
 from src.data_pipeline.transforms.sec_filings.xbrl_processor import (
     ProcessorSettings,
     TaxonomyUnavailable,
-    load_instance,
 )
 from src.utils.logger import get_logger, log_context
 from src.utils.timer import PhaseDurations
@@ -123,23 +126,15 @@ def _merge_labels(
 
 def _extract_one(
     state: InstanceState,
-    filing_documents: Sequence[DocumentRecord],
+    load: InstanceLoad,
     inputs: LinkbaseInputs,
     extraction: LinkbaseExtraction,
 ) -> None:
     """Load an instance once and add its new rows to the extraction."""
 
     instance = state.instance
-    files = source_files(instance, inputs.documents, filing_documents, inputs.bronze)
-    loaded = extraction.durations.run(
-        "load_arelle",
-        lambda: load_instance(
-            files,
-            is_inline=instance.is_inline,
-            target_name=instance.target_name,
-            settings=inputs.settings,
-        ),
-    )
+    # With worker processes, only the wait for a load ahead of this one.
+    _, loaded = extraction.durations.run("load_arelle", load)
     logger.info("xbrl_model_loaded", labels=len(loaded.labels), arcs=len(loaded.arcs))
     labels = extraction.durations.run(
         "build_rows", lambda: label_records(loaded.labels, inputs.processed_at)
@@ -202,26 +197,31 @@ def extract_instances(
     rejects the batch when any instance failed or conflicted.
     """
 
-    by_filing: dict[str, list[DocumentRecord]] = defaultdict(list)
-    for document in inputs.documents.values():
-        by_filing[document.filing_id].append(document)
     extraction = LinkbaseExtraction()
-    for state in states:
-        instance = state.instance
-        with log_context(
-            filing_id=instance.filing_id, instance_id=instance.instance_id
-        ):
-            try:
-                _extract_one(state, by_filing[instance.filing_id], inputs, extraction)
-            except TaxonomyUnavailable as error:
-                extraction.failures += 1
-                logger.error("xbrl_taxonomy_cache_miss", uris=list(error.uris))
-            except LinkbaseConflict as error:
-                extraction.conflicts += 1
-                logger.error("xbrl_linkbases_conflict", reason=str(error))
-            except (OSError, ValueError) as error:
-                extraction.failures += 1
-                logger.error("xbrl_linkbases_failed", error=str(error))
+    with closing(
+        load_ahead(
+            [state.instance for state in states],
+            inputs.documents,
+            inputs.bronze,
+            inputs.settings,
+        )
+    ) as loads:
+        for state, load in zip(states, loads, strict=True):
+            instance = state.instance
+            with log_context(
+                filing_id=instance.filing_id, instance_id=instance.instance_id
+            ):
+                try:
+                    _extract_one(state, load, inputs, extraction)
+                except TaxonomyUnavailable as error:
+                    extraction.failures += 1
+                    logger.error("xbrl_taxonomy_cache_miss", uris=list(error.uris))
+                except LinkbaseConflict as error:
+                    extraction.conflicts += 1
+                    logger.error("xbrl_linkbases_conflict", reason=str(error))
+                except (OSError, ValueError) as error:
+                    extraction.failures += 1
+                    logger.error("xbrl_linkbases_failed", error=str(error))
     logger.info(
         "xbrl_linkbases_extracted",
         instances=extraction.succeeded,

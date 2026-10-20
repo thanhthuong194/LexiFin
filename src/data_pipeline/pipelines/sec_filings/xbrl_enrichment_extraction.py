@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from pydantic import BaseModel
 
-from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
 from src.data_pipeline.contracts.sec_filings.xbrl_concepts import concept_id_for
 from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
 from src.data_pipeline.contracts.sec_filings.xbrl_dimensions import XbrlDimensionRecord
@@ -20,8 +20,11 @@ from src.data_pipeline.pipelines.sec_filings.xbrl_enrichment_state import (
     InstanceState,
     StoredRows,
 )
-from src.data_pipeline.pipelines.sec_filings.xbrl_facts_extraction import source_files
 from src.data_pipeline.pipelines.sec_filings.xbrl_facts_state import InstanceRefs
+from src.data_pipeline.pipelines.sec_filings.xbrl_instance_loading import (
+    InstanceLoad,
+    load_ahead,
+)
 from src.data_pipeline.quality.sec_filings.xbrl_enrichment import (
     dimension_group_problem,
     footnote_group_problem,
@@ -41,7 +44,6 @@ from src.data_pipeline.transforms.sec_filings.xbrl_processor import (
     LoadedInstance,
     ProcessorSettings,
     TaxonomyUnavailable,
-    load_instance,
 )
 from src.utils.logger import get_logger, log_context
 from src.utils.timer import PhaseDurations
@@ -193,25 +195,15 @@ def _matches_stored(
 
 def _extract_one(
     state: InstanceState,
-    filing_documents: Sequence[DocumentRecord],
+    load: InstanceLoad,
     inputs: EnrichmentInputs,
     extraction: EnrichmentExtraction,
 ) -> tuple[list[XbrlDimensionRecord], list[XbrlFactFootnoteRecord]]:
     """New dimension and footnote rows of an instance, from one processor load."""
 
     instance = state.instance
-    files = source_files(
-        instance, inputs.parents.documents, filing_documents, inputs.bronze
-    )
-    loaded = extraction.durations.run(
-        "load_arelle",
-        lambda: load_instance(
-            files,
-            is_inline=instance.is_inline,
-            target_name=instance.target_name,
-            settings=inputs.settings,
-        ),
-    )
+    # With worker processes, only the wait for a load ahead of this one.
+    _, loaded = extraction.durations.run("load_arelle", load)
     if loaded.downloaded_uris:
         logger.info("xbrl_taxonomy_downloaded", uris=loaded.downloaded_uris)
     logger.info(
@@ -287,38 +279,43 @@ def extract_instances(
     rejects the batch when any instance failed or conflicted.
     """
 
-    by_filing: dict[str, list[DocumentRecord]] = defaultdict(list)
-    for document in inputs.parents.documents.values():
-        by_filing[document.filing_id].append(document)
     extraction = EnrichmentExtraction()
-    for state in states:
-        instance = state.instance
-        with log_context(
-            filing_id=instance.filing_id, instance_id=instance.instance_id
-        ):
-            try:
-                dimensions, footnotes = _extract_one(
-                    state, by_filing[instance.filing_id], inputs, extraction
-                )
-            except TaxonomyUnavailable as error:
-                extraction.failures += 1
-                logger.error("xbrl_taxonomy_cache_miss", uris=list(error.uris))
+    with closing(
+        load_ahead(
+            [state.instance for state in states],
+            inputs.parents.documents,
+            inputs.bronze,
+            inputs.settings,
+        )
+    ) as loads:
+        for state, load in zip(states, loads, strict=True):
+            instance = state.instance
+            with log_context(
+                filing_id=instance.filing_id, instance_id=instance.instance_id
+            ):
+                try:
+                    dimensions, footnotes = _extract_one(
+                        state, load, inputs, extraction
+                    )
+                except TaxonomyUnavailable as error:
+                    extraction.failures += 1
+                    logger.error("xbrl_taxonomy_cache_miss", uris=list(error.uris))
+                    continue
+                except (EnrichmentConflict, XbrlCoreMismatch) as error:
+                    extraction.conflicts += 1
+                    logger.error("xbrl_enrichment_instance_conflict", reason=str(error))
+                    continue
+                except (OSError, ValueError) as error:
+                    extraction.failures += 1
+                    logger.error("xbrl_enrichment_instance_failed", error=str(error))
+                    continue
+            if not (dimensions or footnotes):
+                extraction.unchanged += 1
                 continue
-            except (EnrichmentConflict, XbrlCoreMismatch) as error:
-                extraction.conflicts += 1
-                logger.error("xbrl_enrichment_instance_conflict", reason=str(error))
-                continue
-            except (OSError, ValueError) as error:
-                extraction.failures += 1
-                logger.error("xbrl_enrichment_instance_failed", error=str(error))
-                continue
-        if not (dimensions or footnotes):
-            extraction.unchanged += 1
-            continue
-        extraction.dimensions[instance.instance_id] = dimensions
-        extraction.footnotes[instance.instance_id] = footnotes
-        if state.has_rows:
-            extraction.resumed.add(instance.instance_id)
+            extraction.dimensions[instance.instance_id] = dimensions
+            extraction.footnotes[instance.instance_id] = footnotes
+            if state.has_rows:
+                extraction.resumed.add(instance.instance_id)
     logger.info(
         "xbrl_enrichment_extracted",
         instances=len(extraction.dimensions),

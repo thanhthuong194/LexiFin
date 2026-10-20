@@ -8,7 +8,7 @@ from typing import Any
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
 from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
 from src.data_pipeline.contracts.sec_filings.xbrl_facts import instance_of_fact
-from src.data_pipeline.pipelines.sec_filings.xbrl_facts_extraction import (
+from src.data_pipeline.pipelines.sec_filings.xbrl_instance_loading import (
     entry_documents,
 )
 from src.data_pipeline.quality.sec_filings.xbrl_core import instance_problem

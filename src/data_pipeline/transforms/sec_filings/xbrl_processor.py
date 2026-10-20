@@ -47,6 +47,10 @@ class TaxonomyUnavailable(XbrlProcessorError):
         super().__init__(f"taxonomy files unavailable: {sorted(uris)[:10]}")
         self.uris = tuple(sorted(uris))
 
+    def __reduce__(self) -> tuple[type[TaxonomyUnavailable], tuple[tuple[str, ...]]]:
+        # Rebuilt from the URIs, not the message, when a worker process raises it.
+        return type(self), (self.uris,)
+
 
 @dataclass(frozen=True)
 class SourceFile:
@@ -64,11 +68,14 @@ class SourceFile:
 
 @dataclass(frozen=True)
 class ProcessorSettings:
-    """Where the taxonomy cache lives and whether it may be filled online."""
+    """Where the taxonomy cache lives, whether it may be filled online, and in
+    how many worker processes instances are loaded (1: in the calling process).
+    """
 
     cache_dir: Path
     allow_network: bool
     http_user_agent: str | None
+    workers: int = 1
 
 
 @dataclass(frozen=True)

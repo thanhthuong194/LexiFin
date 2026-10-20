@@ -66,6 +66,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--xbrl-workers",
+        type=int,
+        default=1,
+        help=(
+            "Processes that load XBRL instances with Arelle in the XBRL stages, "
+            "each adding ~1 GB of memory; rows do not depend on it (default: 1)"
+        ),
+    )
+    parser.add_argument(
         "--from-stage",
         choices=names,
         help="Start at this stage; the tables of the stages it needs must exist",
@@ -85,9 +94,14 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     if args.check_only and (
-        args.from_stage or args.to_stage or args.allow_taxonomy_network
+        args.from_stage
+        or args.to_stage
+        or args.allow_taxonomy_network
+        or args.xbrl_workers != 1
     ):
-        parser.error("--check-only takes no stage range or taxonomy download")
+        parser.error("--check-only takes no stage range, taxonomy download or workers")
+    if args.xbrl_workers < 1:
+        parser.error("--xbrl-workers must be at least 1")
     try:
         select_stages(SILVER_STAGES, args.from_stage, args.to_stage)
     except ValueError as error:
@@ -96,9 +110,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def _taxonomy(args: argparse.Namespace) -> ProcessorSettings | None:
-    """The XBRL taxonomy settings the options ask for; None for the default."""
+    """The XBRL processor settings the options ask for; None for the default."""
 
-    if args.taxonomy_cache_dir is None and not args.allow_taxonomy_network:
+    if (
+        args.taxonomy_cache_dir is None
+        and not args.allow_taxonomy_network
+        and args.xbrl_workers == 1
+    ):
         return None
     user_agent = None
     if args.allow_taxonomy_network:
@@ -119,6 +137,7 @@ def _taxonomy(args: argparse.Namespace) -> ProcessorSettings | None:
         .resolve(),
         allow_network=args.allow_taxonomy_network,
         http_user_agent=user_agent,
+        workers=args.xbrl_workers,
     )
 
 

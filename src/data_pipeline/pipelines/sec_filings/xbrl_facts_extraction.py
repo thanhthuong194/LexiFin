@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -17,8 +18,11 @@ from src.data_pipeline.pipelines.sec_filings.xbrl_facts_state import (
     ContentMaps,
     InstanceRefs,
 )
+from src.data_pipeline.pipelines.sec_filings.xbrl_instance_loading import (
+    InstanceLoad,
+    load_ahead,
+)
 from src.data_pipeline.storage.bronze import SecBronze
-from src.data_pipeline.storage.sec_filings.documents import read_document_content
 from src.data_pipeline.transforms.sec_filings.html_dom import parse_html
 from src.data_pipeline.transforms.sec_filings.xbrl_facts import (
     Location,
@@ -34,23 +38,11 @@ from src.data_pipeline.transforms.sec_filings.xbrl_processor import (
     ProcessorSettings,
     SourceFile,
     TaxonomyUnavailable,
-    load_instance,
 )
 from src.utils.logger import get_logger, log_context
 from src.utils.timer import PhaseDurations
 
 logger = get_logger(__name__)
-
-# The filing's own taxonomy: the processor resolves the instance's DTS from it.
-_DTS_ROLES = frozenset(
-    {
-        "xbrl_schema",
-        "xbrl_calculation",
-        "xbrl_definition",
-        "xbrl_label",
-        "xbrl_presentation",
-    }
-)
 
 
 class ConceptConflict(ValueError):
@@ -76,41 +68,6 @@ class FactsExtraction:
     unusable_values: int = 0
     locations: Counter[str] = field(default_factory=Counter)
     durations: PhaseDurations = field(default_factory=PhaseDurations)
-
-
-def entry_documents(
-    instance: XbrlInstanceRecord, documents: Mapping[str, DocumentRecord]
-) -> list[DocumentRecord]:
-    """The instance's own documents: its Inline documents, or its XML instance."""
-
-    return [
-        documents[document_id]
-        for document_id in instance.source_document_ids
-        if (documents[document_id].content_kind == "html") == instance.is_inline
-    ]
-
-
-def source_files(
-    instance: XbrlInstanceRecord,
-    documents: Mapping[str, DocumentRecord],
-    filing_documents: Sequence[DocumentRecord],
-    bronze: SecBronze,
-) -> list[SourceFile]:
-    """The instance's entry documents and its filing's taxonomy, read and verified."""
-
-    entries = entry_documents(instance, documents)
-    taxonomy = [
-        d for d in filing_documents if d.role in _DTS_ROLES and d.content_sha256
-    ]
-    return [
-        SourceFile(
-            d.document_id,
-            d.filename or "",
-            read_document_content(d, bronze),
-            is_entry=d in entries,
-        )
-        for d in (*entries, *taxonomy)
-    ]
 
 
 def _merge_concepts(
@@ -196,26 +153,13 @@ class ExtractionInputs:
 
 def _extract_one(
     instance: XbrlInstanceRecord,
-    filing_documents: Sequence[DocumentRecord],
+    load: InstanceLoad,
     inputs: ExtractionInputs,
     extraction: FactsExtraction,
 ) -> list[XbrlFactRecord]:
-    files = extraction.durations.run(
-        "materialize_sources",
-        lambda: source_files(
-            instance, inputs.documents, filing_documents, inputs.bronze
-        ),
-    )
+    # With worker processes, only the wait for a load ahead of this one.
+    files, loaded = extraction.durations.run("load_dts", load)
     logger.info("xbrl_source_documents_verified", documents=len(files))
-    loaded = extraction.durations.run(
-        "load_dts",
-        lambda: load_instance(
-            files,
-            is_inline=instance.is_inline,
-            target_name=instance.target_name,
-            settings=inputs.settings,
-        ),
-    )
     if loaded.downloaded_uris:
         logger.info("xbrl_taxonomy_downloaded", uris=loaded.downloaded_uris)
     logger.info(
@@ -265,42 +209,43 @@ def extract_instances(
     batch when any instance failed.
     """
 
-    by_filing: dict[str, list[DocumentRecord]] = defaultdict(list)
-    for document in inputs.documents.values():
-        by_filing[document.filing_id].append(document)
     extraction = FactsExtraction()
-    for instance in candidates:
-        context = {"filing_id": instance.filing_id, "instance_id": instance.instance_id}
-        with log_context(**context):
-            try:
-                records = _extract_one(
-                    instance, by_filing[instance.filing_id], inputs, extraction
+    with closing(
+        load_ahead(candidates, inputs.documents, inputs.bronze, inputs.settings)
+    ) as loads:
+        for instance, load in zip(candidates, loads, strict=True):
+            context = {
+                "filing_id": instance.filing_id,
+                "instance_id": instance.instance_id,
+            }
+            with log_context(**context):
+                try:
+                    records = _extract_one(instance, load, inputs, extraction)
+                except TaxonomyUnavailable as error:
+                    extraction.failures += 1
+                    logger.error("xbrl_taxonomy_cache_miss", uris=list(error.uris))
+                    continue
+                except XbrlCoreMismatch as error:
+                    extraction.incompatible += 1
+                    logger.error("xbrl_core_semantics_incompatible", reason=str(error))
+                    continue
+                except ConceptConflict as error:
+                    extraction.conflicts += 1
+                    logger.error("xbrl_instance_facts_conflict", reason=str(error))
+                    continue
+                except (OSError, ValueError) as error:
+                    extraction.failures += 1
+                    logger.error("xbrl_facts_instance_failed", error=str(error))
+                    continue
+            extraction.facts[instance.instance_id] = records
+            for record in records:
+                extraction.locations[
+                    "cell" if record.cell_id else "block" if record.block_id else "none"
+                ] += 1
+                visible = instance.is_inline and not record.is_hidden
+                extraction.locations["unaligned_visible"] += visible and not (
+                    record.cell_id or record.block_id
                 )
-            except TaxonomyUnavailable as error:
-                extraction.failures += 1
-                logger.error("xbrl_taxonomy_cache_miss", uris=list(error.uris))
-                continue
-            except XbrlCoreMismatch as error:
-                extraction.incompatible += 1
-                logger.error("xbrl_core_semantics_incompatible", reason=str(error))
-                continue
-            except ConceptConflict as error:
-                extraction.conflicts += 1
-                logger.error("xbrl_instance_facts_conflict", reason=str(error))
-                continue
-            except (OSError, ValueError) as error:
-                extraction.failures += 1
-                logger.error("xbrl_facts_instance_failed", error=str(error))
-                continue
-        extraction.facts[instance.instance_id] = records
-        for record in records:
-            extraction.locations[
-                "cell" if record.cell_id else "block" if record.block_id else "none"
-            ] += 1
-            visible = instance.is_inline and not record.is_hidden
-            extraction.locations["unaligned_visible"] += visible and not (
-                record.cell_id or record.block_id
-            )
     logger.info(
         "xbrl_fact_alignment_completed",
         cell_facts=extraction.locations["cell"],

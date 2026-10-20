@@ -4,7 +4,7 @@ import hashlib
 import json
 import sys
 from collections import Counter
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -58,8 +58,7 @@ from src.data_pipeline.pipelines.sec_filings import (
     document_link_extraction,
     document_table_extraction,
     xbrl_core_extraction,
-    xbrl_enrichment_extraction,
-    xbrl_facts_extraction,
+    xbrl_instance_loading,
 )
 from src.data_pipeline.pipelines.sec_filings import (
     document_tables as document_tables_stage,
@@ -1671,7 +1670,7 @@ def test_xbrl_facts_build_concepts_and_fact_occurrences_and_reruns_skip(
     def reload(*_: object) -> None:
         raise AssertionError("complete fact groups must not reload XBRL")
 
-    monkeypatch.setattr(xbrl_facts_extraction, "load_instance", reload)
+    monkeypatch.setattr(xbrl_instance_loading, "load_instance", reload)
     rerun = run_sec_filings_silver(tmp_path)
 
     assert rerun.completed
@@ -1748,6 +1747,28 @@ def test_new_instance_appends_only_its_new_concepts_and_fact_group(
     assert (dei["is_extension"], dei["source_schema_uri"]) == (False, DEI_SCHEMA_URL)
     assert (new_fact["raw_value"], new_fact["is_hidden"]) == ("8-K", False)
     assert new_fact["block_id"] is not None
+
+
+def test_a_worker_process_reports_a_cache_miss_against_its_own_instance(
+    tmp_path: Path, write_sec_filing, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    _write_dei_filing(tmp_path, write_sec_filing)
+
+    result = run_sec_filings_silver(
+        tmp_path, taxonomy=replace(_settings(tmp_path), workers=2)
+    )
+
+    assert result.xbrl_facts is not None
+    assert result.xbrl_facts.status == "rejected"
+    assert result.xbrl_facts.instances_failed == 1
+    [miss] = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if "xbrl_taxonomy_cache_miss" in line
+    ]
+    assert "filing_id=sec:0000320193-26-000001" in miss
+    assert f"uris=['{DEI_SCHEMA_URL}']" in miss
 
 
 def test_taxonomy_cache_miss_rejects_the_batch_until_the_cache_is_warm(
@@ -2046,9 +2067,13 @@ def test_xbrl_enrichment_builds_dimensions_and_footnotes_and_reruns_skip(
         loads.append(files[0].document_id)
         return load_instance(files, **options)
 
+    # Every XBRL stage loads through the same loader: count this stage's loads.
+    assert run_sec_filings_silver(tmp_path, to_stage="xbrl_facts").completed
     with monkeypatch.context() as patch:
-        patch.setattr(xbrl_enrichment_extraction, "load_instance", counted_load)
-        first = run_sec_filings_silver(tmp_path)
+        patch.setattr(xbrl_instance_loading, "load_instance", counted_load)
+        first = run_sec_filings_silver(
+            tmp_path, from_stage="xbrl_enrichment", to_stage="xbrl_enrichment"
+        )
 
     summary = first.xbrl_enrichment
     assert first.completed
@@ -2072,11 +2097,12 @@ def test_xbrl_enrichment_builds_dimensions_and_footnotes_and_reruns_skip(
 
     _assert_fixture_dimensions(tmp_path)
     _assert_fixture_footnotes(tmp_path)
+    assert run_sec_filings_silver(tmp_path, from_stage="xbrl_linkbases").completed
 
     def reload(*_: object, **__: object) -> None:
         raise AssertionError("complete instances must not reload XBRL")
 
-    monkeypatch.setattr(xbrl_enrichment_extraction, "load_instance", reload)
+    monkeypatch.setattr(xbrl_instance_loading, "load_instance", reload)
     rerun = run_sec_filings_silver(tmp_path)
 
     assert rerun.completed
@@ -2281,11 +2307,12 @@ def test_parser_error_in_one_instance_writes_no_instance(
             raise XbrlProcessorError("unreadable instance")
         return load_instance(files, **options)
 
-    monkeypatch.setattr(xbrl_enrichment_extraction, "load_instance", broken_load)
-    result = run_sec_filings_silver(tmp_path)
+    facts = run_sec_filings_silver(tmp_path, to_stage="xbrl_facts")
+    monkeypatch.setattr(xbrl_instance_loading, "load_instance", broken_load)
+    result = run_sec_filings_silver(tmp_path, from_stage="xbrl_enrichment")
 
     summary = result.xbrl_enrichment
-    assert result.xbrl_facts is not None and result.xbrl_facts.status == "completed"
+    assert facts.xbrl_facts is not None and facts.xbrl_facts.status == "completed"
     assert summary is not None and summary.status == "rejected"
     assert (summary.instances_failed, summary.dimensions_inserted) == (1, 0)
     assert _enrichment_snapshots(tmp_path) == (None, None)

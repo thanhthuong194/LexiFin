@@ -18,10 +18,8 @@ from src.data_pipeline.contracts.sec_filings.xbrl_networks import (
     XbrlNetworkRecord,
     network_id_for,
 )
+from src.data_pipeline.pipelines.sec_filings import xbrl_instance_loading
 from src.data_pipeline.pipelines.sec_filings import xbrl_linkbases as linkbases_stage
-from src.data_pipeline.pipelines.sec_filings import (
-    xbrl_linkbases_extraction as linkbases_extraction,
-)
 from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
     run_sec_filings_silver,
 )
@@ -136,7 +134,7 @@ def test_linkbases_build_three_tables_with_complete_parents_and_rerun_skips(
         raise AssertionError("complete instances must not reload XBRL")
 
     snapshots, counts = _snapshots(tmp_path), _counts(tmp_path)
-    monkeypatch.setattr(linkbases_extraction, "load_instance", reload)
+    monkeypatch.setattr(xbrl_instance_loading, "load_instance", reload)
     rerun = run_sec_filings_silver(tmp_path).xbrl_linkbases
 
     assert rerun is not None and rerun.status == "completed"
@@ -402,12 +400,14 @@ def test_processor_failure_writes_no_linkbase_row(
             raise XbrlProcessorError("unreadable instance")
         return load_instance(files, **options)
 
-    monkeypatch.setattr(linkbases_extraction, "load_instance", broken_load)
-    result = run_sec_filings_silver(tmp_path)
+    # Every XBRL stage loads through the same loader: break only this stage's loads.
+    earlier = run_sec_filings_silver(tmp_path, to_stage="xbrl_enrichment")
+    monkeypatch.setattr(xbrl_instance_loading, "load_instance", broken_load)
+    result = run_sec_filings_silver(tmp_path, from_stage="xbrl_linkbases")
 
     summary = result.xbrl_linkbases
-    assert result.xbrl_enrichment is not None
-    assert result.xbrl_enrichment.status == "completed"
+    assert earlier.xbrl_enrichment is not None
+    assert earlier.xbrl_enrichment.status == "completed"
     assert summary is not None and summary.status == "rejected"
     assert (summary.instances_failed, summary.instances_succeeded) == (1, 2)
     assert _snapshots(tmp_path) == (None, None, None)

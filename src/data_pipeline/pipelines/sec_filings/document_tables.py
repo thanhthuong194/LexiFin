@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
-from itertools import batched
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
@@ -72,8 +71,14 @@ from src.utils.timer import timed_operation
 logger = get_logger(__name__)
 
 # Documents parsed, validated and committed together: memory holds one
-# batch's tables and cells, and each batch is one commit per table.
+# batch's tables and cells (~5 KB per cell), and each batch is one commit per
+# table. A batch also stops before TABLE_BLOCKS_PER_COMMIT table blocks: a
+# 10-K or 10-Q holds ~8-10k cells in ~90 per table, and batches follow filing
+# dates, so a season of periodic reports from many companies would otherwise
+# put ~1M cells in one batch. A document with more table blocks is a batch
+# of its own.
 DOCUMENTS_PER_COMMIT = 100
+TABLE_BLOCKS_PER_COMMIT = 2500
 # Columns read to classify documents, without block text or cell content.
 _LINEAGE = ("filing_id", "filing_date", "source_document_sha256")
 _BLOCK_HEAD = ("document_id", "block_id", "block_ordinal", "block_type", "source_xpath")
@@ -352,6 +357,27 @@ def _run_batch(
     return True
 
 
+def _batches(
+    candidates: Sequence[DocumentRecord], blocks: Mapping[str, Sequence[BlockHead]]
+) -> Iterator[list[DocumentRecord]]:
+    """Consecutive candidates within the per-commit document and table limits."""
+
+    batch: list[DocumentRecord] = []
+    table_blocks = 0
+    for parent in candidates:
+        count = len(blocks.get(parent.document_id, ()))
+        if batch and (
+            len(batch) == DOCUMENTS_PER_COMMIT
+            or table_blocks + count > TABLE_BLOCKS_PER_COMMIT
+        ):
+            yield batch
+            batch, table_blocks = [], 0
+        batch.append(parent)
+        table_blocks += count
+    if batch:
+        yield batch
+
+
 def _run_tables(
     catalog: Catalog,
     data_dir: Path,
@@ -394,7 +420,7 @@ def _run_tables(
         [*result.new, *result.resumed],
         key=lambda parent: (parent.filing_date, parent.document_id),
     )
-    for batch in batched(candidates, DOCUMENTS_PER_COMMIT, strict=False):
+    for batch in _batches(candidates, blocks):
         if not _run_batch(
             (blocks_table, tables_table, cells_table),
             batch,
@@ -415,9 +441,10 @@ def run_document_tables_stage(
     are classified against table heads and per-table cell summaries before
     any parsing; any conflict rejects the run before the first write.
     Documents to build are parsed, validated and committed in batches of
-    DOCUMENTS_PER_COMMIT: tables first, verified, then cells, so a failed
-    cells commit is resumed by the next run. An invalid document rejects its
-    batch before that batch's first write; earlier batches stay committed.
+    DOCUMENTS_PER_COMMIT and TABLE_BLOCKS_PER_COMMIT: tables first,
+    verified, then cells, so a failed cells commit is resumed by the next
+    run. An invalid document rejects its batch before that batch's first
+    write; earlier batches stay committed.
     Unexpected errors are logged and re-raised.
     """
 
