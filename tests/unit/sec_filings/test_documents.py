@@ -370,3 +370,19 @@ def test_records_match_exact_documents_arrow_schema() -> None:
         ("content_sha256", "string", True),
         ("processed_at", "timestamp[us, tz=UTC]", False),
     ]
+
+
+def test_a_pdf_copy_with_the_form_type_is_not_the_primary_document() -> None:
+    raw = "\n".join(
+        [
+            _block("<TYPE>10-Q", "<FILENAME>cat-20210930.htm", text="<html>x</html>"),
+            _block("<TYPE>10-Q", "<FILENAME>q32021cat10q.PDF", text="begin 644"),
+        ]
+    ).encode()
+
+    records = build_document_records(_parent(raw, form="10-Q"), raw, PROCESSED_AT)
+
+    assert [(record.role, record.content_kind) for record in records] == [
+        ("primary_document", "html"),
+        ("other", "binary"),
+    ]

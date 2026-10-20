@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import sys
 from datetime import date
 from pathlib import Path
@@ -10,6 +12,7 @@ import pyarrow as pa
 import pytest
 from pyiceberg.expressions import EqualTo
 
+from scripts.sec_filings import query_silver
 from scripts.sec_filings.build_silver import main
 from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
     run_sec_filings_silver,
@@ -445,3 +448,61 @@ def test_a_rejected_stage_skips_every_later_stage(
     assert result.stages_skipped == result.stages_requested[1:]
     assert result.summary()["failed_stage_summary"]["failed"] == 1
     assert _cli(monkeypatch, "--data-dir", str(tmp_path)) == 1
+
+
+def _sample_query(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    data_dir: Path,
+    query: str,
+    **params: str,
+) -> tuple[int, list[dict[str, str]]]:
+    path = Path(query_silver.__file__).parent / "queries" / query
+    arguments = [f"--param={name}={value}" for name, value in params.items()]
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "query_silver.py",
+            str(path),
+            "--data-dir",
+            str(data_dir),
+            "--csv",
+            *arguments,
+        ],
+    )
+    status = query_silver.main()
+    return status, list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
+
+
+def test_sample_queries_read_silver_without_writing(
+    silver: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    before = _snapshots(silver)
+    table_id = next(
+        cell["table_id"]
+        for cell in _rows(silver, "sec_filings.document_table_cells")
+        if cell["filing_id"] == TEN_K_ID and cell["text"] == "Revenue"
+    )
+
+    revenue = _sample_query(
+        monkeypatch, capsys, silver, "annual_values.sql", concept="Revenue"
+    )
+    risk = _sample_query(monkeypatch, capsys, silver, "item_1a.sql", filing_id=TEN_K_ID)
+    table = _sample_query(
+        monkeypatch, capsys, silver, "table_rows.sql", table_id=table_id
+    )
+    missing = _sample_query(monkeypatch, capsys, silver, "item_1a.sql")
+
+    assert revenue[0] == 0
+    assert [
+        (r["cik"], r["start_date"], r["end_date"], r["value"]) for r in revenue[1]
+    ] == [("0000320193", "2024-01-01", "2024-12-31", "1000.0")]
+    assert risk[0] == 0
+    assert [(r["block_type"], r["text"]) for r in risk[1]] == [
+        ("heading", "Item 1A. Risk Factors"),
+        ("paragraph", "As discussed in Item 7, demand may fall."),
+    ]
+    assert table == (0, [{"row_ordinal": "1", "cells": "Revenue | $1,000"}])
+    assert missing[0] == 1
+    assert _snapshots(silver) == before

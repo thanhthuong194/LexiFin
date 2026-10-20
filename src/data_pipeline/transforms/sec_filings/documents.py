@@ -38,6 +38,7 @@ _XBRL_ROLE_BY_TYPE: dict[str, DocumentRole] = {
 # MetaLinks.json, report.css, Show.js, Financial_Report.xlsx, the XBRL zip)
 # under these TYPE values; filer-submitted documents use form, EX-* or GRAPHIC.
 _SEC_GENERATED_TYPES = frozenset({"XML", "JSON", "ZIP", "EXCEL"})
+_UNOFFICIAL_COPY_SUFFIX = ".pdf"
 
 _CONTENT_KIND_BY_EXTENSION: dict[str, ContentKind] = {
     ".htm": "html",
@@ -232,12 +233,20 @@ def build_document_records(
     """Describe every `<DOCUMENT>` block of a filing's full submission.
 
     `raw` must be the parent's full-submission bytes, already verified against
-    `parent.full_submission_sha256`. The first block whose TYPE equals the
-    parent form is the primary document; there must be exactly one such block.
+    `parent.full_submission_sha256`. The block whose TYPE equals the parent
+    form is the primary document; there must be exactly one such block apart
+    from PDFs. EDGAR accepts a PDF only as an unofficial copy and lets it carry
+    the form's TYPE (e.g. Caterpillar's 10-Q 0000018230-21-000260), so a PDF is
+    never the primary document.
     """
 
     documents = split_submission_documents(raw)
-    candidates = [doc for doc in documents if doc.document_type == parent.form]
+    candidates = [
+        doc
+        for doc in documents
+        if doc.document_type == parent.form
+        and PurePosixPath(doc.filename or "").suffix.lower() != _UNOFFICIAL_COPY_SUFFIX
+    ]
     if len(candidates) != 1:
         raise ValueError(
             f"Expected exactly one primary document of TYPE {parent.form!r}; "
