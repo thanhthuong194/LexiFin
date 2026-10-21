@@ -143,6 +143,27 @@ def _session(entry: str, settings: ProcessorSettings) -> Iterator[Session]:
         yield session
 
 
+def fetch_taxonomies(uris: Sequence[str], settings: ProcessorSettings) -> list[str]:
+    """Load each taxonomy schema URI with its DTS, filling the cache; return
+    the URIs of the files that stayed unavailable (none: all are cached).
+    """
+
+    unavailable: set[str] = set()
+    for uri in uris:
+        with _session(uri, settings) as session:
+            messages = session.get_log_messages()
+            missing = {
+                str(m.get("msg", "")).rpartition("file: ")[2]
+                for m in messages
+                if m.get("messageCode") == "IOerror"
+            }
+            models = session.get_models()
+            unavailable |= missing or (set() if models else {uri})
+            for model in models:
+                model.close()
+    return sorted(unavailable)
+
+
 def load_instance(
     files: Sequence[SourceFile],
     *,

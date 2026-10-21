@@ -152,7 +152,8 @@ def sample_bronze(bronze_dir: Path, fraction: float, target: Path) -> BronzeSamp
     """The `fraction` sample of a Bronze directory, laid out under `target`.
 
     The sample's manifest keeps the original lines of the sampled filings and
-    their files are hard links (a copy across file systems), so nothing under
+    their files are hard links (a copy across file systems or on one without
+    hard links, e.g. exFAT), so nothing under
     `bronze_dir` is written. The whole Bronze (fraction 1) is used in place.
     """
 
@@ -188,9 +189,11 @@ def _link(source: Path, target: Path) -> None:
     try:
         os.link(source, target)
     except OSError as error:
-        if error.errno != errno.EXDEV:  # the sample is on another file system
+        # EXDEV: the sample is on another file system; EPERM/ENOTSUP: the file
+        # system has no hard links (exFAT), nor permission bits for copy2.
+        if error.errno not in (errno.EXDEV, errno.EPERM, errno.ENOTSUP):
             raise
-        shutil.copy2(source, target)
+        shutil.copyfile(source, target)
 
 
 def tree_rss_bytes(root_pid: int) -> int:

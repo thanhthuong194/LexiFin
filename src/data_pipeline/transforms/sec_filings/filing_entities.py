@@ -73,6 +73,12 @@ _SECTION_FIELDS: dict[str, Mapping[str, str]] = {
     },
     "MAIL ADDRESS": _address_fields("mailing"),
 }
+# Fields newer EDGAR headers add that the record has no column for; like the
+# name history below, they stay in Bronze, reachable through the block's offsets.
+_UNMAPPED_KEYS = {"ADDRESS IS A NON US LOCATION", "LEGAL ENTITY IDENTIFIER"}
+# Submission-level flags written as an unindented `LABEL:` line without a value
+# before the first entity block; they do not start a block.
+_SUBMISSION_FLAGS = {"CONFIRMING COPY"}
 # Name history inside an entity block (may repeat). It stays in Bronze, reachable
 # through the block's offsets; normalising former names is a later stage.
 _FORMER_COMPANY = "FORMER COMPANY"
@@ -133,7 +139,7 @@ def _block_values(lines: Sequence[str]) -> dict[str, str]:
             continue
         if section is None:
             raise ValueError(f"{key!r} appears outside a section")
-        if section == _FORMER_COMPANY:
+        if section == _FORMER_COMPANY or key in _UNMAPPED_KEYS:
             continue
         field = _SECTION_FIELDS[section].get(key)
         if field is None:
@@ -148,7 +154,8 @@ def parse_entity_blocks(header: RawSecHeader) -> list[EntityBlock]:
 
     A block starts at an unindented `ROLE:` line and runs to the next such line
     or to the end of the header; lines before the first block are submission
-    fields and are not part of any block. Raises ValueError naming the block
+    fields (flags such as `CONFIRMING COPY:` included) and are not part of any
+    block. Raises ValueError naming the block
     ordinal and role for an unknown role, section or key, a repeated section
     or conflicting values.
     """
@@ -157,6 +164,8 @@ def parse_entity_blocks(header: RawSecHeader) -> list[EntityBlock]:
     bodies: list[list[str]] = []
     for offset, line in _header_lines(header):
         label = _role_label(line)
+        if label in _SUBMISSION_FLAGS and not bodies:
+            continue
         if label is not None:
             starts.append((offset, label))
             bodies.append([])

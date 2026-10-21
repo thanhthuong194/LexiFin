@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -15,6 +15,7 @@ from src.data_pipeline.connectors.sec_filings.bronze import (
     discover_filings,
     load_filing_manifest,
 )
+from src.data_pipeline.contracts.ingestion import FilingManifestEntry
 from src.data_pipeline.contracts.sec_filings.filings import (
     FILINGS_ARROW_SCHEMA,
     FilingRecord,
@@ -47,7 +48,11 @@ class FilingsStageSummary:
     """Outcome of the `sec_filings.filings` stage of one Silver run.
 
     Filled in as the stage progresses. `rejected` means the batch had invalid
-    filings or checksum conflicts and nothing was written. Snapshot IDs are
+    filings or checksum conflicts and nothing was written. `duplicate_folders`
+    are identical copies of a filing under another CIK folder (a filing made
+    jointly by several registrants is downloaded once per registrant) and
+    `download_failed` folders the manifest records only as failed downloads;
+    both are left out. Snapshot IDs are
     None when the table has no snapshot yet, or was not opened because Bronze
     validation already failed.
     """
@@ -59,6 +64,8 @@ class FilingsStageSummary:
     skipped: int = 0
     conflicts: int = 0
     failed: int = 0
+    duplicate_folders: int = 0
+    download_failed: int = 0
     duration_seconds: float = 0.0
     snapshot_before: int | None = None
     snapshot_after: int | None = None
@@ -73,37 +80,89 @@ class _WritePlan:
     conflicts: int
 
 
+def _failed_downloads(entries: Sequence[FilingManifestEntry]) -> set[tuple[str, ...]]:
+    """(CIK, form, accession) of folders the manifest records only as failed."""
+
+    failed: set[tuple[str, ...]] = set()
+    succeeded: set[tuple[str, ...]] = set()
+    for entry in entries:
+        key = (entry.cik, entry.form, entry.accession_number)
+        (succeeded if entry.status == "success" else failed).add(key)
+    return failed - succeeded
+
+
+def _keep_one_copy(
+    accession: str, copies: Sequence[tuple[BronzeFiling, FilingRecord]]
+) -> FilingRecord | None:
+    """The record of one folder when every copy of an accession is identical.
+
+    The folder of the CIK that the accession number starts with (the filer
+    agent) is kept, else the lowest CIK; None when the copies differ.
+    """
+
+    if (
+        len({(r.full_submission_sha256, r.primary_document_sha256) for _, r in copies})
+        > 1
+    ):
+        return None
+    kept, record = min(copies, key=lambda c: (c[0].cik != accession[:10], c[0].cik))
+    logger.warning(
+        "sec_filing_duplicate_folders",
+        accession_number=accession,
+        kept=str(kept.directory),
+        duplicates=[str(f.directory) for f, _ in copies if f is not kept],
+    )
+    return record
+
+
 def _parse_batch(
     filings: Sequence[BronzeFiling],
     bronze: SecBronze,
     processed_at: datetime,
-) -> tuple[list[FilingRecord], int]:
-    """Build a record for every filing; return the records and the failure count."""
+    summary: FilingsStageSummary,
+) -> list[FilingRecord]:
+    """Build a record for every filing; count failures and skipped folders."""
 
-    manifest = index_manifest(load_filing_manifest(bronze))
-    accession_counts = Counter(filing.accession_number for filing in filings)
-    records: list[FilingRecord] = []
-    failed = 0
+    entries = load_filing_manifest(bronze)
+    manifest = index_manifest(entries)
+    failed_downloads = _failed_downloads(entries)
+    copies: defaultdict[str, list[tuple[BronzeFiling, FilingRecord]]] = defaultdict(
+        list
+    )
     for filing in filings:
+        if (filing.cik, filing.form, filing.accession_number) in failed_downloads:
+            summary.download_failed += 1
+            logger.warning("sec_filing_download_failed", path=str(filing.directory))
+            continue
         try:
-            if accession_counts[filing.accession_number] > 1:
-                raise ValueError(
-                    "Accession number appears in more than one Bronze folder"
-                )
-            records.append(
-                build_filing_record(
-                    filing,
-                    bronze=bronze,
-                    manifest=manifest,
-                    processed_at=processed_at,
-                )
+            record = build_filing_record(
+                filing, bronze=bronze, manifest=manifest, processed_at=processed_at
             )
         except (OSError, ValueError) as error:
-            failed += 1
+            summary.failed += 1
             logger.error(
                 "sec_filing_invalid", path=str(filing.directory), error=str(error)
             )
-    return records, failed
+            continue
+        copies[filing.accession_number].append((filing, record))
+
+    records: list[FilingRecord] = []
+    for accession, group in copies.items():
+        if len(group) == 1:
+            records.append(group[0][1])
+        elif (record := _keep_one_copy(accession, group)) is not None:
+            records.append(record)
+            summary.duplicate_folders += len(group) - 1
+        else:
+            for filing, _ in group:
+                summary.failed += 1
+                logger.error(
+                    "sec_filing_invalid",
+                    path=str(filing.directory),
+                    error="Accession number appears in more than one Bronze folder "
+                    "with different content",
+                )
+    return records
 
 
 def _plan_writes(
@@ -180,9 +239,15 @@ def _run_filings(
     logger.info("bronze_filings_discovered", discovered=summary.discovered)
 
     with timed_operation("bronze.transform"):
-        records, summary.failed = _parse_batch(filings, bronze, processed_at)
+        records = _parse_batch(filings, bronze, processed_at, summary)
     summary.parsed = len(records)
-    logger.info("bronze_filings_parsed", parsed=summary.parsed, failed=summary.failed)
+    logger.info(
+        "bronze_filings_parsed",
+        parsed=summary.parsed,
+        failed=summary.failed,
+        duplicate_folders=summary.duplicate_folders,
+        download_failed=summary.download_failed,
+    )
     if summary.failed:
         return
 

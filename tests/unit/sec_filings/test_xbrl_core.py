@@ -226,6 +226,42 @@ def test_generated_xml_matching_inline_is_merged_into_one_instance() -> None:
     assert set(instance.units) == {"usd", "eur"}
 
 
+@pytest.mark.parametrize(
+    ("xml_value", "merged"), [("Cover  Agreements", True), ("Other", False)]
+)
+def test_generated_xml_typed_member_whitespace_still_matches(
+    xml_value: str, merged: bool
+) -> None:
+    def segment(value: str) -> str:
+        return (
+            '<xbrli:segment><xbrldi:typedMember dimension="ex:RegionAxis">'
+            f"<ex:Region>{value}</ex:Region></xbrldi:typedMember></xbrli:segment>"
+        )
+
+    inline = _inline(
+        _fact("ex:Revenue", "S", "usd"),
+        _context("S", segment=segment(" Cover Agreements ")) + USD,
+    )
+    # EDGAR trims and collapses whitespace in typed member values.
+    xml = _xml(
+        _context("S", segment=segment(xml_value)).replace("xbrli:", "")
+        + USD.replace("xbrli:", "")
+        + '<ex:Revenue contextRef="S" unitRef="usd" decimals="0">5</ex:Revenue>'
+    )
+
+    if not merged:
+        with pytest.raises(XbrlConflict, match="does not represent"):
+            _instances([inline], [xml])
+        return
+    (instance,) = _instances([inline], [xml])
+
+    assert len(instance.sources) == 2
+    # The Inline definition, as written, is the one kept.
+    assert "<ns0:Region> Cover Agreements </ns0:Region>" in (
+        instance.contexts["S"].segment_xml or ""
+    )
+
+
 def test_generated_xml_with_other_facts_is_a_conflict() -> None:
     inline = _inline(_fact("ex:Revenue", "FY", "usd"), _context("FY") + USD)
     xml = _xml(_context("FY").replace("xbrli:", "") + USD.replace("xbrli:", ""))

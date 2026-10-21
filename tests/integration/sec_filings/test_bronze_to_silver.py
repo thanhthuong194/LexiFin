@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sys
 from collections import Counter
 from dataclasses import asdict, fields, replace
@@ -675,6 +676,72 @@ def test_invalid_filing_rejects_batch_before_any_write(
         "content_blocks",
     ):
         assert not (tmp_path / "silver" / "sec_filings" / table_name).exists()
+
+
+def _filings_folder(data_dir: Path, cik: str, form: str, accession: str) -> Path:
+    return data_dir / "bronze/sec_filings/sec-edgar-filings" / cik / form / accession
+
+
+@pytest.mark.parametrize("identical", [True, False])
+def test_joint_filing_copies_keep_one_folder_or_reject(
+    tmp_path: Path, write_sec_filing, identical: bool
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    # A joint 8-K is downloaded once per registrant: the same accession under
+    # the co-registrant's CIK folder.
+    _, form, accession, _ = INITIAL_FILINGS[2]
+    copy = _filings_folder(tmp_path, CO_REGISTRANT_CIK, form, accession)
+    shutil.copytree(_filings_folder(tmp_path, OTHER_CIK, form, accession), copy)
+    if not identical:
+        (copy / "primary-document.html").write_text("<html>changed</html>")
+
+    result = run_sec_filings_silver(tmp_path, to_stage="filings")
+
+    if not identical:
+        assert result.filings.status == "rejected"
+        assert (result.filings.failed, result.filings.inserted) == (2, 0)
+        return
+    assert result.filings.status == "completed"
+    assert (result.filings.discovered, result.filings.inserted) == (4, 3)
+    assert result.filings.duplicate_folders == 1
+    (row,) = (
+        _table(tmp_path)
+        .scan(row_filter=EqualTo("filing_id", EIGHT_K_ID))
+        .to_arrow()
+        .to_pylist()
+    )
+    # The folder of the CIK the accession number starts with is kept.
+    assert row["cik"] == OTHER_CIK
+
+
+def test_failed_download_folder_is_left_out(tmp_path: Path, write_sec_filing) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    folder = write_sec_filing(
+        tmp_path,
+        cik=CIK,
+        form="8-K",
+        accession="0000320193-26-000001",
+        filed="20260105",
+    )
+    (folder / "full-submission.txt").write_bytes(b"")
+    manifest = tmp_path / "bronze/sec_filings/_metadata/filing_manifest.jsonl"
+    failed = {
+        "run_id": MANIFEST_RUN_ID,
+        "filing_id": f"{CIK}:8-K:0000320193-26-000001",
+        "cik": CIK,
+        "accession_number": "0000320193-26-000001",
+        "form": "8-K",
+        "status": "failed",
+        "error": "Missing or empty filing submission",
+        "recorded_at": "2026-09-23T07:58:19Z",
+    }
+    with manifest.open("a") as lines:
+        lines.write(json.dumps(failed) + "\n")
+
+    result = run_sec_filings_silver(tmp_path, to_stage="filings")
+
+    assert result.filings.status == "completed"
+    assert (result.filings.download_failed, result.filings.inserted) == (1, 3)
 
 
 def test_missing_tail_entity_is_a_conflict_without_partial_append(

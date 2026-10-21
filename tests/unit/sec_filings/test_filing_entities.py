@@ -365,3 +365,25 @@ def test_records_match_exact_filing_entities_arrow_schema(tmp_path: Path) -> Non
         "entity_end_byte": "int64",
         "processed_at": "timestamp[us, tz=UTC]",
     }
+
+
+def test_newer_header_fields_and_submission_flags_are_tolerated(
+    tmp_path: Path,
+) -> None:
+    # Newer EDGAR headers: a CONFIRMING COPY flag before the first block, an
+    # LEI in COMPANY DATA and a non-US flag in the addresses.
+    filer = FILER_BLOCK.replace(
+        "\t\tFISCAL YEAR END:",
+        "\t\tLEGAL ENTITY IDENTIFIER:\t\tHWUPKR0MPOU8FGXBT394\n\t\tFISCAL YEAR END:",
+    ).replace("\t\tZIP:", "\t\tADDRESS IS A NON US LOCATION:\tNO\n\t\tZIP:")
+    raw = _submission([filer]).replace(
+        b"FILED AS OF DATE:", b"CONFIRMING COPY:\t\nFILED AS OF DATE:"
+    )
+
+    (record,) = build_filing_entity_records(
+        _parent(), _header(tmp_path, raw), PROCESSED_AT
+    )
+
+    assert (record.entity_ordinal, record.source_role) == (1, "FILER")
+    assert (record.business_zip, record.mailing_zip) == ("95014", "95014")
+    assert raw[record.entity_start_byte :].startswith(b"FILER:")

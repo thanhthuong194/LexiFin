@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -182,13 +183,41 @@ def _xml_instance(filing_id: str, source: SourceDocument) -> LogicalInstance:
     )
 
 
+# Text between tags of canonical segment/scenario XML: typed member values.
+_ELEMENT_TEXT = re.compile(r">([^<]+)<")
+
+
+def _collapse_text(xml: str | None) -> str | None:
+    if xml is None:
+        return None
+    return _ELEMENT_TEXT.sub(lambda m: ">" + " ".join(m.group(1).split()) + "<", xml)
+
+
+def _same_context(inline: ContextDefinition | None, xml: ContextDefinition) -> bool:
+    """Equal definitions, up to whitespace in typed member values: EDGAR's XML
+    collapses it (`"Agreements "` becomes `"Agreements"`).
+    """
+
+    if inline is None or inline == xml:
+        return inline == xml
+
+    def collapsed(context: ContextDefinition) -> ContextDefinition:
+        return replace(
+            context,
+            segment_xml=_collapse_text(context.segment_xml),
+            scenario_xml=_collapse_text(context.scenario_xml),
+        )
+
+    return collapsed(inline) == collapsed(xml)
+
+
 def _represents(xml: LogicalInstance, target: LogicalInstance) -> bool:
     """Whether an XML instance is another representation of an Inline target.
 
     Schema refs and fact references (concept, context, unit) must be equal as
     multisets, and every XML context and unit must be defined identically in
-    the target; the target may also hold resources that no fact uses, which
-    EDGAR's generated XML leaves out.
+    the target (typed member values up to whitespace); the target may also
+    hold resources that no fact uses, which EDGAR's generated XML leaves out.
     """
 
     def references(instance: LogicalInstance) -> Counter[tuple[str, str, str | None]]:
@@ -197,7 +226,9 @@ def _represents(xml: LogicalInstance, target: LogicalInstance) -> bool:
     return (
         xml.schema_refs == target.schema_refs
         and references(xml) == references(target)
-        and all(target.contexts.get(ref) == d for ref, d in xml.contexts.items())
+        and all(
+            _same_context(target.contexts.get(r), d) for r, d in xml.contexts.items()
+        )
         and all(target.units.get(ref) == d for ref, d in xml.units.items())
     )
 
