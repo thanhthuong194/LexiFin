@@ -262,6 +262,19 @@ def test_generated_xml_typed_member_whitespace_still_matches(
     )
 
 
+def test_nested_default_namespace_rebinding_keeps_the_outer_binding() -> None:
+    # The resources rebind the default namespace (XHTML at the root) to xbrli.
+    inline = _inline(_fact("ex:Revenue", "FY", "usd"), _context("FY") + USD).replace(
+        b"<ix:resources>",
+        b'<ix:resources xmlns="http://www.xbrl.org/2003/instance">',
+    )
+
+    (instance,) = _instances([inline])
+
+    assert instance.namespace_map[""] == "http://www.w3.org/1999/xhtml"
+    assert set(instance.contexts) == {"FY"}
+
+
 def test_generated_xml_with_other_facts_is_a_conflict() -> None:
     inline = _inline(_fact("ex:Revenue", "FY", "usd"), _context("FY") + USD)
     xml = _xml(_context("FY").replace("xbrli:", "") + USD.replace("xbrli:", ""))

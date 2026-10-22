@@ -103,15 +103,15 @@ def expand_qname(value: str | None, element: etree._Element) -> str:
 def namespace_map(declarations: Iterable[tuple[str, str]]) -> dict[str, str]:
     """Merge prefix declarations into one map ordered by prefix (default is "").
 
-    Raises ValueError when a prefix is bound to two namespaces.
+    Declarations come in document order, and the first binding of a prefix
+    wins: a nested element may rebind it for its own subtree (an
+    `<ix:resources xmlns="http://www.xbrl.org/2003/instance">` inside XHTML),
+    which QNames already resolve in scope, so the map keeps the outer one.
     """
 
     mapping: dict[str, str] = {}
     for prefix, uri in declarations:
-        if mapping.setdefault(prefix, uri) != uri:
-            raise ValueError(
-                f"namespace prefix {prefix!r} is bound to {mapping[prefix]} and {uri}"
-            )
+        mapping.setdefault(prefix, uri)
     return dict(sorted(mapping.items()))
 
 
