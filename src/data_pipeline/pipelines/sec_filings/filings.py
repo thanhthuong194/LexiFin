@@ -150,8 +150,8 @@ def _parse_batch(
     for accession, group in copies.items():
         if len(group) == 1:
             records.append(group[0][1])
-        elif (record := _keep_one_copy(accession, group)) is not None:
-            records.append(record)
+        elif (kept := _keep_one_copy(accession, group)) is not None:
+            records.append(kept)
             summary.duplicate_folders += len(group) - 1
         else:
             for filing, _ in group:
