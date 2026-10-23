@@ -614,3 +614,61 @@ def test_a_fact_is_never_in_both_a_block_and_a_cell(
         XbrlFactRecord.model_validate(
             {**records[2].model_dump(), "block_id": "block-1", "cell_id": "cell-1"}
         )
+
+
+@pytest.mark.parametrize("is_extension", [True, False])
+def test_a_concept_redefined_across_filings_keeps_the_first_extension_definition(
+    is_extension: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.data_pipeline.pipelines.sec_filings.xbrl_facts_extraction import (
+        ConceptConflict,
+        FactsExtraction,
+        _merge_concepts,
+    )
+
+    # Two 8-Ks reusing one extension namespace, typing a member with
+    # domainItemType of two DTR versions.
+    first = LoadedConcept(
+        namespace_uri="http://www.example.com/20260421",
+        local_name="SeriesKMember",
+        data_type="{http://www.xbrl.org/dtr/type/2022-03-31}domainItemType",
+        substitution_group="{http://www.xbrl.org/2003/instance}item",
+        period_type="duration",
+        balance=None,
+        is_abstract=True,
+        is_nillable=True,
+        source_schema_uri="ex-20260421.xsd",
+        is_extension=is_extension,
+    )
+    second = replace(
+        first, data_type="{http://www.xbrl.org/dtr/type/2024-01-31}domainItemType"
+    )
+    inputs = SimpleNamespace(
+        stored_concepts={}, fact_concepts=set(), processed_at=PROCESSED_AT
+    )
+    extraction = FactsExtraction()
+    _merge_concepts([first], inputs, extraction)
+
+    # The same difference against a definition stored by an earlier run.
+    (concept_id,) = extraction.definitions
+    stored = SimpleNamespace(
+        stored_concepts={concept_id: extraction.definitions[concept_id].sha256()},
+        fact_concepts=set(),
+        processed_at=PROCESSED_AT,
+    )
+
+    if not is_extension:
+        with pytest.raises(ConceptConflict, match="defined twice"):
+            _merge_concepts([second], inputs, extraction)
+        with pytest.raises(ConceptConflict, match="differs from the stored"):
+            _merge_concepts([second], stored, FactsExtraction())
+        return
+    _merge_concepts([second], inputs, extraction)
+    later = FactsExtraction()
+    _merge_concepts([second], stored, later)
+
+    (record,) = extraction.concepts.values()
+    assert record.data_type == first.data_type
+    assert not later.concepts

@@ -64,10 +64,17 @@ def _sources(
 
     An HTML document is a candidate only if its bytes name the Inline XBRL
     namespace, and is Inline only if it declares it; XML instances are the
-    documents classified `xbrl_instance`. Returns them and the bytes read.
+    documents classified `xbrl_instance`. A candidate that is not well-formed
+    XML is left out with a warning (SEC holds one filing whose documents are
+    hard-wrapped every 65,536 bytes, breaking an attribute name and an entity);
+    a malformed HTML candidate leaves out all the filing's Inline documents
+    rather than a partial document set, so its XML instances stand alone, and
+    a filing with no source left has no instance. Returns them and the bytes
+    read.
     """
 
     inline, xml, size = [], [], 0
+    malformed: list[str] = []
     for document in documents:
         if document.content_sha256 is None:
             continue
@@ -81,11 +88,21 @@ def _sources(
         try:
             parsed = parse_xbrl_source(content)
         except ValueError as error:
-            raise ValueError(f"{document.document_id}: {error}") from error
+            if is_html:
+                malformed.append(document.document_id)
+            logger.warning(
+                "xbrl_source_not_well_formed",
+                filing_id=filing.filing_id,
+                document_id=document.document_id,
+                error=str(error),
+            )
+            continue
         if not is_html:
             xml.append(SourceDocument(document, parsed))
         elif parsed.is_inline:
             inline.append(SourceDocument(document, parsed))
+    if malformed:
+        inline = []
     logger.info(
         "xbrl_candidate_documents_loaded",
         filing_id=filing.filing_id,

@@ -1500,7 +1500,6 @@ def _replace_instance(data_dir: Path, document: str, **changes: object) -> None:
         "partial-contexts",
         "children-without-instance",
         "source-set-changed",
-        "bad-new-filing",
     ],
 )
 def test_xbrl_core_rejects_the_batch_before_any_write(
@@ -1522,11 +1521,6 @@ def test_xbrl_core_rejects_the_batch_before_any_write(
         form="8-K",
         accession="0000320193-26-000001",
         filed="20260105",
-        # Names the Inline XBRL namespace but is not well-formed XML.
-        primary_text=None
-        if damage != "bad-new-filing"
-        else '\n<html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"><body>'
-        "<div>Item 2.02 Results.</div><p>open</body></html>\n",
     )
 
     result = run_sec_filings_silver(tmp_path)
@@ -1534,13 +1528,43 @@ def test_xbrl_core_rejects_the_batch_before_any_write(
     assert result.xbrl_core is not None
     assert result.xbrl_core.status == "rejected"
     assert result.xbrl_core.instances_inserted == 0
-    if damage == "bad-new-filing":
-        assert result.xbrl_core.filings_failed == 1
-    else:
-        assert result.xbrl_core.filings_conflicted >= 1
+    assert result.xbrl_core.filings_conflicted >= 1
     assert _xbrl_snapshots(tmp_path) == before
     stored = _table(tmp_path, INSTANCES).scan().to_arrow()["instance_id"].to_pylist()
     assert _instance_id(NEW_YEAR_DOCUMENT) not in stored
+
+
+def test_malformed_xbrl_sources_are_left_out_with_a_warning(
+    tmp_path: Path, write_sec_filing, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    write_sec_filing(
+        tmp_path,
+        cik=CIK,
+        form="8-K",
+        accession="0000320193-26-000001",
+        filed="20260105",
+        # Names the Inline XBRL namespace but is not well-formed XML, and the
+        # XML instance is left out: no source of the filing remains.
+        primary_text='\n<html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"><body>'
+        "<div>Item 2.02 Results.</div><p>open</body></html>\n",
+        xbrl_instance=False,
+    )
+
+    result = run_sec_filings_silver(tmp_path, to_stage="xbrl_core")
+
+    assert result.xbrl_core is not None
+    assert result.xbrl_core.status == "completed"
+    assert result.xbrl_core.filings_failed == 0
+    assert result.xbrl_core.filings_without_xbrl == 1
+    assert result.xbrl_core.instances_inserted == 3
+    warnings = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if "xbrl_source_not_well_formed" in line
+    ]
+    assert len(warnings) == 1
+    assert "sec:0000320193-26-000001" in warnings[0]
 
 
 def test_filing_without_xbrl_gets_no_instance_and_reruns_quietly(
@@ -1933,7 +1957,6 @@ def _change_stored_concept(data_dir: Path, local_name: str) -> None:
     ("damage", "event"),
     [
         ("partial-fact-group", "xbrl_instance_facts_conflict"),
-        ("concept-definition-changed", "xbrl_instance_facts_conflict"),
         ("source-set-changed", "xbrl_instance_facts_conflict"),
         ("bronze-slice-changed", "xbrl_facts_instance_failed"),
         ("xbrl-core-fact-count", "xbrl_core_semantics_incompatible"),
@@ -1954,9 +1977,7 @@ def test_xbrl_facts_reject_the_batch_before_any_write(
     else:
         # The 10-Q must be extracted again to meet the damage.
         _delete_rows(tmp_path, FACTS, "instance_id", ten_q)
-    if damage == "concept-definition-changed":
-        _change_stored_concept(tmp_path, "Revenue")
-    elif damage == "source-set-changed":
+    if damage == "source-set-changed":
         _replace_instance(tmp_path, TEN_Q_DOCUMENT, source_set_sha256="0" * 64)
     elif damage == "bronze-slice-changed":
         submission = next(
@@ -1984,6 +2005,31 @@ def test_xbrl_facts_reject_the_batch_before_any_write(
     assert (summary.concepts_inserted, summary.facts_inserted) == (0, 0)
     assert _facts_snapshots(tmp_path) == before
     assert event in capsys.readouterr().out
+
+
+def test_changed_stored_extension_concept_keeps_it_with_a_warning(
+    tmp_path: Path, write_sec_filing, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_bronze(tmp_path, write_sec_filing)
+    run_sec_filings_silver(tmp_path)
+    _delete_rows(tmp_path, FACTS, "instance_id", _instance_id(TEN_Q_DOCUMENT))
+    # A filer reusing its extension namespace with another definition.
+    _change_stored_concept(tmp_path, "Revenue")
+    capsys.readouterr()
+
+    summary = xbrl_facts_stage.run_xbrl_facts_stage(
+        tmp_path,
+        datetime.now(UTC),
+        ProcessorSettings(
+            cache_dir=tmp_path / "_cache" / "arelle",
+            allow_network=False,
+            http_user_agent=None,
+        ),
+    )
+
+    assert summary.status == "completed"
+    assert (summary.instances_inserted, summary.concepts_inserted) == (1, 0)
+    assert "xbrl_extension_concept_redefined" in capsys.readouterr().out
 
 
 def test_instance_without_facts_is_a_complete_empty_group(

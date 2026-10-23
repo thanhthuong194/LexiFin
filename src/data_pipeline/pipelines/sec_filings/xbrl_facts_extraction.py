@@ -77,12 +77,18 @@ def _merge_concepts(
 ) -> bool:
     """Keep each concept once; a second, different definition is a conflict.
 
+    An extension concept is the exception: filers reuse one extension
+    namespace across filings (two 8-Ks of a quarter) and may declare a concept
+    slightly differently in each (`domainItemType` of another DTR version), so
+    its first definition is kept and the others are logged as a warning.
+
     Returns whether this run recovers the instance: its extension concepts are
     stored but no stored fact uses any of them, as a run that committed its
     concepts and not its facts leaves them.
     """
 
     stored_extension = used_extension = False
+    redefined: list[str] = []
     for concept in concepts:
         concept_id = concept_id_for(concept.namespace_uri, concept.local_name)
         definition = concept_definition(concept)
@@ -91,7 +97,9 @@ def _merge_concepts(
             used_extension = used_extension or concept_id in inputs.fact_concepts
         seen = extraction.definitions.setdefault(concept_id, definition)
         if seen != definition:
-            raise ConceptConflict(f"{concept_id} is defined twice in this run")
+            if not concept.is_extension:
+                raise ConceptConflict(f"{concept_id} is defined twice in this run")
+            redefined.append(concept_id)
         if seen is not definition:
             continue
         stored_hash = inputs.stored_concepts.get(concept_id)
@@ -100,7 +108,17 @@ def _merge_concepts(
                 concept, inputs.processed_at
             )
         elif stored_hash != definition.sha256():
-            raise ConceptConflict(f"{concept_id} differs from the stored definition")
+            if not concept.is_extension:
+                raise ConceptConflict(
+                    f"{concept_id} differs from the stored definition"
+                )
+            redefined.append(concept_id)
+    if redefined:
+        logger.warning(
+            "xbrl_extension_concept_redefined",
+            concepts=len(redefined),
+            concept_ids=redefined[:5],
+        )
     return stored_extension and not used_extension
 
 
