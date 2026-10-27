@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
@@ -42,6 +42,7 @@ from src.data_pipeline.pipelines.sec_filings.xbrl_facts import XbrlFactsStageSum
 from src.data_pipeline.pipelines.sec_filings.xbrl_linkbases import (
     XbrlLinkbasesStageSummary,
 )
+from src.data_pipeline.quality.sec_filings.silver_audit import AuditOptions
 from src.data_pipeline.quality.sec_filings.silver_audit_report import SilverAuditReport
 from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import (
@@ -333,13 +334,26 @@ def _run_stages(
     return failed
 
 
-def run_sec_filings_silver(
+def _with_instance_cache(
+    settings: ProcessorSettings, data_dir: Path
+) -> ProcessorSettings:
+    """The settings, keeping loaded instances under <data_dir>/_cache unless
+    they name another place: the three XBRL stages then load each instance
+    with its DTS once."""
+
+    if settings.instance_cache_dir is not None:
+        return settings
+    return replace(settings, instance_cache_dir=data_dir / "_cache" / "xbrl_instances")
+
+
+def run_sec_filings_silver(  # noqa: PLR0913
     data_dir: Path,
     *,
     from_stage: str | None = None,
     to_stage: str | None = None,
     taxonomy: ProcessorSettings | None = None,
     bronze_dir: Path | None = None,
+    audit: AuditOptions | None = None,
 ) -> SilverRunResult:
     """Build or incrementally update the SEC Silver tables from all SEC Bronze.
 
@@ -353,7 +367,10 @@ def run_sec_filings_silver(
     is no global rollback. Bronze is read from `bronze_dir` (default
     `<data_dir>/bronze/sec_filings`); the catalog and tables live under
     `data_dir`. The XBRL stages resolve taxonomies as `taxonomy` says (default:
-    offline, from `<data_dir>/_cache/arelle`). An unknown stage or an empty
+    offline, from `<data_dir>/_cache/arelle`); an instance loaded by one
+    XBRL stage is kept in `<data_dir>/_cache/xbrl_instances` for the next ones
+    until the linkbases stage completes. The integrity audit runs as `audit`
+    says (its Bronze directory is the run's). An unknown stage or an empty
     range raises ValueError; unexpected errors are logged and re-raised.
     """
 
@@ -366,12 +383,16 @@ def run_sec_filings_silver(
         if bronze_dir is None
         else SecBronze(bronze_dir.expanduser().resolve()),
         processed_at=started_at,
-        taxonomy=taxonomy
-        or ProcessorSettings(
-            cache_dir=data_dir / "_cache" / "arelle",
-            allow_network=False,
-            http_user_agent=None,
+        taxonomy=_with_instance_cache(
+            taxonomy
+            or ProcessorSettings(
+                cache_dir=data_dir / "_cache" / "arelle",
+                allow_network=False,
+                http_user_agent=None,
+            ),
+            data_dir,
         ),
+        audit=audit or AuditOptions(),
     )
     run_id = uuid4().hex
     written = [spec for stage in selected for spec in stage.owned_tables]

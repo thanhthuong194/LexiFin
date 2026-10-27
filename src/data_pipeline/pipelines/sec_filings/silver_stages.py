@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -86,6 +86,8 @@ class StageContext:
     bronze: SecBronze
     processed_at: datetime
     taxonomy: ProcessorSettings
+    # How the integrity audit runs (its Bronze directory is `bronze`).
+    audit: AuditOptions = field(default_factory=AuditOptions)
 
 
 @dataclass(frozen=True)
@@ -185,7 +187,10 @@ SILVER_STAGES = (
         "integrity",
         tuple(stage.name for stage in _TABLE_STAGES),
         (),
-        lambda c: audit_silver(c.data_dir, AuditOptions(bronze_dir=c.bronze.root)),
+        lambda c: audit_silver(
+            c.data_dir,
+            replace(c.audit, bronze_dir=c.bronze.root),
+        ),
     ),
 )
 

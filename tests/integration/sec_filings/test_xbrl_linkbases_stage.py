@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from collections import Counter
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -403,6 +404,8 @@ def test_processor_failure_writes_no_linkbase_row(
     # Every XBRL stage loads through the same loader: break only this stage's loads.
     earlier = run_sec_filings_silver(tmp_path, to_stage="xbrl_enrichment")
     monkeypatch.setattr(xbrl_instance_loading, "load_instance", broken_load)
+    # Loaded again, not served from the earlier stages' cache.
+    shutil.rmtree(tmp_path / "_cache" / "xbrl_instances")
     result = run_sec_filings_silver(tmp_path, from_stage="xbrl_linkbases")
 
     summary = result.xbrl_linkbases

@@ -70,12 +70,17 @@ class SourceFile:
 class ProcessorSettings:
     """Where the taxonomy cache lives, whether it may be filled online, and in
     how many worker processes instances are loaded (1: in the calling process).
+
+    With `instance_cache_dir`, an instance loaded by one XBRL stage is kept
+    there, compressed, for the next stages (see InstanceCache); None loads
+    every instance in every stage.
     """
 
     cache_dir: Path
     allow_network: bool
     http_user_agent: str | None
     workers: int = 1
+    instance_cache_dir: Path | None = None
 
 
 @dataclass(frozen=True)

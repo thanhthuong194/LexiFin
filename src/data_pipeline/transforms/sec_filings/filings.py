@@ -210,6 +210,32 @@ def _ingestion_run_id(
     )
 
 
+def _recorded_sha256(
+    manifest: ManifestIndex, accession_number: str, stored_path: str, path: Path
+) -> str:
+    """The file's SHA-256 as the manifest recorded it at download, when every
+    successful entry of the filing that lists the path records one hash and
+    the file still has the recorded size; otherwise the file is hashed.
+
+    Bronze files are never rewritten, so the recorded hash is the file's. The
+    documents stage reads every full submission whole and rejects one whose
+    bytes do not match it; `audit_silver.py --verify-source-hashes` re-hashes
+    every file.
+    """
+
+    recorded = {
+        (artifact.sha256, artifact.size_bytes)
+        for entry in manifest.get(accession_number, ())
+        for artifact in entry.artifacts
+        if artifact.relative_path == stored_path
+    }
+    if len(recorded) == 1:
+        ((sha256, size),) = recorded
+        if size == path.stat().st_size:
+            return sha256
+    return sha256_file(path)
+
+
 def _nonempty_file(path: Path) -> Path:
     if not path.is_file() or path.stat().st_size == 0:
         raise ValueError(f"Missing or empty file: {path}")
@@ -234,13 +260,17 @@ def build_filing_record(
     check_header_matches_folder(header, filing)
 
     full_path = bronze.stored(full_submission)
-    full_sha256 = sha256_file(full_submission)
+    full_sha256 = _recorded_sha256(
+        manifest, header.accession_number, full_path, full_submission
+    )
     artifacts = {(full_path, full_sha256)}
     primary_path = primary_sha256 = None
     if filing.primary_document.exists():
         primary_document = _nonempty_file(filing.primary_document)
         primary_path = bronze.stored(primary_document)
-        primary_sha256 = sha256_file(primary_document)
+        primary_sha256 = _recorded_sha256(
+            manifest, header.accession_number, primary_path, primary_document
+        )
         artifacts.add((primary_path, primary_sha256))
 
     # model_validate (not the constructor) because `form` is only narrowed to

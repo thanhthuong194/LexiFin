@@ -26,6 +26,9 @@ from src.data_pipeline.contracts.sec_filings.xbrl_networks import (
     XBRL_RELATIONSHIPS_ARROW_SCHEMA,
     XbrlNetworkRecord,
 )
+from src.data_pipeline.pipelines.sec_filings.xbrl_instance_loading import (
+    instance_cache,
+)
 from src.data_pipeline.pipelines.sec_filings.xbrl_linkbases_extraction import (
     LinkbaseExtraction,
     LinkbaseInputs,
@@ -415,6 +418,9 @@ def _run_linkbases(
         networks=summary.networks_appended,
         relationships=summary.relationships_appended,
     )
+    # The last stage that loads instances: their cached loads are done with.
+    if (cache := instance_cache(settings)) is not None:
+        cache.clear()
     summary.status = "completed"
 
 

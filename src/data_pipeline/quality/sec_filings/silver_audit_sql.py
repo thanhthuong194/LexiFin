@@ -1,25 +1,31 @@
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
 from itertools import groupby
 from operator import itemgetter
 from pathlib import Path
 from typing import Any
 
+import duckdb
+import pyarrow as pa
 from lxml import etree
 
 from src.data_pipeline.contracts.sec_filings.xbrl_core import source_set_sha256
+from src.data_pipeline.quality.sec_filings.silver_audit_progress import (
+    AuditProgress,
+    NoProgress,
+)
 from src.data_pipeline.quality.sec_filings.silver_audit_report import (
     SilverAuditReport,
     Status,
 )
+from src.data_pipeline.quality.sec_filings.silver_audit_scan import local_path
 from src.data_pipeline.quality.sec_filings.silver_model import (
     RELATIONS,
     SILVER_TABLES,
     TABLE_SEMANTICS_REBUILD,
+    Relation,
 )
 from src.data_pipeline.quality.sec_filings.xbrl_linkbases import (
     RELATIONSHIP_ATTRIBUTE_LINKBASES,
@@ -63,8 +69,7 @@ from src.data_pipeline.transforms.sec_filings.xbrl_dimensions import (
     expected_dimension_count,
 )
 
-# Page cache of the scratch database; sorts and indexes spill to temporary files.
-_CACHE_KIB = 64 * 1024
+type Progress = AuditProgress | NoProgress
 # Derived from a context's segment and scenario XML while it is scanned; null
 # when that XML does not parse.
 EXPECTED_DIMENSIONS = "expected_dimension_count"
@@ -300,92 +305,189 @@ def scratch_columns() -> dict[str, tuple[str, ...]]:
     return {name: tuple(dict.fromkeys(columns)) for name, columns in needed.items()}
 
 
-def _sql_value(value: object) -> object:
-    """A scanned value as SQLite stores it; dates compare as ISO text."""
+# DuckDB's memory budget; joins and sorts beyond it spill to its temp directory.
+_MEMORY_LIMIT = "4GB"
+# Rows fetched at a time from a query result.
+_FETCH_ROWS = 10_000
 
-    if isinstance(value, date | datetime):
-        return value.isoformat()
-    return value
+
+def _arrow_schema(identifier: str, columns: Sequence[str]) -> pa.Schema:
+    schema = next(
+        t.spec for t in SILVER_TABLES if t.identifier == identifier
+    ).arrow_schema
+    fields = [schema.field(column) for column in columns]
+    if identifier in _DERIVED:
+        fields.append(pa.field(_DERIVED[identifier][0], pa.int64()))
+    return pa.schema(fields)
 
 
 class ScratchDatabase:
-    """A disk-backed SQLite copy of the columns the set-based checks read.
+    """A DuckDB copy of the columns the set-based checks read.
 
-    It lives in a temporary file the caller owns, never in the Iceberg
-    catalog. SQLite keeps at most _CACHE_KIB of pages in memory and spills
-    sorts to temporary files, so duplicate, orphan and group checks run in
-    bounded memory whatever the table sizes.
+    It lives in a file the caller owns, never in the Iceberg catalog. Rows
+    are stored by column and compressed, joins and aggregations run as hash
+    operations on every core, and DuckDB spills what does not fit in
+    _MEMORY_LIMIT to temporary files next to the database, so duplicate,
+    orphan and group checks run in bounded memory whatever the table sizes.
+    Every statement commits on its own and DuckDB replays its write-ahead
+    log when the file is opened again, so after a crash or power loss the
+    database holds exactly the statements that completed.
     """
 
     def __init__(self, path: Path) -> None:
-        self.connection = sqlite3.connect(path)
-        self.connection.executescript(
-            f"PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; "
-            f"PRAGMA temp_store = FILE; PRAGMA cache_size = -{_CACHE_KIB};"
+        self.connection = duckdb.connect(str(path))
+        spill = path.with_name(f"{path.name}.tmp")
+        self.connection.execute(
+            f"SET memory_limit = '{_MEMORY_LIMIT}'; "
+            f"SET temp_directory = '{spill}'; "
+            "SET preserve_insertion_order = false"
         )
         self.columns = scratch_columns()
+        self.schemas = {
+            identifier: _arrow_schema(identifier, columns)
+            for identifier, columns in self.columns.items()
+        }
         # Rows stored per Silver table.
         self.row_counts = dict.fromkeys(self.columns, 0)
-        for identifier, columns in self.columns.items():
-            derived = [_DERIVED[identifier][0]] if identifier in _DERIVED else []
-            self.connection.execute(
-                f"CREATE TABLE {_name(identifier)} ({', '.join([*columns, *derived])})"
-            )
-        self.connection.execute(
-            f"CREATE TABLE {_INSTANCE_SOURCES} (instance_id, position, document_id)"
+        for identifier in self.columns:
+            self._create(identifier)
+
+    def _create(self, identifier: str) -> None:
+        self._from_arrow(
+            f"CREATE TABLE IF NOT EXISTS {_name(identifier)} AS SELECT * FROM {{}}",
+            self.schemas[identifier].empty_table(),
         )
+        if identifier == XBRL_INSTANCES_TABLE:
+            self.connection.execute(
+                f"CREATE TABLE IF NOT EXISTS {_INSTANCE_SOURCES} "
+                "(instance_id VARCHAR, position INTEGER, document_id VARCHAR)"
+            )
+
+    def _from_arrow(self, sql: str, table: pa.Table) -> None:
+        """Run `sql` with `{}` naming the Arrow table."""
+
+        self.connection.register("arrow_rows", table)
+        try:
+            self.connection.execute(sql.format("arrow_rows"))
+        finally:
+            self.connection.unregister("arrow_rows")
 
     def close(self) -> None:
         """Close the connection; the caller deletes the file."""
 
         self.connection.close()
 
+    def reset(self, identifier: str) -> None:
+        """Drop the rows of a table whose scan did not complete."""
+
+        self.connection.execute(f"DROP TABLE {_name(identifier)}")
+        if identifier == XBRL_INSTANCES_TABLE:
+            self.connection.execute(f"DROP TABLE {_INSTANCE_SOURCES}")
+        self._create(identifier)
+        self.row_counts[identifier] = 0
+
     def insert(self, identifier: str, rows: Sequence[Mapping[str, Any]]) -> None:
-        """Store the checked columns of one batch of scanned rows."""
+        """Store the checked columns of some rows given as dicts."""
 
         columns = self.columns[identifier]
+        stored = pa.Table.from_pylist(
+            [{column: row[column] for column in columns} for row in rows],
+            schema=pa.schema([self.schemas[identifier].field(c) for c in columns]),
+        )
         derive = _DERIVED.get(identifier)
-        values = [
-            (
-                *(_sql_value(row[column]) for column in columns),
-                *([derive[1](row)] if derive else []),
+        if derive is not None:
+            stored = stored.append_column(
+                self.schemas[identifier].field(derive[0]),
+                pa.array(map(derive[1], rows), pa.int64()),
             )
-            for row in rows
-        ]
-        width = len(columns) + bool(derive)
-        self.connection.executemany(
-            f"INSERT INTO {_name(identifier)} VALUES ({', '.join('?' * width)})",
-            values,
+        self._from_arrow(
+            f"INSERT INTO {_name(identifier)} BY NAME SELECT * FROM {{}}", stored
         )
         if identifier == XBRL_INSTANCES_TABLE:
-            self.connection.executemany(
-                f"INSERT INTO {_INSTANCE_SOURCES} VALUES (?, ?, ?)",
-                (
-                    (row["instance_id"], position, document_id)
+            sources = pa.Table.from_pylist(
+                [
+                    {
+                        "instance_id": row["instance_id"],
+                        "position": position,
+                        "document_id": document_id,
+                    }
                     for row in rows
                     for position, document_id in enumerate(row["source_document_ids"])
+                ],
+                schema=pa.schema(
+                    [
+                        ("instance_id", pa.string()),
+                        ("position", pa.int32()),
+                        ("document_id", pa.string()),
+                    ]
                 ),
             )
-        self.connection.commit()
+            self._from_arrow(
+                f"INSERT INTO {_INSTANCE_SOURCES} BY NAME SELECT * FROM {{}}", sources
+            )
         self.row_counts[identifier] += len(rows)
 
-    def index(self) -> None:
-        """Index every column the checks join or group on; call after the last insert."""
+    def load(
+        self,
+        identifier: str,
+        paths: Sequence[str],
+        rows: int,
+        derived: Mapping[str, Sequence[object]] | None = None,
+    ) -> None:
+        """Copy the checked columns of a table's data files straight from
+        Parquet; `rows` is how many they hold. `derived` gives the derived
+        column's values of each file's rows in file order."""
 
-        columns = {(r.parent, r.parent_key) for r in RELATIONS}
-        columns |= {(r.child, r.child_key) for r in RELATIONS}
-        columns |= {(rule.table, rule.group) for rule in GROUP_RULES}
-        columns |= {(count.child, count.child_key) for count in DECLARED_COUNTS}
-        indexed = sorted((_name(identifier), column) for identifier, column in columns)
-        for table, column in [*indexed, (_INSTANCE_SOURCES, "instance_id")]:
+        if not paths:
+            return
+        files = ", ".join(
+            "'" + local_path(path).replace("'", "''") + "'" for path in paths
+        )
+        source = f"read_parquet([{files}])"
+        selected = ", ".join(f"p.{column}" for column in self.columns[identifier])
+        derive = _DERIVED.get(identifier)
+        if derive is None:
             self.connection.execute(
-                f"CREATE INDEX ix_{table}_{column} ON {table} ({column})"
+                f"INSERT INTO {_name(identifier)} BY NAME "
+                f"SELECT {selected} FROM {source} p"
             )
+        else:
+            by_file = [(local_path(path), v) for path, v in (derived or {}).items()]
+            values = pa.table(
+                {
+                    "filename": [name for name, column in by_file for _ in column],
+                    "file_row_number": [
+                        number for _, column in by_file for number in range(len(column))
+                    ],
+                    "value": pa.array(
+                        [value for _, column in by_file for value in column], pa.int64()
+                    ),
+                }
+            )
+            self._from_arrow(
+                f"INSERT INTO {_name(identifier)} BY NAME SELECT {selected}, "
+                f"d.value AS {derive[0]} FROM read_parquet([{files}], "
+                "filename = 'scratch_file', file_row_number = true) p "
+                "LEFT JOIN {} d ON d.filename = p.scratch_file "
+                "AND d.file_row_number = p.file_row_number",
+                values,
+            )
+        if identifier == XBRL_INSTANCES_TABLE:
+            self.connection.execute(
+                f"INSERT INTO {_INSTANCE_SOURCES} BY NAME SELECT instance_id, "
+                "unnest(range(len(source_document_ids))) AS position, "
+                f"unnest(source_document_ids) AS document_id FROM {source}"
+            )
+        self.row_counts[identifier] = rows
 
     def rows(self, sql: str, *parameters: object) -> Iterator[tuple[Any, ...]]:
-        """The rows of a query, fetched lazily."""
+        """The rows of a query, fetched lazily on a cursor of their own."""
 
-        return iter(self.connection.execute(sql, parameters))
+        cursor = self.connection.cursor()
+        cursor.execute(sql, parameters)
+        while chunk := cursor.fetchmany(_FETCH_ROWS):
+            yield from chunk
+        cursor.close()
 
     def stored_rows(
         self, identifier: str, column: str, value: object
@@ -396,7 +498,7 @@ class ScratchDatabase:
             f"SELECT * FROM {_name(identifier)} WHERE {column} = ?", (value,)
         )
         names = [description[0] for description in cursor.description]
-        return [dict(zip(names, row, strict=True)) for row in cursor]
+        return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
 
     def filing_ids(self) -> Iterator[str]:
         """Every stored filing_id, in order."""
@@ -406,20 +508,25 @@ class ScratchDatabase:
     def local_names(self, concept_ids: Collection[str]) -> dict[str, str]:
         """The local names of concepts, by concept_id."""
 
-        ids = sorted(concept_ids)
         rows = self.connection.execute(
             "SELECT concept_id, local_name FROM xbrl_concepts "
-            f"WHERE concept_id IN ({', '.join('?' * len(ids))})",
-            ids,
-        )
+            "WHERE list_contains(?, concept_id)",
+            (sorted(concept_ids),),
+        ).fetchall()
         return dict(rows)
 
 
-def _check_unique_keys(scratch: ScratchDatabase, report: SilverAuditReport) -> None:
+def _check_unique_keys(
+    scratch: ScratchDatabase, report: SilverAuditReport, progress: Progress
+) -> None:
     for table in SILVER_TABLES:
         rows = scratch.row_counts[table.identifier]
         for key in table.unique:
-            columns, value = ", ".join(key), " || '|' || ".join(key)
+            columns = ", ".join(key)
+            value = " || '|' || ".join(f"CAST({column} AS VARCHAR)" for column in key)
+            step = f"unique:{table.identifier}:{'+'.join(key)}"
+            if progress.skip(step):
+                continue
             with report.check(
                 f"unique:{'+'.join(key)}",
                 table.identifier,
@@ -432,28 +539,26 @@ def _check_unique_keys(scratch: ScratchDatabase, report: SilverAuditReport) -> N
                     "HAVING COUNT(*) > 1"
                 ):
                     run.found(repeated, f"{repeated} appears {count} times", count - 1)
+            progress.complete(step)
 
 
-def _check_relations(scratch: ScratchDatabase, report: SilverAuditReport) -> None:
+def _check_relations(
+    scratch: ScratchDatabase, report: SilverAuditReport, progress: Progress
+) -> None:
     for relation in RELATIONS:
         child, parent = _name(relation.child), _name(relation.parent)
         rows = scratch.row_counts[relation.child]
-        with report.check(
-            f"orphan:{relation.name}",
-            relation.child,
-            f"every non-null {relation.child_key} has a {parent}.{relation.parent_key}",
-        ) as run:
-            run.rows_checked = rows
-            for child_id, key in scratch.rows(
-                f"SELECT c.{relation.child_id}, c.{relation.child_key} FROM {child} c "
-                f"WHERE c.{relation.child_key} IS NOT NULL AND NOT EXISTS (SELECT 1 "
-                f"FROM {parent} p WHERE p.{relation.parent_key} = c.{relation.child_key})"
-            ):
-                run.found(child_id, f"{child_id}: no {parent} row {key}")
-        if not relation.lineage:
+        step = f"orphan:{relation.name}"
+        if not progress.skip(step):
+            _check_orphans(scratch, report, relation, rows)
+            progress.complete(step)
+        step = f"lineage:{relation.name}"
+        if not relation.lineage or progress.skip(step):
             continue
         copied = ", ".join(f"{c} = {parent}.{p}" for c, p in relation.lineage)
-        differs = " OR ".join(f"c.{c} IS NOT p.{p}" for c, p in relation.lineage)
+        differs = " OR ".join(
+            f"c.{c} IS DISTINCT FROM p.{p}" for c, p in relation.lineage
+        )
         with report.check(
             f"lineage:{relation.name}",
             relation.child,
@@ -465,15 +570,39 @@ def _check_relations(scratch: ScratchDatabase, report: SilverAuditReport) -> Non
                 f"ON p.{relation.parent_key} = c.{relation.child_key} WHERE {differs}"
             ):
                 run.found(child_id)
+        progress.complete(step)
 
 
-def _check_groups(scratch: ScratchDatabase, report: SilverAuditReport) -> None:
+def _check_orphans(
+    scratch: ScratchDatabase, report: SilverAuditReport, relation: Relation, rows: int
+) -> None:
+    child, parent = _name(relation.child), _name(relation.parent)
+    with report.check(
+        f"orphan:{relation.name}",
+        relation.child,
+        f"every non-null {relation.child_key} has a {parent}.{relation.parent_key}",
+    ) as run:
+        run.rows_checked = rows
+        for child_id, key in scratch.rows(
+            f"SELECT c.{relation.child_id}, c.{relation.child_key} FROM {child} c "
+            f"WHERE c.{relation.child_key} IS NOT NULL AND NOT EXISTS (SELECT 1 "
+            f"FROM {parent} p WHERE p.{relation.parent_key} = c.{relation.child_key})"
+        ):
+            run.found(child_id, f"{child_id}: no {parent} row {key}")
+
+
+def _check_groups(
+    scratch: ScratchDatabase, report: SilverAuditReport, progress: Progress
+) -> None:
     for rule in GROUP_RULES:
         complete = f"MIN({rule.ordinal}) = 1 AND MAX({rule.ordinal}) = COUNT(*) AND COUNT(DISTINCT {rule.ordinal}) = COUNT(*)"
         declared = "NULL, NULL"
         if rule.declared is not None:
             complete += f" AND MIN({rule.declared}) = COUNT(*) AND MAX({rule.declared}) = COUNT(*)"
             declared = f"MIN({rule.declared}), MAX({rule.declared})"
+        step = f"complete_group:{rule.table}:{rule.group}"
+        if progress.skip(step):
+            continue
         with report.check(
             "complete_group",
             rule.table,
@@ -491,11 +620,17 @@ def _check_groups(scratch: ScratchDatabase, report: SilverAuditReport) -> None:
                     f"{group}: {rows} rows, {distinct} distinct ordinals "
                     f"{low}..{high}, declared {counts}",
                 )
+        progress.complete(step)
 
 
-def _check_declared_counts(scratch: ScratchDatabase, report: SilverAuditReport) -> None:
+def _check_declared_counts(
+    scratch: ScratchDatabase, report: SilverAuditReport, progress: Progress
+) -> None:
     for count in DECLARED_COUNTS:
         parent, child = _name(count.parent), _name(count.child)
+        step = f"declared_count:{count.parent}:{count.declared}"
+        if progress.skip(step):
+            continue
         with report.check(
             f"declared_count:{count.declared}",
             count.parent,
@@ -509,21 +644,32 @@ def _check_declared_counts(scratch: ScratchDatabase, report: SilverAuditReport) 
                 "WHERE declared != found"
             ):
                 run.found(key, f"{key}: declares {declared}, has {rows}")
+        progress.complete(step)
 
 
-def _check_rules(scratch: ScratchDatabase, report: SilverAuditReport) -> None:
+def _check_rules(
+    scratch: ScratchDatabase, report: SilverAuditReport, progress: Progress
+) -> None:
     for rule in SQL_RULES:
+        step = f"rule:{rule.table}:{rule.check_name}"
+        if progress.skip(step):
+            continue
         with report.check(
             rule.check_name, rule.table, rule.message, severity=rule.severity
         ) as run:
             run.rows_checked = scratch.row_counts[rule.table]
             for (identifier,) in scratch.rows(rule.sql):
                 run.found(identifier)
+        progress.complete(step)
 
 
-def _check_source_sets(scratch: ScratchDatabase, report: SilverAuditReport) -> None:
+def _check_source_sets(
+    scratch: ScratchDatabase, report: SilverAuditReport, progress: Progress
+) -> None:
     """Recompute each instance's source_set_sha256 from its documents' hashes."""
 
+    if progress.skip("source_set_sha256"):
+        return
     with report.check(
         "source_set_sha256",
         XBRL_INSTANCES_TABLE,
@@ -541,19 +687,32 @@ def _check_source_sets(scratch: ScratchDatabase, report: SilverAuditReport) -> N
             pairs = [(row[2], row[3] or "") for row in sources]
             if source_set_sha256(pairs) != sources[0][1]:
                 run.found(instance_id)
+    progress.complete("source_set_sha256")
 
 
-def run_sql_checks(scratch: ScratchDatabase, report: SilverAuditReport) -> None:
+def run_sql_checks(
+    scratch: ScratchDatabase,
+    report: SilverAuditReport,
+    progress: Progress | None = None,
+) -> None:
     """Keys, foreign keys and lineage, groups, declared counts and model rules.
 
     Every check reads the scratch database, so memory does not grow with
-    the tables; each keeps only a few failing identifiers.
+    the tables; each keeps only a few failing identifiers. A check that
+    `progress` holds is replayed, not run again.
     """
 
-    scratch.index()
-    _check_unique_keys(scratch, report)
-    _check_relations(scratch, report)
-    _check_groups(scratch, report)
-    _check_declared_counts(scratch, report)
-    _check_rules(scratch, report)
-    _check_source_sets(scratch, report)
+    progress = progress or NoProgress()
+    _check_unique_keys(scratch, report, progress)
+    _check_relations(scratch, report, progress)
+    _check_groups(scratch, report, progress)
+    _check_declared_counts(scratch, report, progress)
+    _check_rules(scratch, report, progress)
+    _check_source_sets(scratch, report, progress)
+
+
+def deriver(identifier: str) -> Callable[[Mapping[str, Any]], object] | None:
+    """The function computing a table's derived scratch column from a row."""
+
+    derive = _DERIVED.get(identifier)
+    return None if derive is None else derive[1]

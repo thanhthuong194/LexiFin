@@ -14,6 +14,7 @@ from pyiceberg.expressions import EqualTo
 
 from scripts.sec_filings import query_silver
 from scripts.sec_filings.build_silver import main
+from src.data_pipeline.pipelines.sec_filings import xbrl_instance_loading
 from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
     run_sec_filings_silver,
 )
@@ -540,3 +541,62 @@ def test_sample_queries_read_silver_without_writing(
     assert table == (0, [{"row_ordinal": "1", "cells": "Revenue | $1,000"}])
     assert missing[0] == 1
     assert _snapshots(silver) == before
+
+
+def _content(data_dir: Path, identifier: str) -> list[str]:
+    return sorted(
+        repr(sorted((k, v) for k, v in row.items() if k != "processed_at"))
+        for row in _rows(data_dir, identifier)
+    )
+
+
+def _count_loads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The entry files of every instance the processor loads from now on."""
+
+    load_instance, loaded = xbrl_instance_loading.load_instance, []
+
+    def spy(files: Any, **kwargs: Any) -> Any:
+        loaded.append(next(f.document_id for f in files if f.is_entry))
+        return load_instance(files, **kwargs)
+
+    monkeypatch.setattr(xbrl_instance_loading, "load_instance", spy)
+    return loaded
+
+
+def test_the_xbrl_stages_load_each_instance_once_and_build_the_same_rows(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / "ingest", write_sec_filing)
+    bronze = tmp_path / "ingest" / "bronze" / "sec_filings"
+    cached, uncached = tmp_path / "cached", tmp_path / "uncached"
+    with monkeypatch.context() as patch:
+        patch.setattr(xbrl_instance_loading.InstanceCache, "get", lambda *_: None)
+        reloads = _count_loads(patch)
+        assert run_sec_filings_silver(uncached, bronze_dir=bronze).completed
+    loads = _count_loads(monkeypatch)
+
+    assert run_sec_filings_silver(cached, bronze_dir=bronze).completed
+
+    # Facts, enrichment (unless nothing is missing) and linkbases each load.
+    assert len(reloads) > len(set(reloads)) == len(FILINGS)
+    assert sorted(loads) == sorted(set(reloads))
+    for table in SILVER_TABLES:
+        assert _content(cached, table.identifier) == _content(
+            uncached, table.identifier
+        )
+    # Removed once the last stage that needs it completed.
+    assert not (cached / "_cache" / "xbrl_instances").exists()
+
+
+def test_loads_cached_by_a_stopped_build_serve_the_next_run(
+    tmp_path: Path, write_sec_filing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, write_sec_filing)
+    assert run_sec_filings_silver(tmp_path, to_stage="xbrl_enrichment").completed
+    assert len(list((tmp_path / "_cache" / "xbrl_instances").iterdir())) == len(FILINGS)
+    loads = _count_loads(monkeypatch)
+
+    assert run_sec_filings_silver(tmp_path, from_stage="xbrl_linkbases").completed
+
+    assert loads == []
+    assert _rows(tmp_path, "sec_filings.xbrl_relationships")

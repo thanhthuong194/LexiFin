@@ -45,7 +45,10 @@ from src.data_pipeline.quality.sec_filings.silver_audit_report import (
     FilingSample,
     SilverAuditReport,
 )
-from src.data_pipeline.quality.sec_filings.silver_audit_scan import contract_row
+from src.data_pipeline.quality.sec_filings.silver_audit_scan import (
+    Keep,
+    contract_row,
+)
 from src.data_pipeline.quality.sec_filings.xbrl_core import instance_problem
 from src.data_pipeline.quality.sec_filings.xbrl_linkbases import network_problem
 from src.data_pipeline.storage.bronze import (
@@ -173,6 +176,17 @@ class SampleRows:
         if identifier in _SAMPLE_KEYS:
             key = _SAMPLE_KEYS[identifier]
             self.keys[key].update(row[key] for row in kept)
+
+    def keep(self, identifier: str) -> Keep | None:
+        """The rows of a table's scan that `add` needs: every filing, the rows
+        matching the chosen filings' keys, or none."""
+
+        if identifier == FILINGS_TABLE:
+            return Keep(None)
+        column = _SAMPLE_MATCH.get(identifier)
+        if column is None:
+            return None
+        return Keep(column, frozenset(self.keys[column]))
 
     def _choose(self, rows: Sequence[dict[str, Any]]) -> None:
         for row in rows:

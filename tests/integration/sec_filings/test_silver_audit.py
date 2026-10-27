@@ -4,6 +4,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -17,7 +18,7 @@ from src.data_pipeline.contracts.sec_filings.xbrl_networks import network_id_for
 from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
     run_sec_filings_silver,
 )
-from src.data_pipeline.quality.sec_filings import silver_audit
+from src.data_pipeline.quality.sec_filings import silver_audit, silver_audit_sql
 from src.data_pipeline.quality.sec_filings.silver_audit import (
     AuditOptions,
     audit_silver,
@@ -428,3 +429,111 @@ def test_cli_rejects_a_zero_batch_size(monkeypatch: pytest.MonkeyPatch) -> None:
         main()
 
     assert exit_info.value.code == 2
+
+
+def _outcomes(report: SilverAuditReport) -> list[tuple[Any, ...]]:
+    return [
+        (c.check_name, c.table, c.status, c.rows_checked, c.failed_count, c.sample_ids)
+        for c in report.checks
+    ]
+
+
+def _scans(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The tables scan_table reads from now on."""
+
+    scan_table, scanned = silver_audit.scan_table, []
+
+    def spy(table: Any, identifier: str, *args: Any, **kwargs: Any) -> Any:
+        scanned.append(identifier)
+        return scan_table(table, identifier, *args, **kwargs)
+
+    monkeypatch.setattr(silver_audit, "scan_table", spy)
+    return scanned
+
+
+def test_an_audit_stopped_in_its_checks_resumes_after_the_last_completed_one(
+    silver: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh = audit_silver(silver, AuditOptions(batch_size=7))
+    work_dir = tmp_path / "audit"
+    options = AuditOptions(batch_size=7, work_dir=work_dir)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            silver_audit_sql, "_check_groups", Mock(side_effect=OSError("power"))
+        )
+        with pytest.raises(OSError, match="power"):
+            audit_silver(silver, options)
+    assert (work_dir / "audit.duckdb").is_file()
+    scanned = _scans(monkeypatch)
+    orphans = Mock(wraps=silver_audit_sql._check_orphans)
+    monkeypatch.setattr(silver_audit_sql, "_check_orphans", orphans)
+
+    report = audit_silver(silver, options)
+
+    assert scanned == []
+    orphans.assert_not_called()  # completed before the stop
+    assert _outcomes(report) == _outcomes(fresh)
+    assert report.rows_scanned == fresh.rows_scanned
+    assert [(s.form, s.filing_id) for s in report.samples] == [
+        (s.form, s.filing_id) for s in fresh.samples
+    ]
+    assert all(s.lines for s in report.samples)
+    assert not (work_dir / "audit.duckdb").exists()
+
+
+def test_an_audit_stopped_in_a_scan_scans_that_table_again(
+    silver: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh = audit_silver(silver, AuditOptions(batch_size=3))
+    options = AuditOptions(batch_size=3, work_dir=tmp_path / "audit")
+    load = silver_audit_sql.ScratchDatabase.load
+
+    def stop_while_storing_cells(
+        self: silver_audit_sql.ScratchDatabase, identifier: str, *args: Any
+    ) -> None:
+        load(self, identifier, *args)
+        if identifier == CELLS:
+            raise OSError("power")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            silver_audit_sql.ScratchDatabase, "load", stop_while_storing_cells
+        )
+        with pytest.raises(OSError, match="power"):
+            audit_silver(silver, options)
+    scanned = _scans(monkeypatch)
+
+    report = audit_silver(silver, options)
+
+    order = [table.identifier for table in SILVER_TABLES]
+    assert scanned == order[order.index(CELLS) :]
+    assert _outcomes(report) == _outcomes(fresh)
+    assert report.rows_scanned == fresh.rows_scanned
+
+
+def test_a_changed_table_starts_the_stopped_audit_over(
+    silver: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = AuditOptions(work_dir=tmp_path / "audit")
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            silver_audit_sql, "_check_groups", Mock(side_effect=OSError("power"))
+        )
+        with pytest.raises(OSError, match="power"):
+            audit_silver(silver, options)
+    _change(LINKS, "link_id", f"{TEN_K}:link:000001", {}, keep=True)(silver)
+    scanned = _scans(monkeypatch)
+
+    report = audit_silver(silver, options)
+
+    assert scanned == [table.identifier for table in SILVER_TABLES]
+    assert ("unique:link_id", LINKS) in _statuses(report, "FAIL")
+
+
+def test_worker_processes_give_the_same_report(silver: Path) -> None:
+    serial = audit_silver(silver, AuditOptions(batch_size=3))
+
+    parallel = audit_silver(silver, AuditOptions(batch_size=3, workers=2))
+
+    assert _outcomes(parallel) == _outcomes(serial)
+    assert [s.lines for s in parallel.samples] == [s.lines for s in serial.samples]

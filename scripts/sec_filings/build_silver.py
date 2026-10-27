@@ -52,6 +52,19 @@ def parse_args() -> argparse.Namespace:
         "(default: <data-dir>/bronze/sec_filings)",
     )
     parser.add_argument(
+        "--audit-work-dir",
+        type=Path,
+        default=None,
+        help="Keep the integrity audit's scratch database here, so an interrupted "
+        "audit resumes when run again (default: a temporary directory)",
+    )
+    parser.add_argument(
+        "--audit-workers",
+        type=int,
+        default=1,
+        help="Processes validating rows in the integrity audit (default: 1)",
+    )
+    parser.add_argument(
         "--taxonomy-cache-dir",
         type=Path,
         default=None,
@@ -102,6 +115,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--check-only takes no stage range, taxonomy download or workers")
     if args.xbrl_workers < 1:
         parser.error("--xbrl-workers must be at least 1")
+    if args.audit_workers < 1:
+        parser.error("--audit-workers must be at least 1")
     try:
         select_stages(SILVER_STAGES, args.from_stage, args.to_stage)
     except ValueError as error:
@@ -183,6 +198,14 @@ def _print_summary(summary: Mapping[str, Any]) -> None:
             print(f"{label}: {check}")
 
 
+def _audit_options(args: argparse.Namespace) -> AuditOptions:
+    return AuditOptions(
+        bronze_dir=args.bronze_dir,
+        work_dir=args.audit_work_dir,
+        workers=args.audit_workers,
+    )
+
+
 def main() -> int:
     """Run the pipeline, or only its audit.
 
@@ -198,7 +221,8 @@ def main() -> int:
     if args.check_only:
         try:
             report = audit_silver(
-                args.data_dir, AuditOptions(bronze_dir=args.bronze_dir)
+                args.data_dir,
+                _audit_options(args),
             )
         except FileNotFoundError:  # no catalog: logged as silver_integrity_failed
             return 2
@@ -210,6 +234,7 @@ def main() -> int:
         to_stage=args.to_stage,
         taxonomy=_taxonomy(args),
         bronze_dir=args.bronze_dir,
+        audit=_audit_options(args),
     )
     _print_summary(result.summary())
     return 0 if result.completed else 1

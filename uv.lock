@@ -514,6 +514,7 @@ dependencies = [
     { name = "structlog" },
     { name = "vnai" },
     { name = "vnstock" },
+    { name = "zstandard" },
 ]
 
 [package.dev-dependencies]
@@ -541,6 +542,7 @@ requires-dist = [
     { name = "structlog", specifier = ">=26.1.0" },
     { name = "vnai", specifier = ">=2.6.0", index = "https://vnstocks.com/api/simple" },
     { name = "vnstock", specifier = ">=4.0.7", index = "https://vnstocks.com/api/simple" },
+    { name = "zstandard", specifier = ">=0.25.0" },
 ]
 
 [package.metadata.requires-dev]

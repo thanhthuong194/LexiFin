@@ -135,6 +135,7 @@ class Settings:
     xbrl_workers: int
     sample_seconds: float
     env: dict[str, str]
+    audit_workers: int = 1
 
 
 def in_sample(filing_id: str, fraction: float) -> bool:
@@ -317,6 +318,8 @@ def run_scenario(
             stage.name,
             "--xbrl-workers",
             str(settings.xbrl_workers),
+            "--audit-workers",
+            str(settings.audit_workers),
             *(["--allow-taxonomy-network"] if settings.allow_taxonomy_network else []),
         ]
         log_path = settings.work_dir / "logs" / f"{name}.{stage.name}.jsonl"
@@ -400,7 +403,8 @@ def _header(
         f"- Code: `{_git_revision()}`; máy: {_machine()}",
         f"- Bronze: `{bronze_dir}`; taxonomy: `{settings.taxonomy_cache_dir}`, "
         + (network if settings.allow_taxonomy_network else "offline")
-        + f"; XBRL workers: {settings.xbrl_workers}",
+        + f"; XBRL workers: {settings.xbrl_workers}"
+        + f"; audit workers: {settings.audit_workers}",
         (
             f"- Mức dữ liệu: {', '.join(b.sample.label for b in builds)} filing của "
             "Bronze (mẫu lồng nhau theo hash filing_id)"
@@ -709,6 +713,12 @@ def parse_args() -> argparse.Namespace:
         help="Passed to build_silver.py --xbrl-workers (default: 1)",
     )
     parser.add_argument(
+        "--audit-workers",
+        type=int,
+        default=1,
+        help="Passed to build_silver.py --audit-workers (default: 1)",
+    )
+    parser.add_argument(
         "--fractions",
         type=float,
         nargs="+",
@@ -762,6 +772,7 @@ def main() -> int:
         allow_taxonomy_network=args.allow_taxonomy_network,
         xbrl_workers=args.xbrl_workers,
         sample_seconds=args.sample_seconds,
+        audit_workers=args.audit_workers,
         env={**os.environ, "TMPDIR": str(tmp_dir)},
     )
     builds: list[Scenario] = []

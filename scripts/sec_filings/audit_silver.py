@@ -66,6 +66,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also re-hash every filing's Bronze files and stored byte spans",
     )
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        default=None,
+        help="Keep the scratch database here, so an interrupted audit resumes "
+        "when run again (default: a temporary directory)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=_count(1),
+        default=1,
+        help="Processes validating rows against their contracts (default: 1)",
+    )
     return parser.parse_args()
 
 
@@ -114,6 +127,8 @@ def main() -> int:
                 batch_size=args.batch_size,
                 verify_source_hashes=args.verify_source_hashes,
                 bronze_dir=args.bronze_dir,
+                work_dir=args.work_dir,
+                workers=args.workers,
             ),
         )
     except Exception:  # noqa: BLE001 - logged as silver_integrity_failed; exit code 2 reports it

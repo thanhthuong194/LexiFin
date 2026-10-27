@@ -10,12 +10,14 @@
 #
 # BRONZE holds sec-edgar-filings/ and _metadata/; the tables land in
 # OUT/silver/sec_filings/, next to OUT/_catalog, the taxonomy cache
-# (_cache/arelle), logs/, tmp/ (TMPDIR: the audit spills there) and bench/.
+# (_cache/arelle), logs/, tmp/ (TMPDIR: the audit spills there; tmp/audit keeps
+# its scratch database, so an interrupted audit resumes) and bench/.
 # warm and bench are skipped once their report exists. build runs offline: when
 # a stage stops on taxonomy files missing from the cache, they are downloaded
 # and the build resumes (at most TAXONOMY_RETRIES times, default 20). Every Python step
 # runs under a hard memory cap (MEMORY_MAX, default 12G): over it, the step is
-# killed instead of the machine swapping. WORKERS (default 3) is --xbrl-workers.
+# killed instead of the machine swapping. WORKERS (default 3) is --xbrl-workers,
+# AUDIT_WORKERS (default 4) --audit-workers.
 set -euo pipefail
 
 if (($# < 3)); then
@@ -90,7 +92,8 @@ build() {
     # Appended, so a resumed build keeps the log of the runs before it.
     capped /usr/bin/time -v -a -o "$out/logs/build.time" \
       uv run python scripts/sec_filings/build_silver.py \
-      --bronze-dir "$bronze" --data-dir "$out" --xbrl-workers "$workers" "$@" \
+      --bronze-dir "$bronze" --data-dir "$out" --xbrl-workers "$workers" \
+      --audit-work-dir "$out/tmp/audit" --audit-workers "${AUDIT_WORKERS:-4}" "$@" \
       >>"$out/logs/build.jsonl" 2>&1 || status=$?
     tail -n "+$start" "$out/logs/build.jsonl" >"$attempt_log"
     if ((status != 1 || attempt >= ${TAXONOMY_RETRIES:-20})) ||

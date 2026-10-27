@@ -2180,10 +2180,12 @@ def test_xbrl_enrichment_builds_dimensions_and_footnotes_and_reruns_skip(
         loads.append(files[0].document_id)
         return load_instance(files, **options)
 
-    # Every XBRL stage loads through the same loader: count this stage's loads.
+    # Every XBRL stage loads through the same loader: count the loads this
+    # stage needs, not the facts stage's loads it is served from the cache.
     assert run_sec_filings_silver(tmp_path, to_stage="xbrl_facts").completed
     with monkeypatch.context() as patch:
         patch.setattr(xbrl_instance_loading, "load_instance", counted_load)
+        patch.setattr(xbrl_instance_loading.InstanceCache, "get", lambda *_: None)
         first = run_sec_filings_silver(
             tmp_path, from_stage="xbrl_enrichment", to_stage="xbrl_enrichment"
         )
@@ -2422,6 +2424,8 @@ def test_parser_error_in_one_instance_writes_no_instance(
 
     facts = run_sec_filings_silver(tmp_path, to_stage="xbrl_facts")
     monkeypatch.setattr(xbrl_instance_loading, "load_instance", broken_load)
+    # Loaded again, not served from the earlier stages' cache.
+    shutil.rmtree(tmp_path / "_cache" / "xbrl_instances")
     result = run_sec_filings_silver(tmp_path, from_stage="xbrl_enrichment")
 
     summary = result.xbrl_enrichment

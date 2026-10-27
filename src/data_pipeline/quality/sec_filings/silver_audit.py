@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Mapping, Sequence
-from contextlib import closing
+from collections.abc import Iterator, Mapping
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from multiprocessing import get_context
 from pathlib import Path
 from time import perf_counter
-from typing import Any, get_args
+from typing import get_args
 
 from pyiceberg.catalog import Catalog
 from pyiceberg.exceptions import NoSuchNamespaceError, NoSuchTableError
@@ -16,6 +18,13 @@ from pyiceberg.table import Table
 from src.data_pipeline.contracts.ingestion import FormType
 from src.data_pipeline.quality.sec_filings.silver_audit_bronze import (
     check_bronze_files,
+)
+from src.data_pipeline.quality.sec_filings.silver_audit_progress import (
+    AuditProgress,
+    NoProgress,
+    audit_fingerprint,
+    discard_scratch,
+    prepare_scratch,
 )
 from src.data_pipeline.quality.sec_filings.silver_audit_report import (
     FilingSample,
@@ -34,6 +43,7 @@ from src.data_pipeline.quality.sec_filings.silver_audit_scan import (
 )
 from src.data_pipeline.quality.sec_filings.silver_audit_sql import (
     ScratchDatabase,
+    deriver,
     run_sql_checks,
 )
 from src.data_pipeline.quality.sec_filings.silver_model import SILVER_TABLES
@@ -227,13 +237,68 @@ def _check_samples(
 @dataclass(frozen=True)
 class AuditOptions:
     """How much of the audit reads: rows per batch, filings traced per form,
-    and whether every filing's Bronze bytes are re-hashed."""
+    and whether every filing's Bronze bytes are re-hashed.
+
+    With a `work_dir`, the scratch database lives there and records each
+    completed table scan and set-based check, so an audit stopped by a crash
+    or power loss resumes where it stopped when it runs again on the same
+    snapshots with the same settings and code; the database is removed once
+    an audit completes. Without one, it lives in a temporary directory.
+    """
 
     samples_per_form: int = 1
     batch_size: int = 10_000
     verify_source_hashes: bool = False
     # The SEC Bronze directory; None means <data_dir>/bronze/sec_filings.
     bronze_dir: Path | None = None
+    work_dir: Path | None = None
+    # Processes validating data files against their record contracts; the
+    # report does not depend on it.
+    workers: int = 1
+
+
+@contextmanager
+def _executor(workers: int) -> Iterator[ProcessPoolExecutor | None]:
+    """Worker processes for the row scans, or None to scan in this process."""
+
+    if workers == 1:
+        yield None
+        return
+    # Spawned workers start clean instead of copying this process's memory.
+    with ProcessPoolExecutor(workers, mp_context=get_context("spawn")) as executor:
+        yield executor
+
+
+@contextmanager
+def _scratch(
+    options: AuditOptions, report: SilverAuditReport
+) -> Iterator[tuple[ScratchDatabase, AuditProgress | NoProgress]]:
+    """The scratch database and the progress it holds."""
+
+    if options.work_dir is None:
+        with (
+            tempfile.TemporaryDirectory(prefix="silver_audit_") as scratch_dir,
+            closing(ScratchDatabase(Path(scratch_dir) / "audit.duckdb")) as scratch,
+        ):
+            yield scratch, NoProgress()
+            logger.info(
+                "silver_integrity_scratch_database",
+                size_bytes=(Path(scratch_dir) / "audit.duckdb").stat().st_size,
+            )
+        return
+    fingerprint = audit_fingerprint(
+        report,
+        {
+            "samples_per_form": options.samples_per_form,
+            "batch_size": options.batch_size,
+        },
+    )
+    path = prepare_scratch(options.work_dir.expanduser().resolve(), fingerprint)
+    with closing(ScratchDatabase(path)) as scratch:
+        progress = AuditProgress(scratch.connection, report, fingerprint)
+        yield scratch, progress
+        logger.info("silver_integrity_scratch_database", size_bytes=path.stat().st_size)
+    discard_scratch(path)
 
 
 def _check_rows(
@@ -253,30 +318,38 @@ def _check_rows(
     )
     batch_size = options.batch_size
     samples = SampleRows(FORMS, options.samples_per_form)
-    with (
-        tempfile.TemporaryDirectory(prefix="silver_audit_") as scratch_dir,
-        closing(ScratchDatabase(Path(scratch_dir) / "audit.db")) as scratch,
-    ):
-
-        def store(identifier: str, rows: Sequence[dict[str, Any]]) -> None:
-            scratch.insert(identifier, rows)
-            samples.add(identifier, rows)
-
-        with timed_operation("silver_audit.scan", batch_size=batch_size):
+    with _scratch(options, report) as (scratch, progress):
+        with (
+            _executor(options.workers) as executor,
+            timed_operation("silver_audit.scan", batch_size=batch_size),
+        ):
             for audited in SILVER_TABLES:
-                report.rows_scanned += scan_table(
-                    tables[audited.identifier],
-                    audited.identifier,
+                identifier = audited.identifier
+                step = f"scan:{identifier}"
+                done, state = progress.replay(step)
+                if done:  # the scanned rows, and the samples kept up to then
+                    rows, samples = state
+                    scratch.row_counts[identifier] = rows
+                    report.rows_scanned += rows
+                    continue
+                scratch.reset(identifier)
+                scan = scan_table(
+                    tables[identifier],
+                    identifier,
                     batch_size,
                     report,
-                    store,
+                    keep=samples.keep(identifier),
+                    derive=deriver(identifier),
+                    executor=executor,
                 )
+                scratch.load(identifier, scan.paths, scan.rows, scan.derived)
+                samples.add(identifier, scan.kept)
+                report.rows_scanned += scan.rows
+                progress.complete(step, (scan.rows, samples))
+        if progress.replayed:
+            logger.info("silver_integrity_resumed", steps_replayed=progress.replayed)
         with timed_operation("silver_audit.integrity"):
-            run_sql_checks(scratch, report)
-        logger.info(
-            "silver_integrity_scratch_database",
-            size_bytes=(Path(scratch_dir) / "audit.db").stat().st_size,
-        )
+            run_sql_checks(scratch, report, progress)
         with timed_operation("silver_audit.bronze"):
             check_bronze_files(
                 scratch,

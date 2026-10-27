@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping
+from concurrent.futures import Executor
+from dataclasses import dataclass, field
 from datetime import date
+from functools import partial
 from types import NoneType
 from typing import Any, Literal, get_args, get_origin
+from urllib.parse import urlsplit
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -41,9 +45,10 @@ from src.data_pipeline.contracts.sec_filings.xbrl_networks import (
     XbrlRelationshipRecord,
 )
 from src.data_pipeline.quality.sec_filings.silver_audit_report import (
+    SAMPLE_IDS,
     SilverAuditReport,
 )
-from src.data_pipeline.storage.iceberg import scan_batches, snapshot_total
+from src.data_pipeline.storage.iceberg import snapshot_total
 from src.data_pipeline.storage.sec_filings.content_blocks import CONTENT_BLOCKS_TABLE
 from src.data_pipeline.storage.sec_filings.document_links import DOCUMENT_LINKS_TABLE
 from src.data_pipeline.storage.sec_filings.document_table_cells import (
@@ -195,41 +200,135 @@ def check_data_files(table: Table, identifier: str, report: SilverAuditReport) -
     return run.failed_count == 0
 
 
-def scan_table(
-    table: Table,
-    identifier: str,
-    batch_size: int,
-    report: SilverAuditReport,
-    store: Callable[[str, Sequence[dict[str, Any]]], None],
-) -> int:
-    """Validate every row against its contract and pass each batch to `store`.
+def local_path(path: str) -> str:
+    """A data file's path on this machine (Silver warehouses are local)."""
 
-    Returns the rows read, which must equal the snapshot's total-records.
+    return urlsplit(path).path if path.startswith("file:") else path
+
+
+@dataclass(frozen=True)
+class Keep:
+    """The rows of a scan to keep for the sampled filings: those whose
+    `column` holds one of `values`, or every row when `column` is None."""
+
+    column: str | None
+    values: frozenset[str] = frozenset()
+
+
+@dataclass
+class FileScan:
+    """What validating one data file found.
+
+    `failures` holds the first SAMPLE_IDS failing rows (identifier, problem)
+    of `failed`; `kept` the rows `Keep` selects; `derived` the derived
+    column's value of every row, in file order, for a table that has one.
+    """
+
+    rows: int = 0
+    failed: int = 0
+    failures: list[tuple[str, str]] = field(default_factory=list)
+    kept: list[dict[str, Any]] = field(default_factory=list)
+    derived: list[object] = field(default_factory=list)
+
+
+def scan_file(
+    identifier: str,
+    path: str,
+    batch_size: int,
+    keep: Keep | None,
+    derive: Callable[[Mapping[str, Any]], object] | None,
+) -> FileScan:
+    """Validate every row of one data file against its record contract.
+
+    Runs in a worker process or in the caller; reads `batch_size` rows at a
+    time on this thread and returns memory to the allocator afterwards.
     """
 
     model = RECORD_MODELS[identifier]
     key = next(iter(model.model_fields))
+    result = FileScan()
+    parquet = pq.ParquetFile(local_path(path))
+    for batch in parquet.iter_batches(batch_size=batch_size, use_threads=False):
+        rows = batch.to_pylist()
+        for row in rows:
+            try:
+                model.model_validate(contract_row(identifier, row))
+            except ValidationError as error:
+                result.failed += 1
+                if len(result.failures) < SAMPLE_IDS:
+                    first = error.errors()[0]
+                    location = ".".join(str(part) for part in first["loc"]) or "row"
+                    result.failures.append(
+                        (str(row[key]), f"{row[key]}: {location}: {first['msg']}")
+                    )
+        if keep is not None:
+            result.kept += [
+                row
+                for row in rows
+                if keep.column is None or row[keep.column] in keep.values
+            ]
+        if derive is not None:
+            result.derived += map(derive, rows)
+        result.rows += len(rows)
+    parquet.close()
+    pa.default_memory_pool().release_unused()
+    return result
+
+
+@dataclass
+class TableScan:
+    """A table's rows: how many, the data files read, the rows kept for the
+    sampled filings and the derived column's values by data file."""
+
+    rows: int
+    paths: list[str]
+    kept: list[dict[str, Any]]
+    derived: dict[str, list[object]] | None
+
+
+def scan_table(  # noqa: PLR0913 - the scan's inputs and its executor
+    table: Table,
+    identifier: str,
+    batch_size: int,
+    report: SilverAuditReport,
+    *,
+    keep: Keep | None,
+    derive: Callable[[Mapping[str, Any]], object] | None = None,
+    executor: Executor | None = None,
+) -> TableScan:
+    """Validate every row against its contract, one data file per task.
+
+    Files are validated by `executor` (in this process without one) and
+    their findings merged in file order, so the report does not depend on
+    the number of workers. The rows read must equal the snapshot's
+    total-records.
+    """
+
+    paths = [task.file.file_path for task in table.scan().plan_files()]
+    task = partial(
+        scan_file, identifier, batch_size=batch_size, keep=keep, derive=derive
+    )
+    results = map(task, paths) if executor is None else executor.map(task, paths)
+    scan = TableScan(0, paths, [], None if derive is None else {})
     with report.check(
         "row_contract",
         identifier,
         "every row validates against its record contract: required values, "
         "types, enums, ranges, SHA-256 formats, derived IDs and row hashes",
     ) as run:
-        for batch in scan_batches(table, batch_size=batch_size):
-            rows = batch.to_pylist()
-            for row in rows:
-                try:
-                    model.model_validate(contract_row(identifier, row))
-                except ValidationError as error:
-                    first = error.errors()[0]
-                    location = ".".join(str(part) for part in first["loc"]) or "row"
-                    run.found(row[key], f"{row[key]}: {location}: {first['msg']}")
-            store(identifier, rows)
-            run.rows_checked += len(rows)
+        for path, result in zip(paths, results, strict=True):
+            for identifier_value, problem in result.failures:
+                run.found(identifier_value, problem)
+            run.failed_count += result.failed - len(result.failures)
+            run.rows_checked += result.rows
+            scan.kept += result.kept
+            if scan.derived is not None:
+                scan.derived[path] = result.derived
         expected = snapshot_total(table, "total-records")
         if run.rows_checked != expected:
             run.found(
                 identifier,
                 f"read {run.rows_checked} rows; the snapshot summary says {expected}",
             )
-    return run.rows_checked
+    scan.rows = run.rows_checked
+    return scan
