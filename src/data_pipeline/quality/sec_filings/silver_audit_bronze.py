@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
 from src.data_pipeline.contracts.sec_filings.filing_entities import FilingEntityRecord
@@ -12,8 +13,6 @@ from src.data_pipeline.storage.bronze import (
     sha256_bytes,
     sha256_file,
 )
-from src.data_pipeline.storage.sec_filings.documents import DOCUMENTS_TABLE
-from src.data_pipeline.storage.sec_filings.filing_entities import FILING_ENTITIES_TABLE
 from src.data_pipeline.storage.sec_filings.filings import FILINGS_TABLE
 from src.data_pipeline.transforms.sec_filings.documents import check_document_offsets
 from src.data_pipeline.transforms.sec_filings.filing_entities import (
@@ -62,24 +61,17 @@ def _hashes_problem(
     return None
 
 
-def _stored_filing(
-    scratch: ScratchDatabase, filing_id: str
+def _as_records(
+    filing: dict[str, Any],
+    documents: list[dict[str, Any]],
+    entities: list[dict[str, Any]],
 ) -> tuple[FilingRecord, list[DocumentRecord], list[FilingEntityRecord]]:
-    """A filing with its documents and entities, in ordinal order, as records."""
+    """A filing with its documents and entities (in ordinal order) as records."""
 
-    row = scratch.stored_rows(FILINGS_TABLE, "filing_id", filing_id)[0]
-    documents = scratch.stored_rows(DOCUMENTS_TABLE, "filing_id", filing_id)
-    entities = scratch.stored_rows(FILING_ENTITIES_TABLE, "filing_id", filing_id)
     return (
-        FilingRecord.model_validate(row),
-        sorted(
-            (DocumentRecord.model_validate(d) for d in documents),
-            key=lambda document: document.document_ordinal,
-        ),
-        sorted(
-            (FilingEntityRecord.model_validate(e) for e in entities),
-            key=lambda entity: entity.entity_ordinal,
-        ),
+        FilingRecord.model_validate(filing),
+        [DocumentRecord.model_validate(d) for d in documents],
+        [FilingEntityRecord.model_validate(e) for e in entities],
     )
 
 
@@ -93,8 +85,8 @@ def check_bronze_files(
     """Every filing's Bronze files exist inside the Bronze directory; with `verify_hashes`,
     they also match their SHA-256 and every document and entity span.
 
-    Filings are read one at a time from the scratch database, where the
-    filing, document and entity tables are stored whole.
+    Filings are read with their documents and entities from the scratch
+    database, where the three tables are stored whole.
     """
 
     with (
@@ -112,9 +104,12 @@ def check_bronze_files(
     ):
         if not verify_hashes:
             hashes.skip("Bronze is re-hashed only with --verify-source-hashes")
-        for filing_id in scratch.filing_ids():
+        for row, document_rows, entity_rows in scratch.filings_with_children():
+            filing_id = row["filing_id"]
             try:
-                filing, documents, entities = _stored_filing(scratch, filing_id)
+                filing, documents, entities = _as_records(
+                    row, document_rows, entity_rows
+                )
             except ValueError:
                 continue  # rows that break their contract fail row_contract
             paths.rows_checked += 1

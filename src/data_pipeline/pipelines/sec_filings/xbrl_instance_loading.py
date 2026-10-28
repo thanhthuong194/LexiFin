@@ -7,6 +7,7 @@ import shutil
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, Mapping, Sequence
 from concurrent.futures import Future, ProcessPoolExecutor
+from contextlib import suppress
 from dataclasses import replace
 from functools import cache, partial
 from importlib.metadata import version
@@ -16,11 +17,11 @@ from typing import NoReturn
 
 import zstandard
 
+from src.data_pipeline.code_version import code_sha256
 from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
 from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
 from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.sec_filings.documents import read_document_content
-from src.data_pipeline.transforms.sec_filings import xbrl_processor
 from src.data_pipeline.transforms.sec_filings.xbrl_processor import (
     LoadedInstance,
     ProcessorSettings,
@@ -46,16 +47,17 @@ _DTS_ROLES = frozenset(
 # raising what reading or loading them raised.
 InstanceLoad = Callable[[], tuple[list[SourceFile], LoadedInstance]]
 
+# Part of every cache key: entries written in another format are never read.
+_ENTRY_FORMAT = "pickle-zstd-checksum-1"
+
 
 @cache
 def _loader_version() -> str:
-    """The processor version and the code that turns its model into records:
-    a load cached by other code is not reused."""
+    """The processor version and the code that turns its model into records
+    (the loader and every module of ours it imports): a load cached by other
+    code is not reused."""
 
-    digest = hashlib.sha256(version("arelle-release").encode())
-    for path in sorted(Path(xbrl_processor.__file__).parent.glob("xbrl_*.py")):
-        digest.update(path.name.encode() + b"\x00" + path.read_bytes())
-    return digest.hexdigest()
+    return f"{version('arelle-release')}:{code_sha256(load_instance.__module__)}"
 
 
 class InstanceCache:
@@ -66,8 +68,13 @@ class InstanceCache:
     next ones read it instead of loading the DTS again. An entry is keyed by
     the instance, its target, the hash of its source set and the loader
     version, so a changed source or loader is never served from the cache.
-    The files themselves are still read and verified by every stage. An
-    unreadable entry is a miss; entries are written atomically.
+    The files themselves are still read and verified by every stage.
+
+    The cache never decides a row: an entry carries a zstd content checksum,
+    so one damaged on disk (a power loss, a failing drive) is detected and
+    is a miss, like any entry that cannot be read, and the instance is loaded
+    again. Entries are written atomically, and one that cannot be written
+    (a full or failing disk) is skipped with a warning: the load is kept.
     """
 
     def __init__(self, directory: Path) -> None:
@@ -81,6 +88,7 @@ class InstanceCache:
                 instance.target_name or "",
                 instance.source_set_sha256,
                 _loader_version(),
+                _ENTRY_FORMAT,
             )
         )
         return self.directory / f"{hashlib.sha256(key.encode()).hexdigest()}.pkl.zst"
@@ -88,37 +96,52 @@ class InstanceCache:
     def get(self, instance: XbrlInstanceRecord) -> LoadedInstance | None:
         path = self._path(instance)
         try:
-            data = zstandard.ZstdDecompressor().decompress(path.read_bytes())
-            loaded = pickle.loads(data)
+            compressed = path.read_bytes()
         except FileNotFoundError:
             return None
-        except (
-            OSError,
-            zstandard.ZstdError,
-            pickle.UnpicklingError,
-            EOFError,
-        ) as error:
-            logger.warning(
-                "xbrl_instance_cache_unreadable",
-                instance_id=instance.instance_id,
-                error=str(error),
-            )
+        except OSError as error:
+            self._log_miss(instance, error)
+            return None
+        try:
+            loaded = pickle.loads(zstandard.ZstdDecompressor().decompress(compressed))
+        except MemoryError:
+            raise  # the process is out of memory; loading afresh needs more
+        # Unpickling bytes that passed the checksum but come from another
+        # version of a class can raise nearly anything; any of it is a miss.
+        except Exception as error:  # noqa: BLE001 - logged, then loaded afresh
+            self._log_miss(instance, error)
             return None
         if not isinstance(loaded, LoadedInstance):
+            self._log_miss(instance, TypeError(type(loaded).__name__))
             return None
         # Nothing was downloaded to serve it.
         return replace(loaded, downloaded_uris=[])
 
+    def _log_miss(self, instance: XbrlInstanceRecord, error: Exception) -> None:
+        logger.warning(
+            "xbrl_instance_cache_unreadable",
+            instance_id=instance.instance_id,
+            error=repr(error),
+        )
+
     def put(self, instance: XbrlInstanceRecord, loaded: LoadedInstance) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
         path = self._path(instance)
         partial_path = path.with_name(f"{path.name}.{os.getpid()}.partial")
-        partial_path.write_bytes(
-            zstandard.ZstdCompressor(level=3).compress(
-                pickle.dumps(loaded, protocol=pickle.HIGHEST_PROTOCOL)
-            )
+        compressed = zstandard.ZstdCompressor(level=3, write_checksum=True).compress(
+            pickle.dumps(loaded, protocol=pickle.HIGHEST_PROTOCOL)
         )
-        partial_path.replace(path)
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            partial_path.write_bytes(compressed)
+            partial_path.replace(path)
+        except OSError as error:
+            with suppress(OSError):
+                partial_path.unlink(missing_ok=True)
+            logger.warning(
+                "xbrl_instance_cache_write_failed",
+                instance_id=instance.instance_id,
+                error=repr(error),
+            )
 
     def clear(self) -> None:
         """Remove every entry: no later stage needs them."""

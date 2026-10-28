@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --locked
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check --output-format=github .
+      - name: Types
+        run: uv run mypy src
+      - name: Dead code
+        run: uv run vulture src vulture_whitelist.py
+      - name: Duplication
+        run: >-
+          npx --yes jscpd@4 --format python --gitignore --min-tokens 60
+          --threshold 3 --ignore "**/tests/**,**/.venv/**" src scripts
+      # Offline: the integration tests use fake fetchers and a taxonomy fixture.
+      - name: Tests
+        run: uv run pytest

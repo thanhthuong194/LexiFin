@@ -386,47 +386,6 @@ class ScratchDatabase:
         self._create(identifier)
         self.row_counts[identifier] = 0
 
-    def insert(self, identifier: str, rows: Sequence[Mapping[str, Any]]) -> None:
-        """Store the checked columns of some rows given as dicts."""
-
-        columns = self.columns[identifier]
-        stored = pa.Table.from_pylist(
-            [{column: row[column] for column in columns} for row in rows],
-            schema=pa.schema([self.schemas[identifier].field(c) for c in columns]),
-        )
-        derive = _DERIVED.get(identifier)
-        if derive is not None:
-            stored = stored.append_column(
-                self.schemas[identifier].field(derive[0]),
-                pa.array(map(derive[1], rows), pa.int64()),
-            )
-        self._from_arrow(
-            f"INSERT INTO {_name(identifier)} BY NAME SELECT * FROM {{}}", stored
-        )
-        if identifier == XBRL_INSTANCES_TABLE:
-            sources = pa.Table.from_pylist(
-                [
-                    {
-                        "instance_id": row["instance_id"],
-                        "position": position,
-                        "document_id": document_id,
-                    }
-                    for row in rows
-                    for position, document_id in enumerate(row["source_document_ids"])
-                ],
-                schema=pa.schema(
-                    [
-                        ("instance_id", pa.string()),
-                        ("position", pa.int32()),
-                        ("document_id", pa.string()),
-                    ]
-                ),
-            )
-            self._from_arrow(
-                f"INSERT INTO {_INSTANCE_SOURCES} BY NAME SELECT * FROM {{}}", sources
-            )
-        self.row_counts[identifier] += len(rows)
-
     def load(
         self,
         identifier: str,
@@ -489,21 +448,30 @@ class ScratchDatabase:
             yield from chunk
         cursor.close()
 
-    def stored_rows(
-        self, identifier: str, column: str, value: object
-    ) -> list[dict[str, Any]]:
-        """The stored columns of the rows whose `column` equals `value`, as dicts."""
+    def filings_with_children(
+        self,
+    ) -> Iterator[tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]]:
+        """Every stored filing row with its document and entity rows (in
+        ordinal order), as dicts, in filing_id order.
 
-        cursor = self.connection.execute(
-            f"SELECT * FROM {_name(identifier)} WHERE {column} = ?", (value,)
-        )
-        names = [description[0] for description in cursor.description]
-        return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+        DuckDB joins the three tables in one pass (hash aggregation, spilled
+        beyond the memory limit) instead of being searched per filing: the
+        scratch tables have no index.
+        """
 
-    def filing_ids(self) -> Iterator[str]:
-        """Every stored filing_id, in order."""
-
-        return (row[0] for row in self.rows("SELECT filing_id FROM filings ORDER BY 1"))
+        filings = _name(FILINGS_TABLE)
+        documents = _name(DOCUMENTS_TABLE)
+        entities = _name(FILING_ENTITIES_TABLE)
+        for filing, document_rows, entity_rows in self.rows(
+            f"WITH d AS (SELECT filing_id, list({documents} ORDER BY "
+            f"document_ordinal) AS rows FROM {documents} GROUP BY filing_id), "
+            f"e AS (SELECT filing_id, list({entities} ORDER BY entity_ordinal) "
+            f"AS rows FROM {entities} GROUP BY filing_id) "
+            f"SELECT {filings}, d.rows, e.rows FROM {filings} "
+            "LEFT JOIN d USING (filing_id) LEFT JOIN e USING (filing_id) "
+            f"ORDER BY {filings}.filing_id"
+        ):
+            yield filing, document_rows or [], entity_rows or []
 
     def local_names(self, concept_ids: Collection[str]) -> dict[str, str]:
         """The local names of concepts, by concept_id."""

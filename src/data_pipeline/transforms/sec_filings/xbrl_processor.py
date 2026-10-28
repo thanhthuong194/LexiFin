@@ -73,7 +73,8 @@ class ProcessorSettings:
 
     With `instance_cache_dir`, an instance loaded by one XBRL stage is kept
     there, compressed, for the next stages (see InstanceCache); None loads
-    every instance in every stage.
+    every instance in every stage. `run_sec_filings_silver` fills in
+    `<data_dir>/_cache/xbrl_instances` when it is None.
     """
 
     cache_dir: Path

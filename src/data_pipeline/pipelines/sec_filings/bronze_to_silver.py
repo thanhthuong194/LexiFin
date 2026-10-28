@@ -346,7 +346,7 @@ def _with_instance_cache(
     return replace(settings, instance_cache_dir=data_dir / "_cache" / "xbrl_instances")
 
 
-def run_sec_filings_silver(  # noqa: PLR0913
+def run_sec_filings_silver(  # noqa: PLR0913 - keyword-only run options
     data_dir: Path,
     *,
     from_stage: str | None = None,

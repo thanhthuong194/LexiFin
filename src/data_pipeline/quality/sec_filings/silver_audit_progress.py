@@ -19,17 +19,12 @@ logger = get_logger(__name__)
 
 # The scratch database of a resumable audit, inside its work directory.
 SCRATCH_FILE = "audit.duckdb"
-# Code whose change makes stored steps meaningless: the checks and the
-# record contracts they validate rows against.
-_CODE_DIRECTORIES = (
-    Path(__file__).resolve().parent,
-    Path(__file__).resolve().parents[2] / "contracts" / "sec_filings",
-)
 
 
 def audit_fingerprint(report: SilverAuditReport, settings: Mapping[str, Any]) -> str:
     """What a stored step depends on: every table's snapshot and row count,
-    the audit settings and the audit code. A resumed audit must match it."""
+    and the audit settings, which include its code version. A resumed audit
+    must match it."""
 
     digest = hashlib.sha256()
     tables = {
@@ -37,9 +32,6 @@ def audit_fingerprint(report: SilverAuditReport, settings: Mapping[str, Any]) ->
         for identifier, table in sorted(report.tables.items())
     }
     digest.update(json.dumps([tables, settings], sort_keys=True).encode())
-    for directory in _CODE_DIRECTORIES:
-        for path in sorted(directory.glob("*.py")):
-            digest.update(path.name.encode() + b"\x00" + path.read_bytes())
     return digest.hexdigest()
 
 

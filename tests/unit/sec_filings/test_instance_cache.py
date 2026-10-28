@@ -71,3 +71,25 @@ def test_an_unreadable_entry_misses_and_clear_removes_every_entry(
     assert cache.get(_instance()) is None
     cache.clear()
     assert not (tmp_path / "cache").exists()
+
+
+def test_an_entry_damaged_on_disk_misses_instead_of_serving_other_rows(
+    tmp_path: Path,
+) -> None:
+    cache = InstanceCache(tmp_path / "cache")
+    cache.put(_instance(), _loaded())
+    (entry,) = (tmp_path / "cache").iterdir()
+    damaged = bytearray(entry.read_bytes())
+    damaged[len(damaged) // 2] ^= 0xFF  # same size, one byte flipped
+    entry.write_bytes(bytes(damaged))
+
+    assert cache.get(_instance()) is None
+
+
+def test_an_entry_that_cannot_be_written_is_skipped(tmp_path: Path) -> None:
+    (tmp_path / "cache").write_text("a file where the directory should be")
+    cache = InstanceCache(tmp_path / "cache")
+
+    cache.put(_instance(), _loaded())
+
+    assert cache.get(_instance()) is None

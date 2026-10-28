@@ -1,6 +1,6 @@
 # SEC Silver data model (`sec_filings`)
 
-Tài liệu này mô tả model Silver **đúng như code đang ghi**: 19 bảng Iceberg trong namespace `sec_filings`, dựng từ SEC Bronze bằng `scripts/sec_filings/build_silver.py`. Nguồn sự thật là catalog và code: schema ở `src/data_pipeline/contracts/sec_filings/`, định nghĩa bảng (identifier + schema + partition) ở các `*_SPEC` của `src/data_pipeline/storage/sec_filings/`, thứ tự stage ở `SILVER_STAGES` (`pipelines/sec_filings/silver_stages.py`), bảng/khoá/FK mà audit kiểm ở `quality/sec_filings/silver_model.py`, audit ở `quality/sec_filings/silver_audit.py`. `src/data_pipeline/bronze-silver.md` là ghi chú thiết kế ban đầu, không phải mô tả hiện trạng.
+Tài liệu này mô tả model Silver **đúng như code đang ghi**: 19 bảng Iceberg trong namespace `sec_filings`, dựng từ SEC Bronze bằng `scripts/sec_filings/build_silver.py`. Nguồn sự thật là catalog và code: schema ở `src/data_pipeline/contracts/sec_filings/`, định nghĩa bảng (identifier + schema + partition) ở các `*_SPEC` của `src/data_pipeline/storage/sec_filings/`, thứ tự stage ở `SILVER_STAGES` (`pipelines/sec_filings/silver_stages.py`), bảng/khoá/FK mà audit kiểm ở `quality/sec_filings/silver_model.py`, audit ở `quality/sec_filings/silver_audit.py`.
 
 Số liệu "Rows" là của `data/` (343 filing của 5 công ty), đo ngày 2026-10-07; mỗi bảng có đúng 1 snapshot.
 
@@ -168,7 +168,7 @@ erDiagram
 
 ## 6. Integrity audit
 
-Một cài đặt audit duy nhất (`quality/sec_filings/silver_audit*.py`; bảng, khoá và FK khai báo ở `silver_model.py`), chạy bởi stage cuối `integrity` của pipeline, `build_silver.py --check-only` và `scripts/sec_filings/audit_silver.py` (thêm `--sample-per-form`, `--batch-size`, `--verify-source-hashes`). Chỉ đọc: catalog mở read-only, không tạo bảng, metadata bảng và stat file catalog/warehouse trước/sau phải bằng nhau. Bộ nhớ không tăng theo số row: đọc từng file Parquet theo batch, cột khoá/lineage/group được chép vào một SQLite tạm trên đĩa và kiểm bằng SQL. Kiểm:
+Một cài đặt audit duy nhất (`quality/sec_filings/silver_audit*.py`; bảng, khoá và FK khai báo ở `silver_model.py`), chạy bởi stage cuối `integrity` của pipeline, `build_silver.py --check-only` và `scripts/sec_filings/audit_silver.py` (thêm `--sample-per-form`, `--batch-size`, `--verify-source-hashes`). Chỉ đọc: catalog mở read-only, không tạo bảng, metadata bảng và stat file catalog/warehouse trước/sau phải bằng nhau. Bộ nhớ không tăng theo số row: đọc từng file Parquet theo batch, cột khoá/lineage/group được chép vào một DuckDB tạm trên đĩa và kiểm bằng SQL. Kiểm:
 
 - catalog đủ 19 bảng code định nghĩa (bảng lạ là warning), tên `sec_filings.documents`;
 - contract Pydantic ↔ schema Arrow ↔ schema Iceberg (field ID, kiểu, nullability) ↔ schema và field ID của từng file Parquet; partition spec, location, số file/record khớp snapshot summary;
@@ -180,7 +180,7 @@ Một cài đặt audit duy nhất (`quality/sec_filings/silver_audit*.py`; bả
 - Bronze: file của mọi filing nằm trong `data_dir` và tồn tại; `--verify-source-hashes` hash lại mọi submission, primary document, span của document và entity;
 - lineage mẫu: filing mới nhất của mỗi form (10-K, 10-Q, 8-K) được dựng lại từ Bronze bằng code của stage (documents, entities, sections, blocks, tables, cells) và so với Silver; `section_text_sha256`, `table_content_sha256`, text block bằng cell nối lại và `network_hash` chỉ tính lại trên filing mẫu, vì cần text của cả group.
 
-Kết quả trên `data/` (2026-10-07): 263 PASS, 2 WARN (149 `public_document_count`, 1.154 link unresolved), 0 FAIL, 1 SKIP (`source_hashes` khi không có `--verify-source-hashes`); ~80 s, RSS tối đa ~0,7 GB, SQLite tạm ~1,1 GB trên đĩa.
+Kết quả trên `data/` (2026-10-07): 263 PASS, 2 WARN (149 `public_document_count`, 1.154 link unresolved), 0 FAIL, 1 SKIP (`source_hashes` khi không có `--verify-source-hashes`); ~80 s, RSS tối đa ~0,7 GB, SQLite tạm ~1,1 GB trên đĩa (bản scratch SQLite trước khi chuyển sang DuckDB).
 
 ## 7. Đường join tiêu biểu
 
@@ -269,7 +269,7 @@ join filings f on f.filing_id = d.filing_id where b.block_id = ?;
 ## 9. Hiệu năng (đo trên `data/`, 2026-10-07)
 
 - Dựng từ đầu (offline, cache taxonomy ấm): ~41 phút, RSS tối đa ~2,6 GB; ba stage XBRL chiếm ~36 phút (Arelle nạp DTS mỗi instance). Chạy lại khi không có Bronze mới: ~1,5 phút, RSS tối đa ~0,75 GB; mỗi stage bảng 2–5 s và ≤ 0,4 GB, integrity ~75 s. Các stage đọc tóm tắt group thay vì row và commit theo lô, nên bộ nhớ theo kích thước lô và số group, không theo số row (AGENTS.md).
-- Audit (`--check-only`, stage `integrity`, `audit_silver.py`): ~80 s, RSS tối đa ~0,7 GB (đọc batch ~60 s, chủ yếu là validate contract từng row; SQL ~15 s; lineage 3 filing mẫu ~4 s), SQLite tạm ~1,1 GB trên đĩa.
+- Audit (`--check-only`, stage `integrity`, `audit_silver.py`): ~80 s, RSS tối đa ~0,7 GB (đọc batch ~60 s, chủ yếu là validate contract từng row; SQL ~15 s; lineage 3 filing mẫu ~4 s), SQLite tạm ~1,1 GB trên đĩa (bản scratch SQLite trước khi chuyển sang DuckDB).
 - Kích thước: toàn bộ ~98 MB Parquet. Lớn nhất là `xbrl_relationships` (26 MB, 1 file), `xbrl_facts` (23 MB, 32 file vì `bucket(32, instance_id)`), `xbrl_labels` (13 MB), `xbrl_concepts` (10 MB), `document_table_cells` (9 MB, 6 file theo năm). Mỗi bảng có 1 snapshot.
 - Query tiêu biểu (DuckDB trên Arrow, sau khi nạp đúng các cột cần ~0,4 s): 3–90 ms cho query 1–6 và 8, ~0,4–0,7 s cho query 7 (lọc label theo DTS).
 - Partition giữ nguyên: dữ liệu nhỏ, bảng partition theo năm có 6 file/bảng; `xbrl_facts` có 32 file nhỏ (~0,7 MB) nhưng chưa có query pattern đo được nào bị chậm vì việc đó. Chỉ đổi partition khi có query cụ thể và số đo.

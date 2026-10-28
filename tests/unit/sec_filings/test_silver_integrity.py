@@ -7,6 +7,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from scripts.sec_filings import build_silver
@@ -25,6 +27,7 @@ from src.data_pipeline.quality.sec_filings.silver_audit_report import (
 )
 from src.data_pipeline.quality.sec_filings.silver_audit_sql import (
     ScratchDatabase,
+    deriver,
     run_sql_checks,
 )
 from src.data_pipeline.quality.sec_filings.silver_model import SILVER_TABLES
@@ -36,6 +39,8 @@ FILINGS = "sec_filings.filings"
 DOCUMENTS = "sec_filings.documents"
 SECTIONS = "sec_filings.sections"
 TABLES = "sec_filings.document_tables"
+INSTANCES = "sec_filings.xbrl_instances"
+ENTITIES = "sec_filings.filing_entities"
 STAGES = {stage.name: stage for stage in SILVER_STAGES}
 
 
@@ -43,22 +48,84 @@ def _report() -> SilverAuditReport:
     return SilverAuditReport(data_dir="data", started_at=datetime.now(UTC))
 
 
-def _audit(
-    tmp_path: Path, rows: dict[str, list[dict[str, Any]]]
-) -> dict[str, AuditCheck]:
-    """Run the set-based checks on a scratch database holding only `rows`.
+def _load(
+    scratch: ScratchDatabase, tmp_path: Path, rows: dict[str, list[dict[str, Any]]]
+) -> None:
+    """Store `rows` as the audit stores a table: from a data file.
 
     Columns a row leaves out are stored as null.
     """
 
+    for identifier, table_rows in rows.items():
+        spec = next(t.spec for t in SILVER_TABLES if t.identifier == identifier)
+        columns = list(scratch.columns[identifier])
+        if identifier == INSTANCES and "source_document_ids" not in columns:
+            columns.append("source_document_ids")
+        schema = pa.schema(
+            [spec.arrow_schema.field(c).with_nullable(True) for c in columns]
+        )
+        stored = [dict.fromkeys(columns) | r for r in table_rows]
+        path = str(tmp_path / f"{identifier}.parquet")
+        pq.write_table(pa.Table.from_pylist(stored, schema=schema), path)
+        derive = deriver(identifier)
+        derived = None if derive is None else {path: list(map(derive, stored))}
+        scratch.load(identifier, [path], len(stored), derived)
+
+
+def _audit(
+    tmp_path: Path, rows: dict[str, list[dict[str, Any]]]
+) -> dict[str, AuditCheck]:
+    """Run the set-based checks on a scratch database holding only `rows`."""
+
     report = _report()
     tmp_path.mkdir(exist_ok=True)
     with closing(ScratchDatabase(tmp_path / "audit.db")) as scratch:
-        for identifier, table_rows in rows.items():
-            columns = scratch.columns[identifier]
-            scratch.insert(identifier, [dict.fromkeys(columns) | r for r in table_rows])
+        _load(scratch, tmp_path, rows)
         run_sql_checks(scratch, report)
     return {f"{c.table}:{c.check_name}": c for c in report.checks}
+
+
+def test_each_filing_is_read_with_exactly_its_own_documents_and_entities(
+    tmp_path: Path,
+) -> None:
+    def document(filing_id: str | None, ordinal: int) -> dict[str, Any]:
+        return {
+            "filing_id": filing_id,
+            "document_id": f"{filing_id}:{ordinal}",
+            "document_ordinal": ordinal,
+        }
+
+    with closing(ScratchDatabase(tmp_path / "audit.db")) as scratch:
+        _load(
+            scratch,
+            tmp_path,
+            {
+                FILINGS: [{"filing_id": f} for f in ("sec:c", "sec:a", "sec:b")],
+                DOCUMENTS: [
+                    document("sec:a", 2),
+                    document(None, 1),
+                    document("sec:c", 1),
+                    document("sec:a", 1),
+                    document("sec:0", 1),
+                ],
+                ENTITIES: [{"filing_id": "sec:b", "entity_ordinal": 1}],
+            },
+        )
+
+        walked = [
+            (
+                filing["filing_id"],
+                [d["document_id"] for d in documents],
+                [e["entity_ordinal"] for e in entities],
+            )
+            for filing, documents, entities in scratch.filings_with_children()
+        ]
+
+    assert walked == [
+        ("sec:a", ["sec:a:1", "sec:a:2"], []),
+        ("sec:b", [], [1]),
+        ("sec:c", ["sec:c:1"], []),
+    ]
 
 
 def _names(stages: tuple[SilverStage, ...]) -> list[str]:

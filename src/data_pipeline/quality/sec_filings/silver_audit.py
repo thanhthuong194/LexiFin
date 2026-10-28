@@ -15,6 +15,7 @@ from pyiceberg.catalog import Catalog
 from pyiceberg.exceptions import NoSuchNamespaceError, NoSuchTableError
 from pyiceberg.table import Table
 
+from src.data_pipeline.code_version import code_sha256
 from src.data_pipeline.contracts.ingestion import FormType
 from src.data_pipeline.quality.sec_filings.silver_audit_bronze import (
     check_bronze_files,
@@ -291,6 +292,8 @@ def _scratch(
         {
             "samples_per_form": options.samples_per_form,
             "batch_size": options.batch_size,
+            # The audit and every module of ours it imports.
+            "code": code_sha256(__name__),
         },
     )
     path = prepare_scratch(options.work_dir.expanduser().resolve(), fingerprint)
@@ -405,7 +408,7 @@ def audit_silver(
 
     Inventories the catalog against the tables the code defines; compares
     each table's contract, schema, partition spec, location and data files;
-    streams every row through its record contract into a temporary SQLite
+    streams every row through its record contract into a scratch DuckDB
     database (`options.batch_size` rows at a time) for key, reference,
     lineage, group, hierarchy and semantic checks; checks every filing's
     Bronze files (re-hashed with `options.verify_source_hashes`); traces the

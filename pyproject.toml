@@ -1,14 +1,13 @@
 [project]
 name = "lexifin"
 version = "0.1.0"
-description = "Add your description here"
+description = "SEC filings data platform: immutable Bronze, Iceberg Silver with contracts and an integrity audit"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "httpx>=0.28.1",
     "polars>=1.44.1",
     "python-dotenv>=1.1.1",
-    "pytest>=9.1.1",
     "sec-edgar-downloader>=5.1.0",
     "structlog>=26.1.0",
     "vnstock>=4.0.7",
