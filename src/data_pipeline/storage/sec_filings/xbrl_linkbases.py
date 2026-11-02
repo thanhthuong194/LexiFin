@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pyarrow.compute as pc
-from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 
 from src.data_pipeline.contracts.sec_filings.xbrl_labels import XBRL_LABELS_ARROW_SCHEMA
@@ -28,17 +25,6 @@ RELATIONSHIP_HEAD_COLUMNS = (
     "network_relationship_count",
     "relationship_hash",
 )
-
-
-def open_xbrl_linkbase_table(
-    catalog: Catalog, data_dir: Path, identifier: str
-) -> tuple[Table, bool]:
-    """Load or create one of the unpartitioned label, network and relationship tables."""
-
-    specs = (XBRL_LABELS_SPEC, XBRL_NETWORKS_SPEC, XBRL_RELATIONSHIPS_SPEC)
-    return next(spec for spec in specs if spec.identifier == identifier).open(
-        catalog, data_dir
-    )
 
 
 def read_label_ids(table: Table) -> set[str]:

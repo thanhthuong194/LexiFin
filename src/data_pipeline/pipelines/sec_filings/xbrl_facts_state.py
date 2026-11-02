@@ -23,10 +23,10 @@ from src.data_pipeline.storage.iceberg import (
     verify_written_values,
 )
 from src.data_pipeline.storage.sec_filings.content_blocks import (
-    open_content_blocks_table,
+    CONTENT_BLOCKS_SPEC,
 )
 from src.data_pipeline.storage.sec_filings.document_table_cells import (
-    open_document_table_cells_table,
+    DOCUMENT_TABLE_CELLS_SPEC,
 )
 from src.utils.logger import get_logger
 
@@ -113,7 +113,7 @@ def read_content(
     files = filing_dates_filter({document.filing_date for document in documents})
     cells: dict[str, dict[str, str]] = defaultdict(dict)
     for row in read_rows_in(
-        open_document_table_cells_table(catalog, data_dir)[0],
+        DOCUMENT_TABLE_CELLS_SPEC.open(catalog, data_dir)[0],
         "document_id",
         ids,
         columns=("cell_id", "source_xpath"),
@@ -122,7 +122,7 @@ def read_content(
         cells[row["document_id"]][row["source_xpath"]] = row["cell_id"]
     blocks: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     for row in read_rows_in(
-        open_content_blocks_table(catalog, data_dir)[0],
+        CONTENT_BLOCKS_SPEC.open(catalog, data_dir)[0],
         "document_id",
         ids,
         columns=("block_id", "block_type", "source_xpath"),

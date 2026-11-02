@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Collection
-from pathlib import Path
 
-from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 from pyiceberg.transforms import BucketTransform
 
@@ -31,18 +29,6 @@ XBRL_CONCEPTS_SPEC = SilverTableSpec(XBRL_CONCEPTS_TABLE, XBRL_CONCEPTS_ARROW_SC
 XBRL_FACTS_SPEC = SilverTableSpec(
     XBRL_FACTS_TABLE, XBRL_FACTS_ARROW_SCHEMA, INSTANCE_BUCKET_PARTITION
 )
-
-
-def open_xbrl_concepts_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
-    """Load or create the unpartitioned `sec_filings.xbrl_concepts`."""
-
-    return XBRL_CONCEPTS_SPEC.open(catalog, data_dir)
-
-
-def open_xbrl_facts_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
-    """Load or create `sec_filings.xbrl_facts`, bucketed by instance_id."""
-
-    return XBRL_FACTS_SPEC.open(catalog, data_dir)
 
 
 def read_concept_hashes(table: Table) -> dict[str, str]:

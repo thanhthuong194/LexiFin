@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -12,6 +10,7 @@ from src.data_pipeline.contracts.sec_filings.document_table_cells import (
     DocumentTableCellRecord,
     RowGroup,
 )
+from src.data_pipeline.contracts.sec_filings.xbrl_core import canonical_sha256
 from src.data_pipeline.transforms.sec_filings.html_dom import (
     element_tag,
     is_hidden,
@@ -279,7 +278,4 @@ def table_content_sha256(
             for cell in sorted(cells, key=lambda cell: cell.cell_ordinal)
         ],
     }
-    canonical = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return canonical_sha256(payload)

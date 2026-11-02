@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 
 from src.data_pipeline.contracts.sec_filings.documents import (
@@ -22,12 +19,6 @@ DOCUMENTS_TABLE = "sec_filings.documents"
 DOCUMENTS_SPEC = SilverTableSpec(
     DOCUMENTS_TABLE, DOCUMENTS_ARROW_SCHEMA, FILING_YEAR_PARTITION
 )
-
-
-def open_documents_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
-    """Load or create `sec_filings.documents`, returning whether it was created."""
-
-    return DOCUMENTS_SPEC.open(catalog, data_dir)
 
 
 def read_primary_html_documents(table: Table) -> list[DocumentRecord]:

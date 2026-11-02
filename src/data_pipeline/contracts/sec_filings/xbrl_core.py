@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Sequence
@@ -12,6 +11,7 @@ import pyarrow as pa
 from pydantic import AwareDatetime, Field, model_validator
 
 from src.data_pipeline.contracts.ingestion import ContractModel
+from src.data_pipeline.contracts.sec_filings.content_blocks import sha256_text
 from src.data_pipeline.contracts.sec_filings.filings import INT32_MAX, SHA256_PATTERN
 
 PeriodType = Literal["instant", "duration", "forever"]
@@ -67,14 +67,10 @@ XBRL_UNITS_ARROW_SCHEMA = pa.schema(
 CLARK_QNAME = re.compile(r"\{[^{}\s]+\}[^{}\s:]+")
 
 
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def canonical_sha256(payload: object) -> str:
     """SHA-256 of a JSON payload serialized canonically (sorted keys, no spaces)."""
 
-    return _sha256(
+    return sha256_text(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
 
@@ -82,26 +78,26 @@ def canonical_sha256(payload: object) -> str:
 def inline_instance_id(filing_id: str, target_name: str | None) -> str:
     """Key of an Inline XBRL target: `default`, or the SHA-256 of its name."""
 
-    target = "default" if target_name is None else _sha256(target_name)
+    target = "default" if target_name is None else sha256_text(target_name)
     return f"{filing_id}:xbrl:inline:{target}"
 
 
 def xml_instance_id(filing_id: str, document_id: str) -> str:
     """Key of a standalone XML instance not merged into an Inline target."""
 
-    return f"{filing_id}:xbrl:xml:{_sha256(document_id)}"
+    return f"{filing_id}:xbrl:xml:{sha256_text(document_id)}"
 
 
 def context_key_for(instance_id: str, context_ref: str) -> str:
     """Key of a context; its source ID is only unique within the instance."""
 
-    return f"{instance_id}:context:{_sha256(context_ref)}"
+    return f"{instance_id}:context:{sha256_text(context_ref)}"
 
 
 def unit_key_for(instance_id: str, unit_ref: str) -> str:
     """Key of a unit; its source ID is only unique within the instance."""
 
-    return f"{instance_id}:unit:{_sha256(unit_ref)}"
+    return f"{instance_id}:unit:{sha256_text(unit_ref)}"
 
 
 def source_set_sha256(sources: Sequence[tuple[str, str]]) -> str:

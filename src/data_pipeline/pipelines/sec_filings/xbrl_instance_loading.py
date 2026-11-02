@@ -47,17 +47,14 @@ _DTS_ROLES = frozenset(
 # raising what reading or loading them raised.
 InstanceLoad = Callable[[], tuple[list[SourceFile], LoadedInstance]]
 
-# Part of every cache key: entries written in another format are never read.
-_ENTRY_FORMAT = "pickle-zstd-checksum-1"
-
 
 @cache
 def _loader_version() -> str:
-    """The processor version and the code that turns its model into records
-    (the loader and every module of ours it imports): a load cached by other
-    code is not reused."""
+    """The processor version and the code that picks an instance's files,
+    loads them and stores the entry (this module and every module of ours
+    it imports): a load cached by other code is not reused."""
 
-    return f"{version('arelle-release')}:{code_sha256(load_instance.__module__)}"
+    return f"{version('arelle-release')}:{code_sha256(__name__)}"
 
 
 class InstanceCache:
@@ -88,7 +85,6 @@ class InstanceCache:
                 instance.target_name or "",
                 instance.source_set_sha256,
                 _loader_version(),
-                _ENTRY_FORMAT,
             )
         )
         return self.directory / f"{hashlib.sha256(key.encode()).hexdigest()}.pkl.zst"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
@@ -29,12 +30,10 @@ from src.data_pipeline.quality.sec_filings.silver_audit_report import (
 )
 from src.data_pipeline.quality.sec_filings.silver_model import SILVER_TABLES
 from src.data_pipeline.storage.iceberg import (
-    create_or_load_table,
     open_silver_catalog,
-    silver_table_location,
 )
+from src.data_pipeline.storage.sec_filings.document_links import DOCUMENT_LINKS_SPEC
 from src.data_pipeline.storage.sec_filings.documents import DOCUMENTS_SPEC
-from src.data_pipeline.storage.sec_filings.filings import FILING_YEAR_PARTITION
 from tests.conftest import STATEMENT_ROLE
 
 pytestmark = pytest.mark.integration
@@ -283,20 +282,17 @@ def test_schema_mismatch_skips_the_row_checks(silver: Path) -> None:
     title = SCHEMAS[LINKS].get_field_index("title")
     with open_silver_catalog(silver) as catalog:
         catalog.drop_table(LINKS)
-        create_or_load_table(
-            catalog,
-            LINKS,
+        replace(
+            DOCUMENT_LINKS_SPEC,
             arrow_schema=SCHEMAS[LINKS].set(
                 title, SCHEMAS[LINKS].field(title).with_nullable(False)
             ),
-            location=silver_table_location(silver, LINKS),
-            partition_by=FILING_YEAR_PARTITION,
-        )
+        ).open(catalog, silver)
 
     report = audit_silver(silver)
 
     (check,) = [c for c in report.checks if c.status == "FAIL"]
-    assert (check.check_name, check.table) == ("schema_and_partition", LINKS)
+    assert (check.check_name, check.table) == ("table_definition", LINKS)
     assert f"column {title + 1}" in check.message and "title" in check.message
     assert ("row_checks", None) in _statuses(report, "SKIP")
 

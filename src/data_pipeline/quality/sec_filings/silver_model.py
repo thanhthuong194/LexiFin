@@ -2,6 +2,37 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pydantic import BaseModel
+
+from src.data_pipeline.contracts.sec_filings.content_blocks import ContentBlockRecord
+from src.data_pipeline.contracts.sec_filings.document_links import DocumentLinkRecord
+from src.data_pipeline.contracts.sec_filings.document_table_cells import (
+    DocumentTableCellRecord,
+)
+from src.data_pipeline.contracts.sec_filings.document_tables import DocumentTableRecord
+from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
+from src.data_pipeline.contracts.sec_filings.exhibits import ExhibitRecord
+from src.data_pipeline.contracts.sec_filings.filing_entities import FilingEntityRecord
+from src.data_pipeline.contracts.sec_filings.filings import FilingRecord
+from src.data_pipeline.contracts.sec_filings.sections import SectionRecord
+from src.data_pipeline.contracts.sec_filings.xbrl_concepts import XbrlConceptRecord
+from src.data_pipeline.contracts.sec_filings.xbrl_core import (
+    XbrlContextRecord,
+    XbrlInstanceRecord,
+    XbrlUnitRecord,
+)
+from src.data_pipeline.contracts.sec_filings.xbrl_dimensions import (
+    XbrlDimensionRecord,
+)
+from src.data_pipeline.contracts.sec_filings.xbrl_fact_footnotes import (
+    XbrlFactFootnoteRecord,
+)
+from src.data_pipeline.contracts.sec_filings.xbrl_facts import XbrlFactRecord
+from src.data_pipeline.contracts.sec_filings.xbrl_labels import XbrlLabelRecord
+from src.data_pipeline.contracts.sec_filings.xbrl_networks import (
+    XbrlNetworkRecord,
+    XbrlRelationshipRecord,
+)
 from src.data_pipeline.storage.iceberg import SilverTableSpec
 from src.data_pipeline.storage.sec_filings.content_blocks import (
     CONTENT_BLOCKS_SPEC,
@@ -65,13 +96,15 @@ from src.data_pipeline.storage.sec_filings.xbrl_linkbases import (
 
 @dataclass(frozen=True)
 class AuditedTable:
-    """An audited table: its definition and the columns that identify a row.
+    """An audited table: its definition, its record contract and the columns
+    that identify a row.
 
     `unique` lists the primary key first, then every other column set of the
     table's grain that must hold each value once.
     """
 
     spec: SilverTableSpec
+    record: type[BaseModel]
     unique: tuple[tuple[str, ...], ...]
 
     @property
@@ -84,26 +117,27 @@ class AuditedTable:
 # Every Silver table with its unique keys, parents before children: the order
 # the audit scans them in (docs/data/sec_filings_silver_model.md).
 SILVER_TABLES = (
-    AuditedTable(FILINGS_SPEC, (("filing_id",), ("accession_number",))),
-    AuditedTable(DOCUMENTS_SPEC, (("document_id",), ("filing_id", "document_ordinal"))),
-    AuditedTable(FILING_ENTITIES_SPEC, (("filing_entity_id",), ("filing_id", "entity_ordinal"))),
-    AuditedTable(SECTIONS_SPEC, (("section_id",), ("document_id", "section_ordinal"))),
-    AuditedTable(CONTENT_BLOCKS_SPEC, (("block_id",), ("document_id", "block_ordinal"))),
-    AuditedTable(DOCUMENT_TABLES_SPEC, (("table_id",), ("block_id",), ("document_id", "table_ordinal"))),
-    AuditedTable(DOCUMENT_TABLE_CELLS_SPEC, (("cell_id",), ("table_id", "cell_ordinal"))),
-    AuditedTable(DOCUMENT_LINKS_SPEC, (("link_id",), ("source_document_id", "link_ordinal"), ("source_document_id", "source_xpath"))),
-    AuditedTable(EXHIBITS_SPEC, (("exhibit_id",), ("filing_id", "exhibit_ordinal"))),
-    AuditedTable(XBRL_INSTANCES_SPEC, (("instance_id",),)),
-    AuditedTable(XBRL_CONTEXTS_SPEC, (("context_key",), ("instance_id", "context_ref"))),
-    AuditedTable(XBRL_UNITS_SPEC, (("unit_key",), ("instance_id", "unit_ref"))),
-    AuditedTable(XBRL_CONCEPTS_SPEC, (("concept_id",), ("namespace_uri", "local_name"))),
-    AuditedTable(XBRL_FACTS_SPEC, (("fact_id",), ("instance_id", "fact_order"))),
-    AuditedTable(XBRL_DIMENSIONS_SPEC, (("dimension_id",), ("context_key", "dimension_ordinal"), ("context_key", "dimension_concept_id"))),
-    AuditedTable(XBRL_FACT_FOOTNOTES_SPEC, (("footnote_relation_id",), ("fact_id", "footnote_ordinal"))),
-    AuditedTable(XBRL_LABELS_SPEC, (("label_id",),)),
-    AuditedTable(XBRL_NETWORKS_SPEC, (("network_id",), ("instance_id", "network_ordinal"), ("instance_id", "linkbase_type", "role_uri"))),
-    AuditedTable(XBRL_RELATIONSHIPS_SPEC, (("relationship_id",), ("network_id", "relationship_ordinal"))),
+    AuditedTable(FILINGS_SPEC, FilingRecord, (("filing_id",), ("accession_number",))),
+    AuditedTable(DOCUMENTS_SPEC, DocumentRecord, (("document_id",), ("filing_id", "document_ordinal"))),
+    AuditedTable(FILING_ENTITIES_SPEC, FilingEntityRecord, (("filing_entity_id",), ("filing_id", "entity_ordinal"))),
+    AuditedTable(SECTIONS_SPEC, SectionRecord, (("section_id",), ("document_id", "section_ordinal"))),
+    AuditedTable(CONTENT_BLOCKS_SPEC, ContentBlockRecord, (("block_id",), ("document_id", "block_ordinal"))),
+    AuditedTable(DOCUMENT_TABLES_SPEC, DocumentTableRecord, (("table_id",), ("block_id",), ("document_id", "table_ordinal"))),
+    AuditedTable(DOCUMENT_TABLE_CELLS_SPEC, DocumentTableCellRecord, (("cell_id",), ("table_id", "cell_ordinal"))),
+    AuditedTable(DOCUMENT_LINKS_SPEC, DocumentLinkRecord, (("link_id",), ("source_document_id", "link_ordinal"), ("source_document_id", "source_xpath"))),
+    AuditedTable(EXHIBITS_SPEC, ExhibitRecord, (("exhibit_id",), ("filing_id", "exhibit_ordinal"))),
+    AuditedTable(XBRL_INSTANCES_SPEC, XbrlInstanceRecord, (("instance_id",),)),
+    AuditedTable(XBRL_CONTEXTS_SPEC, XbrlContextRecord, (("context_key",), ("instance_id", "context_ref"))),
+    AuditedTable(XBRL_UNITS_SPEC, XbrlUnitRecord, (("unit_key",), ("instance_id", "unit_ref"))),
+    AuditedTable(XBRL_CONCEPTS_SPEC, XbrlConceptRecord, (("concept_id",), ("namespace_uri", "local_name"))),
+    AuditedTable(XBRL_FACTS_SPEC, XbrlFactRecord, (("fact_id",), ("instance_id", "fact_order"))),
+    AuditedTable(XBRL_DIMENSIONS_SPEC, XbrlDimensionRecord, (("dimension_id",), ("context_key", "dimension_ordinal"), ("context_key", "dimension_concept_id"))),
+    AuditedTable(XBRL_FACT_FOOTNOTES_SPEC, XbrlFactFootnoteRecord, (("footnote_relation_id",), ("fact_id", "footnote_ordinal"))),
+    AuditedTable(XBRL_LABELS_SPEC, XbrlLabelRecord, (("label_id",),)),
+    AuditedTable(XBRL_NETWORKS_SPEC, XbrlNetworkRecord, (("network_id",), ("instance_id", "network_ordinal"), ("instance_id", "linkbase_type", "role_uri"))),
+    AuditedTable(XBRL_RELATIONSHIPS_SPEC, XbrlRelationshipRecord, (("relationship_id",), ("network_id", "relationship_ordinal"))),
 )  # fmt: skip
+AUDITED_TABLES = {table.identifier: table for table in SILVER_TABLES}
 # Narrative tables must be rebuilt in this order when the persisted table
 # semantics are outdated (one block per <table>, cells in their own table).
 TABLE_SEMANTICS_REBUILD = (

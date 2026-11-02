@@ -37,7 +37,6 @@ from src.data_pipeline.quality.sec_filings.silver_audit_samples import (
     check_sample,
 )
 from src.data_pipeline.quality.sec_filings.silver_audit_scan import (
-    RECORD_MODELS,
     check_data_files,
     contract_problem,
     scan_table,
@@ -168,7 +167,7 @@ def _check_definitions(
     valid = True
     for audited in SILVER_TABLES:
         identifier, spec = audited.identifier, audited.spec
-        model = RECORD_MODELS[identifier]
+        model = audited.record
         with report.check(
             "record_contract",
             identifier,
@@ -183,10 +182,10 @@ def _check_definitions(
             valid = False
             continue
         with report.check(
-            "schema_and_partition",
+            "table_definition",
             identifier,
-            "the Iceberg schema (field IDs, names, types, nullability) and partition "
-            "spec equal the contract",
+            "the Iceberg schema (field IDs, names, types, nullability), partition "
+            "spec and rules version equal the code's definition",
         ) as run:
             run.rows_checked = len(spec.arrow_schema)
             problem = spec.definition_problem(table)
@@ -291,7 +290,6 @@ def _scratch(
         report,
         {
             "samples_per_form": options.samples_per_form,
-            "batch_size": options.batch_size,
             # The audit and every module of ours it imports.
             "code": code_sha256(__name__),
         },
@@ -408,9 +406,10 @@ def audit_silver(
 
     Inventories the catalog against the tables the code defines; compares
     each table's contract, schema, partition spec, location and data files;
-    streams every row through its record contract into a scratch DuckDB
-    database (`options.batch_size` rows at a time) for key, reference,
-    lineage, group, hierarchy and semantic checks; checks every filing's
+    validates every row against its record contract (`options.batch_size`
+    rows at a time), then loads each data file's key, lineage and group
+    columns into a scratch DuckDB database for key, reference, lineage,
+    group, hierarchy and semantic checks; checks every filing's
     Bronze files (re-hashed with `options.verify_source_hashes`); traces the
     `options.samples_per_form` latest filings of each form back to Bronze;
     finally checks that no snapshot, row count or catalog file changed. The

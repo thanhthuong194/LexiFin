@@ -176,7 +176,7 @@ def _print_summary(summary: Mapping[str, Any]) -> None:
         "stages_completed",
         "stages_skipped",
         "failed_stage",
-        "prerequisite_problems",
+        "table_problems",
         "tables_created",
         "rows_inserted",
         "rows_skipped",

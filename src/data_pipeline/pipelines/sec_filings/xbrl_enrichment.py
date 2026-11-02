@@ -13,7 +13,6 @@ from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 
 from src.data_pipeline.contracts.sec_filings.documents import (
-    DOCUMENTS_ARROW_SCHEMA,
     DocumentRecord,
 )
 from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
@@ -41,35 +40,31 @@ from src.data_pipeline.storage.iceberg import (
     append_rows,
     count_groups,
     current_snapshot_id,
-    filing_dates_filter,
     iter_rows,
     open_silver_catalog,
     read_groups_in,
-    read_rows_in,
     snapshot_total,
     summarize_groups,
     verify_append,
     verify_written_groups,
 )
-from src.data_pipeline.storage.sec_filings.documents import open_documents_table
 from src.data_pipeline.storage.sec_filings.xbrl_core import (
-    XBRL_CONTEXTS_TABLE,
-    XBRL_INSTANCES_TABLE,
-    XBRL_UNITS_TABLE,
-    open_xbrl_core_table,
-    read_instance_groups,
+    XBRL_CONTEXTS_SPEC,
+    XBRL_UNITS_SPEC,
+    read_filing_documents,
+    read_instances_with_sources,
 )
 from src.data_pipeline.storage.sec_filings.xbrl_enrichment import (
+    XBRL_DIMENSIONS_SPEC,
     XBRL_DIMENSIONS_TABLE,
+    XBRL_FACT_FOOTNOTES_SPEC,
     XBRL_FACT_FOOTNOTES_TABLE,
-    open_xbrl_dimensions_table,
-    open_xbrl_fact_footnotes_table,
     read_contexts_by_instance,
     read_fact_hashes,
 )
 from src.data_pipeline.storage.sec_filings.xbrl_facts import (
-    open_xbrl_concepts_table,
-    open_xbrl_facts_table,
+    XBRL_CONCEPTS_SPEC,
+    XBRL_FACTS_SPEC,
     read_concept_hashes,
     read_refs_by_instance,
 )
@@ -154,28 +149,11 @@ def _read_state(
 ) -> tuple[list[XbrlInstanceRecord], dict[str, DocumentRecord], StoredEnrichment]:
     """Instances, their source documents and summaries of the stored rows."""
 
-    instances = [
-        XbrlInstanceRecord.model_validate(row)
-        for rows in read_instance_groups(
-            open_xbrl_core_table(catalog, data_dir, XBRL_INSTANCES_TABLE)[0]
-        ).values()
-        for row in rows
-    ]
-    sources = {
-        row["document_id"]: DocumentRecord.model_validate(row)
-        for row in read_rows_in(
-            open_documents_table(catalog, data_dir)[0],
-            "document_id",
-            {d for instance in instances for d in instance.source_document_ids},
-            columns=DOCUMENTS_ARROW_SCHEMA.names,
-        )
-    }
+    instances, sources = read_instances_with_sources(catalog, data_dir)
     stored = StoredEnrichment(
-        expected=_expected_dimensions(
-            open_xbrl_core_table(catalog, data_dir, XBRL_CONTEXTS_TABLE)[0]
-        ),
+        expected=_expected_dimensions(XBRL_CONTEXTS_SPEC.open(catalog, data_dir)[0]),
         fact_counts=count_groups(
-            open_xbrl_facts_table(catalog, data_dir)[0], "instance_id"
+            XBRL_FACTS_SPEC.open(catalog, data_dir)[0], "instance_id"
         ),
         dimensions=summarize_groups(
             tables[0],
@@ -187,7 +165,7 @@ def _read_state(
             tables[1], "fact_id", "footnote_ordinal", declared="fact_footnote_count"
         ),
     )
-    return sorted(instances, key=lambda i: i.instance_id), sources, stored
+    return instances, sources, stored
 
 
 def _is_complete(state: InstanceState, run: _Run) -> bool:
@@ -210,36 +188,23 @@ def _batch_inputs(
 
     instances = [state.instance for state in batch]
     ids = {instance.instance_id for instance in instances}
-    dates = {
-        run.sources[d].filing_date
-        for instance in instances
-        for d in instance.source_document_ids
-        if d in run.sources
-    }
     contexts = read_contexts_by_instance(
-        open_xbrl_core_table(run.catalog, run.data_dir, XBRL_CONTEXTS_TABLE)[0], ids
+        XBRL_CONTEXTS_SPEC.open(run.catalog, run.data_dir)[0], ids
     )
     parents = EnrichmentParents(
-        documents={
-            row["document_id"]: DocumentRecord.model_validate(row)
-            for rows in read_groups_in(
-                open_documents_table(run.catalog, run.data_dir)[0],
-                "filing_id",
-                {instance.filing_id for instance in instances},
-                files=filing_dates_filter(dates),
-            ).values()
-            for row in rows
-        },
+        documents=read_filing_documents(
+            run.catalog, run.data_dir, instances, run.sources
+        ),
         contexts=contexts,
         fact_hashes=read_fact_hashes(
-            open_xbrl_facts_table(run.catalog, run.data_dir)[0], ids
+            XBRL_FACTS_SPEC.open(run.catalog, run.data_dir)[0], ids
         ),
         concept_ids=run.concept_ids,
     )
     refs = InstanceRefs(
         contexts={i: {c["context_ref"] for c in rows} for i, rows in contexts.items()},
         units=read_refs_by_instance(
-            open_xbrl_core_table(run.catalog, run.data_dir, XBRL_UNITS_TABLE)[0],
+            XBRL_UNITS_SPEC.open(run.catalog, run.data_dir)[0],
             "unit_ref",
             ids,
         ),
@@ -375,11 +340,9 @@ def _run_enrichment(
 ) -> None:
     data_dir, bronze = dirs
     tables = {}
-    for identifier, opener in (
-        (XBRL_DIMENSIONS_TABLE, open_xbrl_dimensions_table),
-        (XBRL_FACT_FOOTNOTES_TABLE, open_xbrl_fact_footnotes_table),
-    ):
-        tables[identifier], created = opener(catalog, data_dir)
+    for spec in (XBRL_DIMENSIONS_SPEC, XBRL_FACT_FOOTNOTES_SPEC):
+        identifier = spec.identifier
+        tables[identifier], created = spec.open(catalog, data_dir)
         name = identifier.split(".", 1)[1]
         logger.info(
             f"{name}_table_{'created' if created else 'loaded'}", table=identifier
@@ -400,7 +363,7 @@ def _run_enrichment(
             settings,
             processed_at,
             sources,
-            set(read_concept_hashes(open_xbrl_concepts_table(catalog, data_dir)[0])),
+            set(read_concept_hashes(XBRL_CONCEPTS_SPEC.open(catalog, data_dir)[0])),
         )
     summary.instances_considered = len(instances)
     logger.info(

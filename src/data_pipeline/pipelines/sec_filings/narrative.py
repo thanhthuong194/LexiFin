@@ -21,6 +21,9 @@ from src.data_pipeline.contracts.sec_filings.sections import (
     SECTIONS_ARROW_SCHEMA,
     SectionRecord,
 )
+from src.data_pipeline.pipelines.sec_filings.document_table_state import (
+    document_context,
+)
 from src.data_pipeline.quality.sec_filings.narrative import (
     narrative_problem,
     sections_problem,
@@ -39,18 +42,18 @@ from src.data_pipeline.storage.iceberg import (
     verify_append,
 )
 from src.data_pipeline.storage.sec_filings.content_blocks import (
+    CONTENT_BLOCKS_SPEC,
     CONTENT_BLOCKS_TABLE,
     count_table_cell_blocks,
-    open_content_blocks_table,
 )
 from src.data_pipeline.storage.sec_filings.documents import (
-    open_documents_table,
+    DOCUMENTS_SPEC,
     read_document_content,
     read_primary_html_documents,
 )
 from src.data_pipeline.storage.sec_filings.sections import (
+    SECTIONS_SPEC,
     SECTIONS_TABLE,
-    open_sections_table,
 )
 from src.data_pipeline.transforms.sec_filings.html_blocks import extract_blocks
 from src.data_pipeline.transforms.sec_filings.html_dom import parse_html
@@ -144,14 +147,6 @@ class _Run:
     summary: NarrativeStageSummary
 
 
-def _context(parent: DocumentRecord) -> dict[str, str]:
-    return {
-        "filing_id": parent.filing_id,
-        "document_id": parent.document_id,
-        "source_path": parent.source_path,
-    }
-
-
 def _conflict(summary: NarrativeStageSummary, reason: str, **context: object) -> None:
     summary.documents_conflicted += 1
     logger.error("document_narrative_conflict", reason=reason, **context)
@@ -214,12 +209,14 @@ def _classify(
                 plan.new.append(parent)
             else:
                 _conflict(
-                    summary, "content blocks exist without sections", **_context(parent)
+                    summary,
+                    "content blocks exist without sections",
+                    **document_context(parent),
                 )
             continue
         problem = _summary_problem(parent, sections, blocks)
         if problem is not None:
-            _conflict(summary, problem, **_context(parent))
+            _conflict(summary, problem, **document_context(parent))
         elif blocks is None:
             plan.resumed.append(parent)
         else:
@@ -339,14 +336,14 @@ def _validate_built(
         if problem is not None:
             summary.documents_failed += 1
             logger.error(
-                "document_narrative_invalid", error=problem, **_context(parent)
+                "document_narrative_invalid", error=problem, **document_context(parent)
             )
         elif parent.document_id in stored_sections:
             difference = _section_difference(
                 stored_sections[parent.document_id], narrative.sections
             )
             if difference is not None:
-                _conflict(summary, difference, **_context(parent))
+                _conflict(summary, difference, **document_context(parent))
 
 
 def _read_groups(table: Table, parents: Sequence[DocumentRecord]) -> StoredRows:
@@ -373,7 +370,7 @@ def _read_resumed(
             parent, rows.get(parent.document_id, ()), None
         )
         if problem is not None:
-            _conflict(run.summary, problem, **_context(parent))
+            _conflict(run.summary, problem, **document_context(parent))
         stored[parent.document_id] = sections
     return stored
 
@@ -483,13 +480,13 @@ def _run_batch(run: _Run, batch: Sequence[DocumentRecord], resumed: set[str]) ->
 
 
 def _open_tables(catalog: Catalog, data_dir: Path) -> tuple[Table, Table]:
-    sections_table, created = open_sections_table(catalog, data_dir)
+    sections_table, created = SECTIONS_SPEC.open(catalog, data_dir)
     logger.info(
         "sections_table_created" if created else "sections_table_loaded",
         table=SECTIONS_TABLE,
         location=sections_table.location(),
     )
-    blocks_table, created = open_content_blocks_table(catalog, data_dir)
+    blocks_table, created = CONTENT_BLOCKS_SPEC.open(catalog, data_dir)
     logger.info(
         "content_blocks_table_created" if created else "content_blocks_table_loaded",
         table=CONTENT_BLOCKS_TABLE,
@@ -505,7 +502,7 @@ def _run_narrative(
     summary: NarrativeStageSummary,
 ) -> None:
     bronze, processed_at = run_inputs
-    documents_table, _ = open_documents_table(catalog, data_dir)
+    documents_table, _ = DOCUMENTS_SPEC.open(catalog, data_dir)
     sections_table, blocks_table = _open_tables(catalog, data_dir)
     summary.sections_snapshot_before = summary.sections_snapshot_after = (
         current_snapshot_id(sections_table)

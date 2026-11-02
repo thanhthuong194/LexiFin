@@ -31,26 +31,26 @@ from src.data_pipeline.storage.iceberg import (
     verify_written_groups,
 )
 from src.data_pipeline.storage.sec_filings.content_blocks import (
-    open_content_blocks_table,
+    CONTENT_BLOCKS_SPEC,
 )
 from src.data_pipeline.storage.sec_filings.document_links import (
-    open_document_links_table,
+    DOCUMENT_LINKS_SPEC,
 )
 from src.data_pipeline.storage.sec_filings.document_table_cells import (
-    open_document_table_cells_table,
+    DOCUMENT_TABLE_CELLS_SPEC,
 )
 from src.data_pipeline.storage.sec_filings.document_tables import (
-    open_document_tables_table,
+    DOCUMENT_TABLES_SPEC,
 )
 from src.data_pipeline.storage.sec_filings.exhibits import (
+    EXHIBITS_SPEC,
     EXHIBITS_TABLE,
-    open_exhibits_table,
 )
 from src.data_pipeline.storage.sec_filings.filings import (
-    open_filings_table,
+    FILINGS_SPEC,
     read_filings,
 )
-from src.data_pipeline.storage.sec_filings.sections import open_sections_table
+from src.data_pipeline.storage.sec_filings.sections import SECTIONS_SPEC
 from src.data_pipeline.transforms.sec_filings.exhibits import (
     CellLink,
     ExhibitEntry,
@@ -114,7 +114,7 @@ def _regions(
 
     rows = list(
         iter_rows(
-            open_sections_table(catalog, data_dir)[0],
+            SECTIONS_SPEC.open(catalog, data_dir)[0],
             (
                 "section_id",
                 "filing_id",
@@ -149,7 +149,7 @@ def _read_tables(
     section_of = {
         row["block_id"]: row["section_id"]
         for row in read_rows_in(
-            open_content_blocks_table(catalog, data_dir)[0],
+            CONTENT_BLOCKS_SPEC.open(catalog, data_dir)[0],
             "section_id",
             regions,
             columns=("block_id", "block_type"),
@@ -158,7 +158,7 @@ def _read_tables(
         if row["block_type"] == "table"
     }
     tables = read_rows_in(
-        open_document_tables_table(catalog, data_dir)[0],
+        DOCUMENT_TABLES_SPEC.open(catalog, data_dir)[0],
         "block_id",
         section_of,
         columns=("table_id", "document_id", "table_ordinal"),
@@ -183,7 +183,7 @@ def _extract(
     tables = _read_tables(catalog, data_dir, regions, files)
     cells: dict[str, list[GridCell]] = defaultdict(list)
     for row in read_rows_in(
-        open_document_table_cells_table(catalog, data_dir)[0],
+        DOCUMENT_TABLE_CELLS_SPEC.open(catalog, data_dir)[0],
         "table_id",
         {table["table_id"] for table in tables},
         columns=("row_ordinal", "column_ordinal", "colspan", "text", "source_xpath"),
@@ -192,7 +192,7 @@ def _extract(
         cells[row.pop("table_id")].append(GridCell(**row))
     links: dict[str, list[CellLink]] = defaultdict(list)
     for row in read_rows_in(
-        open_document_links_table(catalog, data_dir)[0],
+        DOCUMENT_LINKS_SPEC.open(catalog, data_dir)[0],
         "source_document_id",
         {table["document_id"] for table in tables},
         columns=("source_xpath", "href", "target_document_id"),
@@ -339,7 +339,7 @@ def _run_exhibits(
     processed_at: datetime,
     summary: ExhibitIndexStageSummary,
 ) -> None:
-    table, created = open_exhibits_table(catalog, data_dir)
+    table, created = EXHIBITS_SPEC.open(catalog, data_dir)
     logger.info(
         "exhibits_table_created" if created else "exhibits_table_loaded",
         location=table.location(),
@@ -348,7 +348,7 @@ def _run_exhibits(
     with timed_operation("exhibit_index.read_parents"):
         filings = {
             f.filing_id: f
-            for f in read_filings(open_filings_table(catalog, data_dir)[0])
+            for f in read_filings(FILINGS_SPEC.open(catalog, data_dir)[0])
         }
         regions = _regions(catalog, data_dir, {i: f.form for i, f in filings.items()})
         stored = {row["filing_id"] for row in iter_rows(table, ("filing_id",))}

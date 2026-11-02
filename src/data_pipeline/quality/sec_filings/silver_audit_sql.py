@@ -22,6 +22,7 @@ from src.data_pipeline.quality.sec_filings.silver_audit_report import (
 )
 from src.data_pipeline.quality.sec_filings.silver_audit_scan import local_path
 from src.data_pipeline.quality.sec_filings.silver_model import (
+    AUDITED_TABLES,
     RELATIONS,
     SILVER_TABLES,
     TABLE_SEMANTICS_REBUILD,
@@ -312,9 +313,7 @@ _FETCH_ROWS = 10_000
 
 
 def _arrow_schema(identifier: str, columns: Sequence[str]) -> pa.Schema:
-    schema = next(
-        t.spec for t in SILVER_TABLES if t.identifier == identifier
-    ).arrow_schema
+    schema = AUDITED_TABLES[identifier].spec.arrow_schema
     fields = [schema.field(column) for column in columns]
     if identifier in _DERIVED:
         fields.append(pa.field(_DERIVED[identifier][0], pa.int64()))
@@ -454,24 +453,51 @@ class ScratchDatabase:
         """Every stored filing row with its document and entity rows (in
         ordinal order), as dicts, in filing_id order.
 
-        DuckDB joins the three tables in one pass (hash aggregation, spilled
-        beyond the memory limit) instead of being searched per filing: the
-        scratch tables have no index.
+        The scratch tables have no index, so each table is read once, sorted
+        by DuckDB (spilled beyond the memory limit), and the three streams
+        are merged here holding one filing's rows at a time. Children of no
+        stored filing are left out (the foreign-key checks report them), so
+        a child group either belongs to the current filing or a later one.
         """
 
         filings = _name(FILINGS_TABLE)
-        documents = _name(DOCUMENTS_TABLE)
-        entities = _name(FILING_ENTITIES_TABLE)
-        for filing, document_rows, entity_rows in self.rows(
-            f"WITH d AS (SELECT filing_id, list({documents} ORDER BY "
-            f"document_ordinal) AS rows FROM {documents} GROUP BY filing_id), "
-            f"e AS (SELECT filing_id, list({entities} ORDER BY entity_ordinal) "
-            f"AS rows FROM {entities} GROUP BY filing_id) "
-            f"SELECT {filings}, d.rows, e.rows FROM {filings} "
-            "LEFT JOIN d USING (filing_id) LEFT JOIN e USING (filing_id) "
-            f"ORDER BY {filings}.filing_id"
+        documents = self._groups_by_filing(DOCUMENTS_TABLE, "document_ordinal")
+        entities = self._groups_by_filing(FILING_ENTITIES_TABLE, "entity_ordinal")
+        for (filing,) in self.rows(
+            f"SELECT {filings} FROM {filings} ORDER BY filing_id"
         ):
-            yield filing, document_rows or [], entity_rows or []
+            yield filing, documents(filing["filing_id"]), entities(filing["filing_id"])
+
+    def _groups_by_filing(
+        self, table: str, ordinal: str
+    ) -> Callable[[str], list[dict[str, Any]]]:
+        """A function returning the rows of `table` of each filing, in
+        ordinal order; it must be called in filing_id order."""
+
+        name = _name(table)
+        filings = _name(FILINGS_TABLE)
+        groups = groupby(
+            (
+                row
+                for (row,) in self.rows(
+                    f"SELECT {name} FROM {name} WHERE filing_id IN "
+                    f"(SELECT filing_id FROM {filings}) "
+                    f"ORDER BY filing_id, {ordinal}"
+                )
+            ),
+            key=itemgetter("filing_id"),
+        )
+        current = next(groups, None)
+
+        def take(filing_id: str) -> list[dict[str, Any]]:
+            nonlocal current
+            if current is None or current[0] != filing_id:
+                return []
+            rows = list(current[1])
+            current = next(groups, None)
+            return rows
+
+        return take
 
     def local_names(self, concept_ids: Collection[str]) -> dict[str, str]:
         """The local names of concepts, by concept_id."""

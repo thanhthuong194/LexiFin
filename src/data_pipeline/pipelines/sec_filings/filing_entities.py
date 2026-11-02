@@ -23,12 +23,12 @@ from src.data_pipeline.storage.iceberg import (
     verify_append,
 )
 from src.data_pipeline.storage.sec_filings.filing_entities import (
+    FILING_ENTITIES_SPEC,
     FILING_ENTITIES_TABLE,
-    open_filing_entities_table,
     read_filing_entity_groups,
 )
 from src.data_pipeline.storage.sec_filings.filings import (
-    open_filings_table,
+    FILINGS_SPEC,
     read_filings,
 )
 from src.data_pipeline.transforms.sec_filings.filing_entities import (
@@ -216,13 +216,13 @@ def _run_filing_entities(
     processed_at: datetime,
     summary: FilingEntitiesStageSummary,
 ) -> None:
-    filings_table, _ = open_filings_table(catalog, data_dir)
+    filings_table, _ = FILINGS_SPEC.open(catalog, data_dir)
     parents = sorted(
         read_filings(filings_table), key=lambda p: (p.filing_date, p.filing_id)
     )
     summary.filings_considered = len(parents)
 
-    table, created = open_filing_entities_table(catalog, data_dir)
+    table, created = FILING_ENTITIES_SPEC.open(catalog, data_dir)
     logger.info(
         "filing_entities_table_created" if created else "filing_entities_table_loaded",
         location=table.location(),

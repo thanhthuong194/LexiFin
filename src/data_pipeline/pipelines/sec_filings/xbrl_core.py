@@ -43,17 +43,16 @@ from src.data_pipeline.storage.iceberg import (
     verify_append,
     verify_written_values,
 )
-from src.data_pipeline.storage.sec_filings.documents import open_documents_table
+from src.data_pipeline.storage.sec_filings.documents import DOCUMENTS_SPEC
 from src.data_pipeline.storage.sec_filings.filings import (
-    open_filings_table,
+    FILINGS_SPEC,
     read_filings,
 )
 from src.data_pipeline.storage.sec_filings.xbrl_core import (
     XBRL_CONTEXTS_TABLE,
-    XBRL_CORE_SCHEMAS,
+    XBRL_CORE_SPECS,
     XBRL_INSTANCES_TABLE,
     XBRL_UNITS_TABLE,
-    open_xbrl_core_table,
     read_instance_groups,
 )
 from src.utils.logger import get_logger, log_context
@@ -216,7 +215,9 @@ def _write(
         stored = snapshot_total(tables[identifier], "total-records")
         if new:
             with timed_operation(timer, records=len(new)):
-                append_rows(tables[identifier], new, XBRL_CORE_SCHEMAS[identifier])
+                append_rows(
+                    tables[identifier], new, XBRL_CORE_SPECS[identifier].arrow_schema
+                )
         with timed_operation("xbrl_core.verify", table=identifier):
             snapshots[identifier] = verify_append(
                 tables[identifier],
@@ -325,10 +326,8 @@ def _run_xbrl(
 ) -> None:
     bronze, processed_at = run_inputs
     tables = {}
-    for identifier in XBRL_CORE_SCHEMAS:
-        tables[identifier], created = open_xbrl_core_table(
-            catalog, data_dir, identifier
-        )
+    for identifier, spec in XBRL_CORE_SPECS.items():
+        tables[identifier], created = spec.open(catalog, data_dir)
         name = identifier.split(".", 1)[1]
         logger.info(
             f"{name}_table_{'created' if created else 'loaded'}", table=identifier
@@ -342,10 +341,10 @@ def _run_xbrl(
     summary.units_snapshot_after = summary.units_snapshot_before
     with timed_operation("xbrl_core.read_parents"):
         filings = sorted(
-            read_filings(open_filings_table(catalog, data_dir)[0]),
+            read_filings(FILINGS_SPEC.open(catalog, data_dir)[0]),
             key=lambda f: (f.filing_date, f.filing_id),
         )
-        documents_table, _ = open_documents_table(catalog, data_dir)
+        documents_table, _ = DOCUMENTS_SPEC.open(catalog, data_dir)
         stored = read_instance_groups(tables[XBRL_INSTANCES_TABLE])
         sources = {
             d.document_id: d

@@ -14,7 +14,6 @@ from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 
 from src.data_pipeline.contracts.sec_filings.documents import (
-    DOCUMENTS_ARROW_SCHEMA,
     DocumentRecord,
 )
 from src.data_pipeline.contracts.sec_filings.xbrl_concepts import (
@@ -41,29 +40,24 @@ from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import (
     append_rows,
     current_snapshot_id,
-    filing_dates_filter,
     open_silver_catalog,
-    read_groups_in,
-    read_rows_in,
     scan_batches,
     snapshot_total,
     summarize_groups,
     verify_append,
     verify_written_groups,
 )
-from src.data_pipeline.storage.sec_filings.documents import open_documents_table
 from src.data_pipeline.storage.sec_filings.xbrl_core import (
-    XBRL_CONTEXTS_TABLE,
-    XBRL_INSTANCES_TABLE,
-    XBRL_UNITS_TABLE,
-    open_xbrl_core_table,
-    read_instance_groups,
+    XBRL_CONTEXTS_SPEC,
+    XBRL_UNITS_SPEC,
+    read_filing_documents,
+    read_instances_with_sources,
 )
 from src.data_pipeline.storage.sec_filings.xbrl_facts import (
+    XBRL_CONCEPTS_SPEC,
     XBRL_CONCEPTS_TABLE,
+    XBRL_FACTS_SPEC,
     XBRL_FACTS_TABLE,
-    open_xbrl_concepts_table,
-    open_xbrl_facts_table,
     read_concept_hashes,
     read_refs_by_instance,
 )
@@ -213,32 +207,16 @@ class _Run:
 def _batch_inputs(run: _Run, batch: Sequence[XbrlInstanceRecord]) -> ExtractionInputs:
     """Documents, refs and stored content of the batch's filings and instances."""
 
-    filings = {instance.filing_id for instance in batch}
-    dates = {
-        run.sources[document_id].filing_date
-        for instance in batch
-        for document_id in instance.source_document_ids
-        if document_id in run.sources
-    }
-    documents = {
-        row["document_id"]: DocumentRecord.model_validate(row)
-        for rows in read_groups_in(
-            open_documents_table(run.catalog, run.data_dir)[0],
-            "filing_id",
-            filings,
-            files=filing_dates_filter(dates),
-        ).values()
-        for row in rows
-    }
+    documents = read_filing_documents(run.catalog, run.data_dir, batch, run.sources)
     ids = {instance.instance_id for instance in batch}
     refs = InstanceRefs(
         contexts=read_refs_by_instance(
-            open_xbrl_core_table(run.catalog, run.data_dir, XBRL_CONTEXTS_TABLE)[0],
+            XBRL_CONTEXTS_SPEC.open(run.catalog, run.data_dir)[0],
             "context_ref",
             ids,
         ),
         units=read_refs_by_instance(
-            open_xbrl_core_table(run.catalog, run.data_dir, XBRL_UNITS_TABLE)[0],
+            XBRL_UNITS_SPEC.open(run.catalog, run.data_dir)[0],
             "unit_ref",
             ids,
         ),
@@ -306,11 +284,9 @@ def _run_facts(
 ) -> None:
     data_dir, bronze = dirs
     tables = {}
-    for identifier, opener in (
-        (XBRL_CONCEPTS_TABLE, open_xbrl_concepts_table),
-        (XBRL_FACTS_TABLE, open_xbrl_facts_table),
-    ):
-        tables[identifier], created = opener(catalog, data_dir)
+    for spec in (XBRL_CONCEPTS_SPEC, XBRL_FACTS_SPEC):
+        identifier = spec.identifier
+        tables[identifier], created = spec.open(catalog, data_dir)
         name = identifier.split(".", 1)[1]
         logger.info(
             f"{name}_table_{'created' if created else 'loaded'}", table=identifier
@@ -323,22 +299,8 @@ def _run_facts(
         facts_table
     )
     with timed_operation("xbrl_facts.read_parents"):
-        instances = {
-            record.instance_id: record
-            for rows in read_instance_groups(
-                open_xbrl_core_table(catalog, data_dir, XBRL_INSTANCES_TABLE)[0]
-            ).values()
-            for record in map(XbrlInstanceRecord.model_validate, rows)
-        }
-        sources = {
-            row["document_id"]: DocumentRecord.model_validate(row)
-            for row in read_rows_in(
-                open_documents_table(catalog, data_dir)[0],
-                "document_id",
-                {d for i in instances.values() for d in i.source_document_ids},
-                columns=DOCUMENTS_ARROW_SCHEMA.names,
-            )
-        }
+        records, sources = read_instances_with_sources(catalog, data_dir)
+        instances = {record.instance_id: record for record in records}
         stored_facts = summarize_groups(facts_table, "instance_id", "fact_order")
         run = _Run(
             catalog,

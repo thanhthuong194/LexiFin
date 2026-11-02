@@ -51,18 +51,18 @@ from src.data_pipeline.storage.iceberg import (
     verify_append,
 )
 from src.data_pipeline.storage.sec_filings.content_blocks import (
-    open_content_blocks_table,
+    CONTENT_BLOCKS_SPEC,
 )
 from src.data_pipeline.storage.sec_filings.document_table_cells import (
+    DOCUMENT_TABLE_CELLS_SPEC,
     DOCUMENT_TABLE_CELLS_TABLE,
-    open_document_table_cells_table,
 )
 from src.data_pipeline.storage.sec_filings.document_tables import (
+    DOCUMENT_TABLES_SPEC,
     DOCUMENT_TABLES_TABLE,
-    open_document_tables_table,
 )
 from src.data_pipeline.storage.sec_filings.documents import (
-    open_documents_table,
+    DOCUMENTS_SPEC,
     read_primary_html_documents,
 )
 from src.utils.logger import get_logger, log_context
@@ -216,13 +216,13 @@ def _write(
 
 
 def _open_tables(catalog: Catalog, data_dir: Path) -> tuple[Table, Table]:
-    tables_table, created = open_document_tables_table(catalog, data_dir)
+    tables_table, created = DOCUMENT_TABLES_SPEC.open(catalog, data_dir)
     logger.info(
         "document_tables_created" if created else "document_tables_loaded",
         table=DOCUMENT_TABLES_TABLE,
         location=tables_table.location(),
     )
-    cells_table, created = open_document_table_cells_table(catalog, data_dir)
+    cells_table, created = DOCUMENT_TABLE_CELLS_SPEC.open(catalog, data_dir)
     logger.info(
         "document_table_cells_created" if created else "document_table_cells_loaded",
         table=DOCUMENT_TABLE_CELLS_TABLE,
@@ -250,8 +250,8 @@ def _read_state(
     tables, not of cells.
     """
 
-    documents_table, _ = open_documents_table(catalog, data_dir)
-    blocks_table, _ = open_content_blocks_table(catalog, data_dir)
+    documents_table, _ = DOCUMENTS_SPEC.open(catalog, data_dir)
+    blocks_table, _ = CONTENT_BLOCKS_SPEC.open(catalog, data_dir)
     parents = sorted(
         read_primary_html_documents(documents_table),
         key=lambda parent: (parent.filing_date, parent.document_id),
@@ -414,7 +414,7 @@ def _run_tables(
     )
     if summary.documents_conflicted:
         return
-    blocks_table, _ = open_content_blocks_table(catalog, data_dir)
+    blocks_table, _ = CONTENT_BLOCKS_SPEC.open(catalog, data_dir)
     resumed = {parent.document_id for parent in result.resumed}
     candidates = sorted(
         [*result.new, *result.resumed],

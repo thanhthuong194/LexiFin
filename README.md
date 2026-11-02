@@ -1,65 +1,65 @@
 # LexiFin
 
-Data platform cho hồ sơ tài chính: tải hồ sơ SEC 10-K/10-Q/8-K của top-N công ty trong quỹ IVV (S&P 500) về lớp **Bronze** (file gốc, bất biến), rồi dựng lớp **Silver** gồm 19 bảng Apache Iceberg có contract, lineage về tận byte của file Bronze và một integrity gate kiểm toàn bộ dữ liệu. Gold (RAG, GraphRAG, ML) dựng trên Silver.
+Data platform for financial filings. It downloads SEC 10-K/10-Q/8-K filings of the top-N companies in the IVV ETF (S&P 500) into an immutable **Bronze** layer, then builds a **Silver** layer of 19 Apache Iceberg tables with row contracts, byte-level lineage back to Bronze, and an integrity gate over all data. Gold (RAG, GraphRAG, ML) builds on Silver.
 
-## Kiến trúc
+## Architecture
 
 ```
-SEC EDGAR + iShares ──ingest──▶ Bronze (file gốc + manifest chỉ append)
+SEC EDGAR + iShares ──ingest──▶ Bronze (source files + append-only manifest)
                                    │
-                                   ▼  build_silver.py: 12 stage, theo lô, chạy lại được
-                                Silver (19 bảng Iceberg, catalog SQLite)
+                                   ▼  build_silver.py: 12 stages, batched, resumable
+                                Silver (19 Iceberg tables, SQLite catalog)
                                    │   filings → documents → filing_entities → narrative → tables
                                    │   → links → exhibit index → XBRL core → facts → enrichment
-                                   │   → linkbases → integrity (audit chỉ đọc cả 19 bảng)
+                                   │   → linkbases → integrity (read-only audit of all 19 tables)
                                    ▼
-                                Gold (đang làm)
+                                Gold (in progress)
 ```
 
-- **Idempotent và incremental:** mỗi stage chỉ ghi group chưa có, skip group đã đủ; chạy lại lệnh là tiếp tục từ chỗ dừng. Không có global rollback: lô lỗi không ghi gì, các lô trước đã commit.
-- **Contract:** mỗi row được validate bằng model pydantic (`src/data_pipeline/contracts/`) trước khi ghi; audit validate lại từng row cùng khoá, 32 FK, lineage và count.
-- **Bộ nhớ có giới hạn:** đọc/ghi theo lô, không đọc lại cả bảng; build 500 công ty chạy trong 12 GB.
-- **XBRL** được nạp bằng Arelle cùng DTS, song song nhiều process (`--xbrl-workers`), taxonomy lấy từ cache offline.
+- **Idempotent, incremental:** each stage writes only missing groups and skips complete ones; rerunning a command resumes. No global rollback: a failed batch writes nothing, earlier batches stay committed.
+- **Contracts:** every row is validated by a pydantic model (`src/data_pipeline/contracts/`) before writing; the audit revalidates every row plus keys, 32 FKs, lineage and counts.
+- **Bounded memory:** reads and writes in batches, never rereads whole tables; a 500-company build runs in 12 GB.
+- **XBRL** is loaded with Arelle including the DTS, in parallel processes (`--xbrl-workers`), from an offline taxonomy cache.
 
-Model dữ liệu (grain, khoá, quan hệ, lineage): [`docs/data/sec_filings_silver_model.md`](docs/data/sec_filings_silver_model.md). Chi tiết vận hành, số đo và các bẫy đã gặp: [`AGENTS.md`](AGENTS.md).
+Data model (grain, keys, relations, lineage): [`docs/data/sec_filings_silver_model.md`](docs/data/sec_filings_silver_model.md). Operations, measurements and known traps: [`AGENTS.md`](AGENTS.md).
 
-## Cài đặt
+## Setup
 
-Cần Python 3.13 và [uv](https://docs.astral.sh/uv/).
+Requires Python 3.13 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 make install            # uv sync --locked
-cp .env.example .env    # SEC yêu cầu tên + email trong User-Agent
+cp .env.example .env    # SEC requires a name and email in the User-Agent
 ```
 
-## Chạy
+## Run
 
-| Việc | Lệnh |
+| Task | Command |
 | --- | --- |
-| Tải Bronze (gọi SEC) | `uv run python scripts/ingest_sec_edgar.py --data-dir <dir> --company-limit 1 --lookback-years 1` |
-| Dựng Silver | `make silver DATA_DIR=<silver> BRONZE_DIR=<bronze>` (lần đầu thêm `ARGS=--allow-taxonomy-network` để tải taxonomy vào cache) |
-| Audit Silver (chỉ đọc) | `make audit DATA_DIR=<silver> BRONZE_DIR=<bronze>` |
-| Bronze lớn (warm cache → benchmark → build, giới hạn RAM) | `scripts/sec_filings/run_silver.sh all <bronze> <out>` |
-| Truy vấn Silver bằng SQL | `uv run python scripts/sec_filings/query_silver.py scripts/sec_filings/queries/item_1a.sql --data-dir <silver>` |
+| Download Bronze (calls SEC) | `uv run python scripts/ingest_sec_edgar.py --data-dir <dir> --company-limit 1 --lookback-years 1` |
+| Build Silver | `make silver DATA_DIR=<silver> BRONZE_DIR=<bronze>` (first run: add `ARGS=--allow-taxonomy-network` to fill the taxonomy cache) |
+| Audit Silver (read-only) | `make audit DATA_DIR=<silver> BRONZE_DIR=<bronze>` |
+| Large Bronze (warm cache → benchmark → build, RAM-capped) | `scripts/sec_filings/run_silver.sh all <bronze> <out>` |
+| Query Silver with SQL | `uv run python scripts/sec_filings/query_silver.py scripts/sec_filings/queries/item_1a.sql --data-dir <silver>` |
 
-## Phát triển
+## Development
 
 ```bash
-make check   # ruff format + lint, mypy strict, vulture, jscpd, pytest (~9 phút, không gọi mạng)
+make check   # ruff format + lint, mypy strict, vulture, jscpd, pytest (~9 min, offline)
 ```
 
-CI (`.github/workflows/ci.yml`) chạy cùng các bước đó cho mỗi push lên `main` và mỗi pull request.
+CI (`.github/workflows/ci.yml`) runs the same steps on every push to `main` and every pull request.
 
-## Cấu trúc
+## Layout
 
 ```
 src/data_pipeline/
-  connectors/   nguồn ngoài (SEC EDGAR, iShares)
-  contracts/    schema + validate của từng bảng
-  transforms/   parse thuần (HTML, SEC header, XBRL)
-  pipelines/    stage Bronze và Silver (đọc → dựng → validate → ghi theo lô)
-  storage/      Bronze, Iceberg, định nghĩa bảng
-  quality/      kiểm tra Bronze, audit Silver
-scripts/        entry point CLI
-tests/          unit + integration (offline, fixture giả lập SEC)
+  connectors/   external sources (SEC EDGAR, iShares)
+  contracts/    per-table schema and validation
+  transforms/   pure parsing (HTML, SEC header, XBRL)
+  pipelines/    Bronze and Silver stages (read → build → validate → write in batches)
+  storage/      Bronze, Iceberg, table specs
+  quality/      Bronze checks, Silver audit
+scripts/        CLI entry points
+tests/          unit + integration (offline, fake SEC fixtures)
 ```

@@ -13,7 +13,6 @@ from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 
 from src.data_pipeline.contracts.sec_filings.documents import (
-    DOCUMENTS_ARROW_SCHEMA,
     DocumentRecord,
 )
 from src.data_pipeline.contracts.sec_filings.xbrl_core import XbrlInstanceRecord
@@ -45,33 +44,31 @@ from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import (
     append_rows,
     current_snapshot_id,
-    filing_dates_filter,
     iter_rows,
     open_silver_catalog,
     read_groups_in,
-    read_rows_in,
     snapshot_total,
     summarize_groups,
     verify_append,
     verify_written_groups,
     verify_written_values,
 )
-from src.data_pipeline.storage.sec_filings.documents import open_documents_table
 from src.data_pipeline.storage.sec_filings.xbrl_core import (
-    XBRL_INSTANCES_TABLE,
-    open_xbrl_core_table,
-    read_instance_groups,
+    read_filing_documents,
+    read_instances_with_sources,
 )
 from src.data_pipeline.storage.sec_filings.xbrl_facts import (
-    open_xbrl_concepts_table,
+    XBRL_CONCEPTS_SPEC,
     read_concept_hashes,
 )
 from src.data_pipeline.storage.sec_filings.xbrl_linkbases import (
     RELATIONSHIP_HEAD_COLUMNS,
+    XBRL_LABELS_SPEC,
     XBRL_LABELS_TABLE,
+    XBRL_NETWORKS_SPEC,
     XBRL_NETWORKS_TABLE,
+    XBRL_RELATIONSHIPS_SPEC,
     XBRL_RELATIONSHIPS_TABLE,
-    open_xbrl_linkbase_table,
     read_concept_references,
     read_label_ids,
 )
@@ -145,22 +142,7 @@ def _read_state(
 ) -> tuple[list[XbrlInstanceRecord], dict[str, DocumentRecord], StoredLinkbases]:
     """Instances, their source documents, and summaries of the stored networks."""
 
-    instances = [
-        XbrlInstanceRecord.model_validate(row)
-        for rows in read_instance_groups(
-            open_xbrl_core_table(catalog, data_dir, XBRL_INSTANCES_TABLE)[0]
-        ).values()
-        for row in rows
-    ]
-    sources = {
-        row["document_id"]: DocumentRecord.model_validate(row)
-        for row in read_rows_in(
-            open_documents_table(catalog, data_dir)[0],
-            "document_id",
-            {d for instance in instances for d in instance.source_document_ids},
-            columns=DOCUMENTS_ARROW_SCHEMA.names,
-        )
-    }
+    instances, sources = read_instances_with_sources(catalog, data_dir)
     heads: dict[str, list[tuple[str, int]]] = defaultdict(list)
     for row in iter_rows(
         tables[XBRL_NETWORKS_TABLE], ("instance_id", "network_id", "relationship_count")
@@ -181,7 +163,7 @@ def _read_state(
             declared="network_relationship_count",
         ),
     )
-    return sorted(instances, key=lambda i: i.instance_id), sources, stored
+    return instances, sources, stored
 
 
 def _write(
@@ -274,22 +256,7 @@ def _batch_states(
     """The batch's instances with their stored networks, and its filings' documents."""
 
     instances = [state.instance for state in batch]
-    dates = {
-        run.sources[d].filing_date
-        for instance in instances
-        for d in instance.source_document_ids
-        if d in run.sources
-    }
-    documents = {
-        row["document_id"]: DocumentRecord.model_validate(row)
-        for rows in read_groups_in(
-            open_documents_table(run.catalog, run.data_dir)[0],
-            "filing_id",
-            {instance.filing_id for instance in instances},
-            files=filing_dates_filter(dates),
-        ).values()
-        for row in rows
-    }
+    documents = read_filing_documents(run.catalog, run.data_dir, instances, run.sources)
     networks = read_groups_in(
         tables[XBRL_NETWORKS_TABLE],
         "instance_id",
@@ -355,14 +322,9 @@ def _run_linkbases(
 ) -> None:
     data_dir, bronze = dirs
     tables = {}
-    for identifier in (
-        XBRL_LABELS_TABLE,
-        XBRL_NETWORKS_TABLE,
-        XBRL_RELATIONSHIPS_TABLE,
-    ):
-        tables[identifier], created = open_xbrl_linkbase_table(
-            catalog, data_dir, identifier
-        )
+    for spec in (XBRL_LABELS_SPEC, XBRL_NETWORKS_SPEC, XBRL_RELATIONSHIPS_SPEC):
+        identifier = spec.identifier
+        tables[identifier], created = spec.open(catalog, data_dir)
         name = identifier.split(".", 1)[1]
         logger.info(
             f"{name}_table_{'created' if created else 'loaded'}", table=identifier
@@ -385,7 +347,7 @@ def _run_linkbases(
             settings,
             processed_at,
             sources,
-            set(read_concept_hashes(open_xbrl_concepts_table(catalog, data_dir)[0])),
+            set(read_concept_hashes(XBRL_CONCEPTS_SPEC.open(catalog, data_dir)[0])),
             read_label_ids(tables[XBRL_LABELS_TABLE]),
         )
         references = read_concept_references(

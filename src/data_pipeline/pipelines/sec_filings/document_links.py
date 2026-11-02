@@ -37,10 +37,10 @@ from src.data_pipeline.storage.iceberg import (
     verify_append,
 )
 from src.data_pipeline.storage.sec_filings.document_links import (
+    DOCUMENT_LINKS_SPEC,
     DOCUMENT_LINKS_TABLE,
-    open_document_links_table,
 )
-from src.data_pipeline.storage.sec_filings.documents import open_documents_table
+from src.data_pipeline.storage.sec_filings.documents import DOCUMENTS_SPEC
 from src.utils.logger import get_logger, log_context
 from src.utils.timer import timed_operation
 
@@ -275,14 +275,14 @@ def _run_links(
     run: tuple[SecBronze, datetime],
     summary: DocumentLinksStageSummary,
 ) -> None:
-    table, created = open_document_links_table(catalog, data_dir)
+    table, created = DOCUMENT_LINKS_SPEC.open(catalog, data_dir)
     logger.info(
         "document_links_table_created" if created else "document_links_table_loaded",
         location=table.location(),
     )
     summary.snapshot_before = summary.snapshot_after = current_snapshot_id(table)
     with timed_operation("document_links.read"):
-        documents_table, _ = open_documents_table(catalog, data_dir)
+        documents_table, _ = DOCUMENTS_SPEC.open(catalog, data_dir)
         sources = _read_sources(documents_table)
         stored = summarize_groups(
             table,

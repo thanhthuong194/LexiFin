@@ -30,7 +30,10 @@ from src.data_pipeline.quality.sec_filings.silver_audit_sql import (
     deriver,
     run_sql_checks,
 )
-from src.data_pipeline.quality.sec_filings.silver_model import SILVER_TABLES
+from src.data_pipeline.quality.sec_filings.silver_model import (
+    AUDITED_TABLES,
+    SILVER_TABLES,
+)
 from src.data_pipeline.storage.iceberg import SilverTableSpec
 
 pytestmark = pytest.mark.unit
@@ -57,7 +60,7 @@ def _load(
     """
 
     for identifier, table_rows in rows.items():
-        spec = next(t.spec for t in SILVER_TABLES if t.identifier == identifier)
+        spec = AUDITED_TABLES[identifier].spec
         columns = list(scratch.columns[identifier])
         if identifier == INSTANCES and "source_document_ids" not in columns:
             columns.append("source_document_ids")

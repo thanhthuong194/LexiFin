@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Collection
-from pathlib import Path
 from typing import Any
 
-from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 
 from src.data_pipeline.contracts.sec_filings.xbrl_dimensions import (
@@ -30,20 +28,6 @@ XBRL_DIMENSIONS_SPEC = SilverTableSpec(
 XBRL_FACT_FOOTNOTES_SPEC = SilverTableSpec(
     XBRL_FACT_FOOTNOTES_TABLE, XBRL_FACT_FOOTNOTES_ARROW_SCHEMA
 )
-
-
-def open_xbrl_dimensions_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
-    """Load or create the unpartitioned `sec_filings.xbrl_dimensions`."""
-
-    return XBRL_DIMENSIONS_SPEC.open(catalog, data_dir)
-
-
-def open_xbrl_fact_footnotes_table(
-    catalog: Catalog, data_dir: Path
-) -> tuple[Table, bool]:
-    """Load or create the unpartitioned `sec_filings.xbrl_fact_footnotes`."""
-
-    return XBRL_FACT_FOOTNOTES_SPEC.open(catalog, data_dir)
 
 
 def read_contexts_by_instance(

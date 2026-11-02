@@ -79,7 +79,7 @@ from src.data_pipeline.storage.iceberg import append_rows, open_silver_catalog
 from src.data_pipeline.storage.sec_filings.filing_entities import (
     read_filing_entity_groups,
 )
-from src.data_pipeline.storage.sec_filings.xbrl_core import XBRL_CORE_SCHEMAS
+from src.data_pipeline.storage.sec_filings.xbrl_core import XBRL_CORE_SPECS
 from src.data_pipeline.transforms.sec_filings.xbrl_model_reader import (
     XbrlProcessorError,
 )
@@ -1389,7 +1389,9 @@ def test_xbrl_core_builds_instances_contexts_and_units_and_reruns_skip(
     assert (summary.default_targets, summary.xml_only_instances) == (3, 0)
     assert (summary.instant_contexts, summary.duration_contexts) == (2, 4)
     assert (summary.simple_units, summary.divide_units) == (4, 1)
-    for identifier, schema in XBRL_CORE_SCHEMAS.items():
+    for identifier, schema in (
+        (i, spec.arrow_schema) for i, spec in XBRL_CORE_SPECS.items()
+    ):
         table = _table(tmp_path, identifier)
         assert table.location() == str(
             tmp_path / "silver" / "sec_filings" / identifier.split(".")[1]
@@ -1449,7 +1451,7 @@ def test_xbrl_core_recovers_child_groups_after_a_failed_commit(
     _write_bronze(tmp_path, write_sec_filing)
 
     def fail_on(table: Table, rows, arrow_schema) -> None:
-        if arrow_schema is XBRL_CORE_SCHEMAS[failing]:
+        if arrow_schema is XBRL_CORE_SPECS[failing].arrow_schema:
             raise OSError("disk full")
         append_rows(table, rows, arrow_schema)
 
@@ -1491,7 +1493,7 @@ def _replace_instance(data_dir: Path, document: str, **changes: object) -> None:
             changed = XbrlInstanceRecord.model_validate(
                 {**row, "namespace_map": dict(row["namespace_map"]), **changes}
             )
-            append_rows(table, [changed], XBRL_CORE_SCHEMAS[INSTANCES])
+            append_rows(table, [changed], XBRL_CORE_SPECS[INSTANCES].arrow_schema)
 
 
 @pytest.mark.parametrize(

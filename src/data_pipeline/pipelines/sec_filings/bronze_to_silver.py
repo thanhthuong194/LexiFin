@@ -70,10 +70,11 @@ class SilverRunResult:
     """One Bronze -> Silver run: each stage's summary and the run's totals.
 
     A stage field holds that stage's summary, or None when it did not run:
-    it was not requested, a prerequisite table was missing, or an earlier
-    stage failed (stages stop at the first rejected stage or failed audit, so
-    child rows are only built from committed parents). Table states are read
-    from metadata before and after the run.
+    it was not requested, a table was missing or off its definition
+    (`table_problems`), or an earlier stage failed (stages stop at the first
+    rejected stage or failed audit, so child rows are only built from
+    committed parents). Table states are read from metadata before and after
+    the run.
     """
 
     run_id: str
@@ -82,7 +83,7 @@ class SilverRunResult:
     finished_at: datetime
     stages_requested: tuple[str, ...]
     failed_stage: str | None
-    prerequisite_problems: tuple[str, ...]
+    table_problems: tuple[str, ...]
     tables_before: dict[str, TableState | None]
     tables_after: dict[str, TableState | None]
     filings: FilingsStageSummary | None = None
@@ -189,7 +190,7 @@ class SilverRunResult:
                 if failed is not None and not isinstance(failed, SilverAuditReport)
                 else None
             ),
-            "prerequisite_problems": list(self.prerequisite_problems),
+            "table_problems": list(self.table_problems),
             "tables_created": [
                 table
                 for table, before in self.tables_before.items()
@@ -262,22 +263,26 @@ def _table_states(
     return states
 
 
-def _prerequisite_problems(
-    data_dir: Path, specs: Sequence[SilverTableSpec]
+def _table_problems(
+    data_dir: Path,
+    required: Sequence[SilverTableSpec],
+    written: Sequence[SilverTableSpec],
 ) -> list[str]:
-    """Why tables a run reads but does not write are missing or off-contract."""
+    """Why tables a run reads but does not write (`required`) are missing,
+    or why any of them or of the existing tables it writes differ from their
+    definition (schema, partitioning, rules version); creates nothing."""
 
-    if not specs:
-        return []
     if not _catalog_exists(data_dir):
-        return [f"no Silver catalog under {data_dir}"]
+        return [f"no Silver catalog under {data_dir}"] if required else []
     problems = []
+    must_exist = {spec.identifier for spec in required}
     with open_silver_catalog(data_dir) as catalog:
-        for spec in specs:
+        for spec in (*required, *written):
             try:
                 table = catalog.load_table(spec.identifier)
             except NoSuchTableError:
-                problems.append(f"{spec.identifier} does not exist")
+                if spec.identifier in must_exist:
+                    problems.append(f"{spec.identifier} does not exist")
                 continue
             problem = spec.definition_problem(table)
             if problem is not None:
@@ -360,9 +365,10 @@ def run_sec_filings_silver(  # noqa: PLR0913 - keyword-only run options
     Runs the stages of SILVER_STAGES from `from_stage` through `to_stage`
     (default: all, ending with the read-only integrity audit) in their
     dependency order. A stage before `from_stage` is not run: the tables of
-    every stage the run depends on must already exist with their contract
-    definition, otherwise nothing runs. A stage rejects conflicts before its
-    first append and commits in batches, so a failed batch writes nothing,
+    every stage the run depends on must already exist, and they and the
+    existing tables the run writes must match their definition (schema,
+    partitioning, rules version), otherwise nothing runs. A stage rejects
+    conflicts before its first append and commits in batches, so a failed batch writes nothing,
     later stages do not run, and a rerun completes whatever is missing; there
     is no global rollback. Bronze is read from `bronze_dir` (default
     `<data_dir>/bronze/sec_filings`); the catalog and tables live under
@@ -409,14 +415,18 @@ def run_sec_filings_silver(  # noqa: PLR0913 - keyword-only run options
         try:
             with timed_operation("silver_pipeline.total"):
                 before = _table_states(data_dir, written)
-                problems = _prerequisite_problems(
-                    data_dir, prerequisite_tables(SILVER_STAGES, selected)
+                problems = _table_problems(
+                    data_dir, prerequisite_tables(SILVER_STAGES, selected), written
                 )
+                if problems:
+                    logger.error("silver_tables_invalid", problems=problems)
                 failed_stage = _run_stages(
                     selected,
                     context,
                     outcomes,
-                    "prerequisite tables are missing or invalid" if problems else None,
+                    "tables are missing or differ from their definition"
+                    if problems
+                    else None,
                 )
                 after = _table_states(data_dir, written)
         except Exception as error:
@@ -433,7 +443,7 @@ def run_sec_filings_silver(  # noqa: PLR0913 - keyword-only run options
             finished_at=datetime.now(UTC),
             stages_requested=tuple(stage.name for stage in selected),
             failed_stage=failed_stage,
-            prerequisite_problems=tuple(problems),
+            table_problems=tuple(problems),
             tables_before=before,
             tables_after=after,
             **outcomes,  # type: ignore[arg-type]  # keyed by stage name, one field per stage

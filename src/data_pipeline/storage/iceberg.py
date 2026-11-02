@@ -29,6 +29,9 @@ from pyiceberg.types import NestedField
 SILVER_CATALOG_NAME = "lexifin_silver"
 # Iceberg reserves partition field IDs from 1000 upwards.
 _FIRST_PARTITION_FIELD_ID = 1000
+# Table property holding the version of the rules a table's rows were built
+# with. Tables created before it existed carry none: they are version 1.
+RULES_VERSION_PROPERTY = "lexifin.rules-version"
 
 
 @dataclass(frozen=True)
@@ -146,55 +149,30 @@ def _partition_spec(
     )
 
 
-def create_or_load_table(
-    catalog: Catalog,
-    identifier: str,
-    *,
-    arrow_schema: pa.Schema,
-    location: Path,
-    partition_by: Sequence[PartitionColumn],
-) -> tuple[Table, bool]:
-    """Load a table, or create it with the given schema and hidden partitioning.
-
-    Returns the table and whether it was created. An existing table must have
-    exactly the expected schema and partition spec; schema or partition
-    evolution is not handled here, so a mismatch raises ValueError.
-    """
-
-    schema = _iceberg_schema(arrow_schema)
-    spec = _partition_spec(schema, partition_by)
-    namespace = identifier.rsplit(".", maxsplit=1)[0]
-    catalog.create_namespace_if_not_exists(namespace)
-    try:
-        table = catalog.load_table(identifier)
-    except NoSuchTableError:
-        table = catalog.create_table(
-            identifier,
-            schema=schema,
-            location=str(location),
-            partition_spec=spec,
-        )
-        return table, True
-
-    problem = table_definition_problem(table, arrow_schema, partition_by)
-    if problem is not None:
-        raise ValueError(f"Iceberg table {identifier} {problem}")
-    return table, False
-
-
 def _describe_field(field: NestedField) -> str:
     nullability = "required" if field.required else "optional"
     return f"{field.field_id}:{field.name} {field.field_type} {nullability}"
 
 
+def table_rules_version(table: Table) -> int:
+    """The version of the rules the table's rows were built with."""
+
+    return int(table.properties.get(RULES_VERSION_PROPERTY, "1"))
+
+
 def table_definition_problem(
-    table: Table, arrow_schema: pa.Schema, partition_by: Sequence[PartitionColumn]
+    table: Table,
+    arrow_schema: pa.Schema,
+    partition_by: Sequence[PartitionColumn],
+    rules_version: int,
 ) -> str | None:
-    """Describe how a table's schema or partition spec differs from its contract.
+    """Describe how a table's schema, partition spec or rules version differs
+    from its definition.
 
     The schema must equal the contract's field for field (ID in column order,
     name, type, nullability); the partition fields must be exactly the
-    contract's. Returns None when both match.
+    contract's; the rows must have been built with `rules_version`. Returns
+    None when all match.
     """
 
     schema = _iceberg_schema(arrow_schema)
@@ -219,36 +197,67 @@ def table_definition_problem(
     spec = _partition_spec(schema, partition_by)
     if table.spec().fields != spec.fields:
         return f"partition spec differs: expected {spec}, found {table.spec()}"
+    stored = table_rules_version(table)
+    if stored != rules_version:
+        # Appending would mix rows of two rule sets in one table.
+        return (
+            f"rows were built with rules version {stored}, the code builds "
+            f"version {rules_version}: rebuild the table under control"
+        )
     return None
 
 
 @dataclass(frozen=True)
 class SilverTableSpec:
-    """A Silver table's identifier, contract schema and hidden partitioning.
+    """A Silver table's identifier, contract schema, hidden partitioning and
+    rules version.
 
     The one definition that its stage creates the table from and that the
-    audit and the pipeline registry check it against.
+    audit and the pipeline registry check it against. `rules_version` is the
+    version of the rules that build the table's rows from Bronze: bump it
+    whenever the same Bronze would give different rows, then rebuild the
+    table under control (AGENTS.md); until then no stage writes to it or
+    reads it.
     """
 
     identifier: str
     arrow_schema: pa.Schema
     partition_by: tuple[PartitionColumn, ...] = ()
+    rules_version: int = 1
 
     def open(self, catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
-        """Load or create the table under `data_dir`; return whether it was created."""
+        """Load the table, or create it under `data_dir` from this definition;
+        return whether it was created.
 
-        return create_or_load_table(
-            catalog,
-            self.identifier,
-            arrow_schema=self.arrow_schema,
-            location=silver_table_location(data_dir, self.identifier),
-            partition_by=self.partition_by,
-        )
+        An existing table must match this definition exactly; schema or
+        partition evolution and rebuilds are not handled here, so a mismatch
+        raises ValueError.
+        """
+
+        schema = _iceberg_schema(self.arrow_schema)
+        catalog.create_namespace_if_not_exists(self.identifier.rsplit(".", 1)[0])
+        try:
+            table = catalog.load_table(self.identifier)
+        except NoSuchTableError:
+            table = catalog.create_table(
+                self.identifier,
+                schema=schema,
+                location=str(silver_table_location(data_dir, self.identifier)),
+                partition_spec=_partition_spec(schema, self.partition_by),
+                properties={RULES_VERSION_PROPERTY: str(self.rules_version)},
+            )
+            return table, True
+        problem = self.definition_problem(table)
+        if problem is not None:
+            raise ValueError(f"Iceberg table {self.identifier} {problem}")
+        return table, False
 
     def definition_problem(self, table: Table) -> str | None:
         """How a loaded table differs from this definition, or None."""
 
-        return table_definition_problem(table, self.arrow_schema, self.partition_by)
+        return table_definition_problem(
+            table, self.arrow_schema, self.partition_by, self.rules_version
+        )
 
 
 def current_snapshot_id(table: Table) -> int | None:

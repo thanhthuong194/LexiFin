@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import unicodedata
 from typing import Any
 
@@ -8,6 +7,7 @@ import pyarrow as pa
 from pydantic import AwareDatetime, Field, model_validator
 
 from src.data_pipeline.contracts.ingestion import ContractModel
+from src.data_pipeline.contracts.sec_filings.content_blocks import sha256_text
 from src.data_pipeline.contracts.sec_filings.filings import SHA256_PATTERN
 from src.data_pipeline.contracts.sec_filings.xbrl_core import canonical_sha256
 
@@ -106,8 +106,7 @@ class XbrlLabelRecord(ContractModel):
             raise ValueError("label_text must be normalized")
         if self.language is not None and self.language != self.language.strip().lower():
             raise ValueError("language must be a trimmed lowercase tag")
-        digest = hashlib.sha256(self.label_text.encode()).hexdigest()
-        if self.label_text_sha256 != digest:
+        if self.label_text_sha256 != sha256_text(self.label_text):
             raise ValueError("label_text_sha256 does not match label_text")
         if self.label_id != label_id_for(self.model_dump()):
             raise ValueError("label_id must be derived from the relationship")

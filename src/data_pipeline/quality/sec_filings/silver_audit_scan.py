@@ -15,92 +15,14 @@ from pydantic import AwareDatetime, BaseModel, NaiveDatetime, ValidationError
 from pyiceberg.io.pyarrow import pyarrow_to_schema
 from pyiceberg.table import Table
 
-from src.data_pipeline.contracts.sec_filings.content_blocks import ContentBlockRecord
-from src.data_pipeline.contracts.sec_filings.document_links import DocumentLinkRecord
-from src.data_pipeline.contracts.sec_filings.document_table_cells import (
-    DocumentTableCellRecord,
-)
-from src.data_pipeline.contracts.sec_filings.document_tables import DocumentTableRecord
-from src.data_pipeline.contracts.sec_filings.documents import DocumentRecord
-from src.data_pipeline.contracts.sec_filings.exhibits import ExhibitRecord
-from src.data_pipeline.contracts.sec_filings.filing_entities import FilingEntityRecord
-from src.data_pipeline.contracts.sec_filings.filings import FilingRecord
-from src.data_pipeline.contracts.sec_filings.sections import SectionRecord
-from src.data_pipeline.contracts.sec_filings.xbrl_concepts import XbrlConceptRecord
-from src.data_pipeline.contracts.sec_filings.xbrl_core import (
-    XbrlContextRecord,
-    XbrlInstanceRecord,
-    XbrlUnitRecord,
-)
-from src.data_pipeline.contracts.sec_filings.xbrl_dimensions import (
-    XbrlDimensionRecord,
-)
-from src.data_pipeline.contracts.sec_filings.xbrl_fact_footnotes import (
-    XbrlFactFootnoteRecord,
-)
-from src.data_pipeline.contracts.sec_filings.xbrl_facts import XbrlFactRecord
-from src.data_pipeline.contracts.sec_filings.xbrl_labels import XbrlLabelRecord
-from src.data_pipeline.contracts.sec_filings.xbrl_networks import (
-    XbrlNetworkRecord,
-    XbrlRelationshipRecord,
-)
 from src.data_pipeline.quality.sec_filings.silver_audit_report import (
     SAMPLE_IDS,
     SilverAuditReport,
 )
+from src.data_pipeline.quality.sec_filings.silver_model import AUDITED_TABLES
 from src.data_pipeline.storage.iceberg import snapshot_total
-from src.data_pipeline.storage.sec_filings.content_blocks import CONTENT_BLOCKS_TABLE
-from src.data_pipeline.storage.sec_filings.document_links import DOCUMENT_LINKS_TABLE
-from src.data_pipeline.storage.sec_filings.document_table_cells import (
-    DOCUMENT_TABLE_CELLS_TABLE,
-)
-from src.data_pipeline.storage.sec_filings.document_tables import DOCUMENT_TABLES_TABLE
-from src.data_pipeline.storage.sec_filings.documents import DOCUMENTS_TABLE
-from src.data_pipeline.storage.sec_filings.exhibits import EXHIBITS_TABLE
-from src.data_pipeline.storage.sec_filings.filing_entities import FILING_ENTITIES_TABLE
-from src.data_pipeline.storage.sec_filings.filings import FILINGS_TABLE
-from src.data_pipeline.storage.sec_filings.sections import SECTIONS_TABLE
-from src.data_pipeline.storage.sec_filings.xbrl_core import (
-    XBRL_CONTEXTS_TABLE,
-    XBRL_INSTANCES_TABLE,
-    XBRL_UNITS_TABLE,
-)
-from src.data_pipeline.storage.sec_filings.xbrl_enrichment import (
-    XBRL_DIMENSIONS_TABLE,
-    XBRL_FACT_FOOTNOTES_TABLE,
-)
-from src.data_pipeline.storage.sec_filings.xbrl_facts import (
-    XBRL_CONCEPTS_TABLE,
-    XBRL_FACTS_TABLE,
-)
-from src.data_pipeline.storage.sec_filings.xbrl_linkbases import (
-    XBRL_LABELS_TABLE,
-    XBRL_NETWORKS_TABLE,
-    XBRL_RELATIONSHIPS_TABLE,
-)
+from src.data_pipeline.storage.sec_filings.xbrl_core import XBRL_INSTANCES_TABLE
 
-# The record contract of every Silver table.
-RECORD_MODELS: dict[str, type[BaseModel]] = {
-    FILINGS_TABLE: FilingRecord,
-    DOCUMENTS_TABLE: DocumentRecord,
-    FILING_ENTITIES_TABLE: FilingEntityRecord,
-    SECTIONS_TABLE: SectionRecord,
-    CONTENT_BLOCKS_TABLE: ContentBlockRecord,
-    DOCUMENT_TABLES_TABLE: DocumentTableRecord,
-    DOCUMENT_TABLE_CELLS_TABLE: DocumentTableCellRecord,
-    DOCUMENT_LINKS_TABLE: DocumentLinkRecord,
-    EXHIBITS_TABLE: ExhibitRecord,
-    XBRL_INSTANCES_TABLE: XbrlInstanceRecord,
-    XBRL_CONTEXTS_TABLE: XbrlContextRecord,
-    XBRL_UNITS_TABLE: XbrlUnitRecord,
-    XBRL_CONCEPTS_TABLE: XbrlConceptRecord,
-    XBRL_FACTS_TABLE: XbrlFactRecord,
-    XBRL_DIMENSIONS_TABLE: XbrlDimensionRecord,
-    XBRL_FACT_FOOTNOTES_TABLE: XbrlFactFootnoteRecord,
-    XBRL_LABELS_TABLE: XbrlLabelRecord,
-    XBRL_NETWORKS_TABLE: XbrlNetworkRecord,
-    XBRL_RELATIONSHIPS_TABLE: XbrlRelationshipRecord,
-}
 # The Arrow types a record field's Python type may be stored as.
 _ARROW_TYPES: dict[object, Callable[[pa.DataType], bool]] = {
     str: pa.types.is_string,
@@ -244,7 +166,7 @@ def scan_file(
     time on this thread and returns memory to the allocator afterwards.
     """
 
-    model = RECORD_MODELS[identifier]
+    model = AUDITED_TABLES[identifier].record
     key = next(iter(model.model_fields))
     result = FileScan()
     parquet = pq.ParquetFile(local_path(path))

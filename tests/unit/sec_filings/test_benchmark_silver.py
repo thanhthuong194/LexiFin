@@ -188,7 +188,7 @@ def test_report_projects_time_linearly_and_shows_peak_memory_per_half_run(
     # 0.1 s per filing from 50 to 200 filings: 20 + 80 s at 1000 filings;
     # the halves split at 1.5 s.
     assert _filings_row(report).endswith("| 300 / 280 | 100.0 s |")
-    assert "## Lỗi" not in report
+    assert "## Failures" not in report
 
 
 def test_report_needs_samples_of_different_sizes_to_show_scaling(
@@ -205,4 +205,4 @@ def test_report_needs_samples_of_different_sizes_to_show_scaling(
         1000,
     )
 
-    assert "cùng số filing" in report
+    assert "same filing count" in report

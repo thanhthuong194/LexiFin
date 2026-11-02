@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from src.data_pipeline.contracts.sec_filings.content_blocks import sha256_text
 from src.data_pipeline.contracts.sec_filings.xbrl_concepts import concept_id_for
 from src.data_pipeline.contracts.sec_filings.xbrl_labels import (
     XbrlLabelRecord,
@@ -51,7 +51,7 @@ def label_records(
             "source_document_id": label.document,
             "source_xpath": label.source_xpath,
             "arc_xpath": label.arc_xpath,
-            "label_text_sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "label_text_sha256": sha256_text(text),
             "processed_at": processed_at,
         }
         values["label_id"] = label_id_for(values)

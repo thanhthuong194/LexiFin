@@ -28,9 +28,9 @@ from src.data_pipeline.storage.iceberg import (
     verify_append,
 )
 from src.data_pipeline.storage.sec_filings.filings import (
+    FILINGS_SPEC,
     FILINGS_TABLE,
     StoredChecksums,
-    open_filings_table,
     read_stored_checksums,
 )
 from src.data_pipeline.transforms.sec_filings.filings import (
@@ -252,7 +252,7 @@ def _run_filings(
         return
 
     with open_silver_catalog(data_dir) as catalog:
-        table, created = open_filings_table(catalog, data_dir)
+        table, created = FILINGS_SPEC.open(catalog, data_dir)
         logger.info(
             "iceberg_table_created" if created else "iceberg_table_loaded",
             table=FILINGS_TABLE,

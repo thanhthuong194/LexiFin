@@ -1,71 +1,69 @@
 # SEC Silver data model (`sec_filings`)
 
-Tài liệu này mô tả model Silver **đúng như code đang ghi**: 19 bảng Iceberg trong namespace `sec_filings`, dựng từ SEC Bronze bằng `scripts/sec_filings/build_silver.py`. Nguồn sự thật là catalog và code: schema ở `src/data_pipeline/contracts/sec_filings/`, định nghĩa bảng (identifier + schema + partition) ở các `*_SPEC` của `src/data_pipeline/storage/sec_filings/`, thứ tự stage ở `SILVER_STAGES` (`pipelines/sec_filings/silver_stages.py`), bảng/khoá/FK mà audit kiểm ở `quality/sec_filings/silver_model.py`, audit ở `quality/sec_filings/silver_audit.py`.
+This describes the Silver model **as the code writes it**: 19 Iceberg tables in namespace `sec_filings`, built from SEC Bronze by `scripts/sec_filings/build_silver.py`. The source of truth is the catalog and the code: schemas in `src/data_pipeline/contracts/sec_filings/`, table specs (identifier, schema, partition) in the `*_SPEC` constants of `src/data_pipeline/storage/sec_filings/`, stage order in `SILVER_STAGES` (`pipelines/sec_filings/silver_stages.py`), audited tables/keys/FKs in `quality/sec_filings/silver_model.py`, the audit in `quality/sec_filings/silver_audit.py`.
 
-Số liệu "Rows" là của `data/` (343 filing của 5 công ty), đo ngày 2026-10-07; mỗi bảng có đúng 1 snapshot.
+"Rows" are from `data/` (343 filings, 5 companies), measured 2026-10-07; each table has exactly one snapshot.
 
-## 1. Bảng trong model
+## 1. Tables
 
-| Bảng | Grain (một row là…) | Primary key | Cha (FK) | Partition | Rows | Quyết định |
-| --- | --- | --- | --- | --- | ---: | --- |
-| `filings` | một SEC submission (accession number) | `filing_id` | — | `year(filing_date)` | 343 | giữ |
-| `documents` | một block `<DOCUMENT>` trong `full-submission.txt` | `document_id` | `filings` | `year(filing_date)` | 12.809 | giữ |
-| `filing_entities` | một block entity-role (`FILER:`…) trong SEC header của một filing | `filing_entity_id` | `filings` | không | 343 | giữ |
-| `sections` | một section quy chuẩn (root, PART, ITEM, SIGNATURES, EXHIBIT INDEX, TOC) phát hiện trong primary HTML | `section_id` | `documents`, `sections` (cha) | `year(filing_date)` | 2.803 | giữ |
-| `content_blocks` | một block nội dung nhìn thấy được, theo thứ tự, của primary HTML | `block_id` | `documents`, `sections` | `year(filing_date)` | 83.301 | giữ |
-| `document_tables` | một bảng HTML vật lý, ứng với đúng một content block `table` | `table_id` | `content_blocks` | `year(filing_date)` | 10.184 | giữ |
-| `document_table_cells` | một cell nhìn thấy được của một bảng HTML | `cell_id` | `document_tables` | `year(filing_date)` | 878.380 | giữ |
-| `document_links` | một `<a href>` trong một document HTML | `link_id` | `documents` (nguồn, đích) | `year(filing_date)` | 365.221 | giữ |
-| `exhibits` | một dòng Exhibit Index mà filing khai báo trong primary document | `exhibit_id` | `filings`, `documents` (nguồn, đích) | `year(filing_date)` | 2.696 | giữ |
-| `xbrl_instances` | một XBRL instance logic (Inline target hoặc XML) của một filing | `instance_id` | `filings` | không | 343 | giữ |
-| `xbrl_contexts` | một context của một instance | `context_key` | `xbrl_instances` | không | 30.319 | giữ |
-| `xbrl_units` | một unit của một instance | `unit_key` | `xbrl_instances` | không | 699 | giữ |
-| `xbrl_concepts` | một concept (expanded QName) của mọi DTS, từ điển dùng chung | `concept_id` | — | không | 140.764 | giữ |
-| `xbrl_facts` | một fact occurrence được báo cáo | `fact_id` | `xbrl_instances`, `xbrl_concepts`, `xbrl_contexts`, `xbrl_units`, `documents`, `content_blocks`/`document_table_cells` | `bucket(32, instance_id)` | 133.384 | giữ |
-| `xbrl_dimensions` | một dimension member khai báo trong segment/scenario của một context | `dimension_id` | `xbrl_contexts`, `xbrl_concepts` | không | 43.405 | giữ |
-| `xbrl_fact_footnotes` | một quan hệ fact → footnote hiệu lực | `footnote_relation_id` | `xbrl_facts` | không | 775 | giữ |
-| `xbrl_labels` | một quan hệ concept → label resource hiệu lực, từ điển dùng chung theo file DTS | `label_id` | `xbrl_concepts` | không | 157.825 | giữ |
-| `xbrl_networks` | một network linkbase (instance, loại linkbase, role) | `network_id` | `xbrl_instances` | không | 14.918 | giữ |
-| `xbrl_relationships` | một arc hiệu lực trong một network | `relationship_id` | `xbrl_networks`, `xbrl_concepts` (nguồn, đích) | không | 338.171 | giữ |
+| Table | Grain (one row is…) | Primary key | Parent (FK) | Partition | Rows |
+| --- | --- | --- | --- | --- | ---: |
+| `filings` | one SEC submission (accession number) | `filing_id` | — | `year(filing_date)` | 343 |
+| `documents` | one `<DOCUMENT>` block in `full-submission.txt` | `document_id` | `filings` | `year(filing_date)` | 12,809 |
+| `filing_entities` | one entity-role block (`FILER:`…) in a filing's SEC header | `filing_entity_id` | `filings` | none | 343 |
+| `sections` | one canonical section (root, PART, ITEM, SIGNATURES, EXHIBIT INDEX, TOC) found in the primary HTML | `section_id` | `documents`, `sections` (parent) | `year(filing_date)` | 2,803 |
+| `content_blocks` | one visible content block of the primary HTML, in order | `block_id` | `documents`, `sections` | `year(filing_date)` | 83,301 |
+| `document_tables` | one physical HTML table, matching exactly one `table` content block | `table_id` | `content_blocks` | `year(filing_date)` | 10,184 |
+| `document_table_cells` | one visible cell of an HTML table | `cell_id` | `document_tables` | `year(filing_date)` | 878,380 |
+| `document_links` | one `<a href>` in an HTML document | `link_id` | `documents` (source, target) | `year(filing_date)` | 365,221 |
+| `exhibits` | one Exhibit Index entry declared in the primary document | `exhibit_id` | `filings`, `documents` (source, target) | `year(filing_date)` | 2,696 |
+| `xbrl_instances` | one logical XBRL instance (Inline target or XML) of a filing | `instance_id` | `filings` | none | 343 |
+| `xbrl_contexts` | one context of an instance | `context_key` | `xbrl_instances` | none | 30,319 |
+| `xbrl_units` | one unit of an instance | `unit_key` | `xbrl_instances` | none | 699 |
+| `xbrl_concepts` | one concept (expanded QName) across all DTSs; shared dictionary | `concept_id` | — | none | 140,764 |
+| `xbrl_facts` | one reported fact occurrence | `fact_id` | `xbrl_instances`, `xbrl_concepts`, `xbrl_contexts`, `xbrl_units`, `documents`, `content_blocks`/`document_table_cells` | `bucket(32, instance_id)` | 133,384 |
+| `xbrl_dimensions` | one dimension member declared in a context's segment/scenario | `dimension_id` | `xbrl_contexts`, `xbrl_concepts` | none | 43,405 |
+| `xbrl_fact_footnotes` | one effective fact → footnote relationship | `footnote_relation_id` | `xbrl_facts` | none | 775 |
+| `xbrl_labels` | one effective concept → label relationship; shared dictionary per DTS file | `label_id` | `xbrl_concepts` | none | 157,825 |
+| `xbrl_networks` | one linkbase network (instance, linkbase type, role) | `network_id` | `xbrl_instances` | none | 14,918 |
+| `xbrl_relationships` | one effective arc in a network | `relationship_id` | `xbrl_networks`, `xbrl_concepts` (source, target) | none | 338,171 |
 
-Khoá grain (composite) audit kiểm tra là duy nhất, ngoài primary key: `filings.accession_number`; `(filing_id, document_ordinal)`; `(filing_id, entity_ordinal)`; `(document_id, section_ordinal)`; `(document_id, block_ordinal)`; `document_tables.block_id` và `(document_id, table_ordinal)`; `(table_id, cell_ordinal)`; `(source_document_id, link_ordinal)`; `(filing_id, exhibit_ordinal)`; `(instance_id, context_ref)`; `(instance_id, unit_ref)`; `(namespace_uri, local_name)`; `(instance_id, fact_order)`; `(context_key, dimension_ordinal)` và `(context_key, dimension_concept_id)`; `(fact_id, footnote_ordinal)`; `(instance_id, network_ordinal)` và `(instance_id, linkbase_type, role_uri)`; `(network_id, relationship_ordinal)`. ID của mọi bảng con được dẫn xuất từ cha + ordinal (hoặc hash), và contract từng row kiểm tra việc dẫn xuất đó.
+Grain keys the audit checks for uniqueness besides the primary key: `filings.accession_number`; `(filing_id, document_ordinal)`; `(filing_id, entity_ordinal)`; `(document_id, section_ordinal)`; `(document_id, block_ordinal)`; `document_tables.block_id` and `(document_id, table_ordinal)`; `(table_id, cell_ordinal)`; `(source_document_id, link_ordinal)`; `(filing_id, exhibit_ordinal)`; `(instance_id, context_ref)`; `(instance_id, unit_ref)`; `(namespace_uri, local_name)`; `(instance_id, fact_order)`; `(context_key, dimension_ordinal)` and `(context_key, dimension_concept_id)`; `(fact_id, footnote_ordinal)`; `(instance_id, network_ordinal)` and `(instance_id, linkbase_type, role_uri)`; `(network_id, relationship_ordinal)`. Every child ID derives from its parent plus an ordinal (or hash); the row contract checks the derivation.
 
-### Bảng không có, hoặc cố ý không tạo
+### Tables deliberately absent
 
-- **`companies`: không tạo.** Mỗi thuộc tính của nó (`latest_company_name`, `sic_*`, `first/latest_seen_date`) là tổng hợp trên `filing_entities`, và thay đổi mỗi khi có filing mới, nên không hợp với Silver chỉ-append; thuộc tính duy nhất không suy ra được (`ticker_aliases`) đến từ snapshot iShares, không phải SEC. CIK đã là định danh công ty ổn định (chuỗi 10 chữ số, kiểm tra cả ở `filings.cik` lẫn `filing_entities.cik`). Đây là ứng viên dimension ở Gold.
-- **`child_sections`, `section_children`, `section_hierarchy`: không có.** Cây section nằm trong `sections.parent_section_id → sections.section_id`.
-- **`exhibits`: giữ, vì grain khác `documents`.** Exhibit đính kèm là row `documents` với `role = 'exhibit'` (861); `exhibits` là dòng Exhibit Index: 2.696 entry, trong đó 1.074 trỏ tới hồ sơ cũ (incorporated by reference) và không có file đính kèm nào tương ứng. Hai khái niệm không được trộn: một entry trỏ tới attachment qua `resolved_document_id` (nullable).
+- **`companies`.** Each of its attributes (`latest_company_name`, `sic_*`, `first/latest_seen_date`) is an aggregate over `filing_entities` that changes with every new filing, which does not fit append-only Silver; the only non-derivable attribute (`ticker_aliases`) comes from the iShares snapshot, not SEC. CIK is already the stable company identifier (10-digit string, checked in `filings.cik` and `filing_entities.cik`). It is a Gold dimension candidate.
+- **`child_sections`, `section_children`, `section_hierarchy`.** The tree is `sections.parent_section_id → sections.section_id`.
+- **`exhibits` is kept because its grain differs from `documents`.** An attached exhibit is a `documents` row with `role = 'exhibit'` (861); `exhibits` is an Exhibit Index line: 2,696 entries, of which 1,074 point to older filings (incorporated by reference) with no attachment. An entry points to its attachment through nullable `resolved_document_id`.
 
-Không có bảng nào bị xoá hay đổi tên trong lần audit này, và không field nào bị xoá hay đổi tên.
+## 2. Relations and cardinality
 
-## 2. Quan hệ và cardinality
+Checked on real data: no orphans, every field copied from a parent matches it, every group is complete (section 6).
 
-Kiểm trên dữ liệu thật: không có orphan, mọi field copy từ cha đều khớp cha, mọi group đầy đủ (xem mục 6).
-
-| Quan hệ | Cardinality | Ghi chú |
+| Relation | Cardinality | Notes |
 | --- | --- | --- |
-| `filings` → `documents` | 1 — 1..N | 6–90 document mỗi filing |
-| `filings` → `filing_entities` | 1 — 1..N | trong `data/` mỗi filing có đúng 1 entity (`filer`); 8-K nhiều registrant sẽ có nhiều |
-| `documents` → `sections` / `content_blocks` | 1 — 0..N | chỉ primary document HTML có narrative; mỗi document được parse có đúng 1 root |
-| `sections.parent_section_id` → `sections` | 0..1 — 0..N | root có parent null; PART → ITEM; cha luôn cùng document, level đúng bằng level cha + 1 nên không có cycle; range của cha chứa range của con |
-| `sections` → `content_blocks` | 1 — 0..N | mỗi block thuộc đúng 1 section sâu nhất chứa nó |
-| `content_blocks` → `document_tables` | 1 — 0..1 | chỉ block `table`, và mỗi block `table` có đúng 1 bảng |
-| `document_tables` → `document_table_cells` | 1 — 1..N | không có self-reference cho bảng lồng (bảng lồng là block riêng) |
-| `documents` → `document_links` (nguồn) | 1 — 0..N | |
-| `documents` → `document_links` (đích, `target_document_id` nullable) | 0..1 — 0..N | chỉ resolve trong cùng filing; fragment/email/external không bị ép resolve; không có `target_exhibit_id` |
-| `filings` → `exhibits` | 1 — 0..N | 278/343 filing có Exhibit Index |
-| `documents` → `exhibits` (`source_document_id`) | 1 — 0..N | luôn là primary document của filing |
-| `documents` → `exhibits` (`resolved_document_id`, nullable) | 0..1 — 0..N | cùng filing; 985 entry resolve |
-| `filings` → `xbrl_instances` | 1 — 0..N | `data/`: đúng 1 mỗi filing |
-| `xbrl_instances` → `xbrl_contexts` / `xbrl_units` / `xbrl_facts` / `xbrl_networks` | 1 — 0..N | khớp `context_count`, `unit_count`, `fact_count`, `instance_network_count` |
-| `xbrl_concepts` / `xbrl_contexts` → `xbrl_facts` | 1 — 0..N | context và unit của fact thuộc chính instance của nó |
-| `xbrl_units` → `xbrl_facts` (`unit_key` nullable) | 0..1 — 0..N | fact non-numeric không có unit |
-| `content_blocks` / `document_table_cells` → `xbrl_facts` | 0..1 — 0..N | xem mục 4 |
-| `xbrl_contexts` → `xbrl_dimensions` | 1 — 0..N | đúng số member mà `segment_xml`/`scenario_xml` khai báo |
+| `filings` → `documents` | 1 — 1..N | 6–90 documents per filing |
+| `filings` → `filing_entities` | 1 — 1..N | `data/`: exactly 1 entity (`filer`) per filing; multi-registrant 8-Ks have more |
+| `documents` → `sections` / `content_blocks` | 1 — 0..N | only the primary HTML document has narrative; each parsed document has exactly 1 root |
+| `sections.parent_section_id` → `sections` | 0..1 — 0..N | root has null parent; PART → ITEM; parent is in the same document, level = parent level + 1 (no cycles); parent range contains child range |
+| `sections` → `content_blocks` | 1 — 0..N | each block belongs to the deepest section containing it |
+| `content_blocks` → `document_tables` | 1 — 0..1 | only `table` blocks, each with exactly 1 table |
+| `document_tables` → `document_table_cells` | 1 — 1..N | no self-reference for nested tables (a nested table is its own block) |
+| `documents` → `document_links` (source) | 1 — 0..N | |
+| `documents` → `document_links` (target, nullable `target_document_id`) | 0..1 — 0..N | resolved only within the same filing; fragments/email/external are not forced to resolve; no `target_exhibit_id` |
+| `filings` → `exhibits` | 1 — 0..N | 278/343 filings have an Exhibit Index |
+| `documents` → `exhibits` (`source_document_id`) | 1 — 0..N | always the filing's primary document |
+| `documents` → `exhibits` (`resolved_document_id`, nullable) | 0..1 — 0..N | same filing; 985 entries resolved |
+| `filings` → `xbrl_instances` | 1 — 0..N | `data/`: exactly 1 per filing |
+| `xbrl_instances` → `xbrl_contexts` / `xbrl_units` / `xbrl_facts` / `xbrl_networks` | 1 — 0..N | match `context_count`, `unit_count`, `fact_count`, `instance_network_count` |
+| `xbrl_concepts` / `xbrl_contexts` → `xbrl_facts` | 1 — 0..N | a fact's context and unit belong to its own instance |
+| `xbrl_units` → `xbrl_facts` (nullable `unit_key`) | 0..1 — 0..N | non-numeric facts have no unit |
+| `content_blocks` / `document_table_cells` → `xbrl_facts` | 0..1 — 0..N | see section 4 |
+| `xbrl_contexts` → `xbrl_dimensions` | 1 — 0..N | exactly the members `segment_xml`/`scenario_xml` declare |
 | `xbrl_facts` → `xbrl_fact_footnotes` | 1 — 0..N | |
-| `xbrl_concepts` → `xbrl_labels` | 1 — 0..N | 14 role, 1 ngôn ngữ (`en-us`) trong `data/` |
-| `xbrl_networks` → `xbrl_relationships` | 1 — 1..N | không có network rỗng; network nối thẳng với instance, không suy qua fact |
-| `xbrl_concepts` → `xbrl_relationships` (nguồn, đích) | 1 — 0..N | mọi endpoint có trong `xbrl_concepts` |
+| `xbrl_concepts` → `xbrl_labels` | 1 — 0..N | 14 roles, 1 language (`en-us`) in `data/` |
+| `xbrl_networks` → `xbrl_relationships` | 1 — 1..N | no empty networks; networks link to the instance directly, not through facts |
+| `xbrl_concepts` → `xbrl_relationships` (source, target) | 1 — 0..N | every endpoint exists in `xbrl_concepts` |
 
 ## 3. ERD
 
@@ -130,69 +128,69 @@ erDiagram
     }
 ```
 
-## 4. Lineage về Bronze
+## 4. Lineage to Bronze
 
-| Bảng | Truy ngược về |
+| Table | Traces back to |
 | --- | --- |
-| `filings` | `full_submission_path` + `full_submission_sha256`, `primary_document_path` + `primary_document_sha256` (đường dẫn POSIX tương đối với data dir) |
-| `documents` | `source_path`, `source_submission_sha256`, byte span `document_start_byte..document_end_byte`, `content_start_byte..content_end_byte`, `content_sha256` |
+| `filings` | `full_submission_path` + `full_submission_sha256`, `primary_document_path` + `primary_document_sha256` (POSIX paths relative to the data dir) |
+| `documents` | `source_path`, `source_submission_sha256`, byte spans `document_start_byte..document_end_byte`, `content_start_byte..content_end_byte`, `content_sha256` |
 | `filing_entities` | `source_path`, `entity_start_byte..entity_end_byte`, `entity_block_sha256` |
-| `sections`, `content_blocks`, `document_tables`, `document_table_cells`, `document_links` | `document_id` + `source_xpath` (lxml `getpath()` trong DOM đã parse) + `source_document_sha256` (= `documents.content_sha256` của phiên bản đã parse) |
-| `exhibits` | `source_document_id` + `source_xpath` của dòng `tr` |
+| `sections`, `content_blocks`, `document_tables`, `document_table_cells`, `document_links` | `document_id` + `source_xpath` (lxml `getpath()` of the parsed DOM) + `source_document_sha256` (= `documents.content_sha256` of the parsed version) |
+| `exhibits` | `source_document_id` + `source_xpath` of the `tr` |
 | `xbrl_instances` | `source_document_ids` + `source_set_sha256` |
-| `xbrl_facts` | `document_id` (Inline hoặc XML nguồn của fact) + `source_xpath`; `block_id`/`cell_id` khi định vị chắc chắn |
-| `xbrl_labels`, `xbrl_relationships` | `source_document_id`: `document_id` khi file DTS thuộc filing, URL khi là taxonomy công bố; + `source_xpath`/`arc_xpath` |
-| `xbrl_concepts` | `source_schema_uri` (nơi đọc thấy lần đầu) |
+| `xbrl_facts` | `document_id` (the fact's Inline or XML source) + `source_xpath`; `block_id`/`cell_id` when located with certainty |
+| `xbrl_labels`, `xbrl_relationships` | `source_document_id`: a `document_id` when the DTS file belongs to the filing, a URL for published taxonomies; plus `source_xpath`/`arc_xpath` |
+| `xbrl_concepts` | `source_schema_uri` (where first read) |
 
-`xbrl_facts.cell_id`/`block_id` **không phải heuristic**: phần tử `ix:*` của fact nằm trong chính phần tử `td`/block đó trong cùng một lần parse DOM (so XPath chính xác); fact ẩn, fact trải nhiều block, hay XPath trùng nhiều block đều để null thay vì đoán. Không có ghép cell ↔ fact theo giá trị hay text. Trong `data/`: 108.020 fact gắn cell, 16.930 gắn block, không fact nào gắn cả hai.
+`xbrl_facts.cell_id`/`block_id` are **not heuristic**: the fact's `ix:*` element lies inside that `td`/block in the same DOM parse (exact XPath match). Hidden facts, facts spanning several blocks, and XPaths matching several blocks stay null rather than guessed. No cell ↔ fact matching by value or text. In `data/`: 108,020 facts linked to a cell, 16,930 to a block, none to both.
 
-## 5. Field được giữ dù có thể suy ra (denormalization có chủ đích)
+## 5. Derivable fields kept on purpose
 
-| Field | Bảng | Phân loại | Lý do |
+| Field | Tables | Kind | Reason |
 | --- | --- | --- | --- |
-| `filing_id` | sections, content_blocks, document_tables, document_table_cells, document_links, exhibits | KEEP_QUERY_DENORMALIZATION + KEEP_INTEGRITY | lọc theo filing không cần 2–4 join (cell → table → block → document → filing); audit kiểm từng giá trị khớp cha. Bảng XBRL con không copy filing columns |
-| `filing_date` | 9 bảng filing/document/HTML/exhibits | KEEP_PARTITION | nguồn của partition `year(filing_date)`; audit kiểm khớp cha |
-| `document_id` | content_blocks, document_tables, document_table_cells | KEEP_QUERY_DENORMALIZATION + KEEP_INTEGRITY | group của stage và của audit là theo document; khớp cha được kiểm |
-| `xbrl_facts.document_id` | xbrl_facts | KEEP_SOURCE | instance có thể có 2 nguồn (Inline + XML); không suy ra được từ instance |
-| `source_document_sha256` | sections, content_blocks, document_tables, document_table_cells, document_links | KEEP_INTEGRITY | group được dựng từ phiên bản document nào; stage dùng để skip/conflict, audit kiểm bằng `documents.content_sha256`. Lặp trên nhiều row nhưng Parquet dictionary-encode nên gần như không tốn chỗ |
-| `document_*_count`, `table_cell_count`, `filing_exhibit_count`, `context_dimension_count`, `fact_footnote_count`, `instance_network_count`, `network_relationship_count` | các bảng con | KEEP_INTEGRITY | phát hiện group bị cắt đuôi (count khai báo so với ordinal 1..N) |
-| `fact_count`, `context_count`, `unit_count`, `relationship_count` | instances, networks | KEEP_INTEGRITY | số con khớp tổng ở cha |
-| `row_count`, `column_count`, `cell_count`, `header_cell_count` | document_tables | KEEP_INTEGRITY + KEEP_QUERY_DENORMALIZATION | `cell_count` kiểm số cell; shape bảng không cần đọc cell. `header_cell_count` luôn 0 trong `data/` (SEC không dùng `<th>`) nhưng là ngữ nghĩa HTML chung |
-| `text_length` | content_blocks, document_table_cells | KEEP_QUERY_DENORMALIZATION | suy ra được từ `text` (contract kiểm bằng nhau); lọc theo độ dài mà không đọc text |
-| `section_text_sha256`, `table_content_sha256`, `network_hash`, `fact_sha256`, `context_hash`, `dimension_hash`, `label_text_sha256`, `relationship_hash`, `footnote_content_sha256`, `source_text_sha256` | | KEEP_INTEGRITY | xác minh extraction tất định; stage so group đã lưu với group dựng lại |
-| `source_xpath`, `arc_xpath` | | KEEP_LINEAGE | vị trí trong file nguồn |
-| `processed_at` | mọi bảng | KEEP_LINEAGE | thời điểm batch; bị loại khỏi mọi phép so sánh và hash |
-| `inside_table` | content_blocks | dư thừa nhưng giữ | bằng `source_table_xpath is not null` (contract kiểm); chỉ có ý nghĩa cho bảng lồng, `data/` không có bảng lồng nào. Xoá cần rebuild có kiểm soát `sections` + `content_blocks`, không có lợi đo được → để lần rebuild narrative sau |
+| `filing_id` | sections, content_blocks, document_tables, document_table_cells, document_links, exhibits | query + integrity | filter by filing without 2–4 joins (cell → table → block → document → filing); the audit checks each value against the parent. XBRL child tables do not copy filing columns |
+| `filing_date` | 9 filing/document/HTML/exhibit tables | partition | source of `year(filing_date)`; audit checks it matches the parent |
+| `document_id` | content_blocks, document_tables, document_table_cells | query + integrity | stage and audit groups are per document; parent match is checked |
+| `xbrl_facts.document_id` | xbrl_facts | source | an instance can have 2 sources (Inline + XML); not derivable from the instance |
+| `source_document_sha256` | sections, content_blocks, document_tables, document_table_cells, document_links | integrity | which document version a group was built from; stages use it to skip or conflict, the audit checks it against `documents.content_sha256`. Dictionary-encoded in Parquet, so nearly free |
+| `document_*_count`, `table_cell_count`, `filing_exhibit_count`, `context_dimension_count`, `fact_footnote_count`, `instance_network_count`, `network_relationship_count` | child tables | integrity | detects truncated groups (declared count vs ordinals 1..N) |
+| `fact_count`, `context_count`, `unit_count`, `relationship_count` | instances, networks | integrity | child count matches the parent total |
+| `row_count`, `column_count`, `cell_count`, `header_cell_count` | document_tables | integrity + query | `cell_count` checks the cells; table shape without reading cells. `header_cell_count` is always 0 in `data/` (SEC does not use `<th>`) but is generic HTML semantics |
+| `text_length` | content_blocks, document_table_cells | query | derivable from `text` (contract checks equality); filter by length without reading text |
+| `section_text_sha256`, `table_content_sha256`, `network_hash`, `fact_sha256`, `context_hash`, `dimension_hash`, `label_text_sha256`, `relationship_hash`, `footnote_content_sha256`, `source_text_sha256` | | integrity | proves deterministic extraction; stages compare stored groups with rebuilt ones |
+| `source_xpath`, `arc_xpath` | | lineage | position in the source file |
+| `processed_at` | all | lineage | batch time; excluded from every comparison and hash |
+| `inside_table` | content_blocks | redundant, kept | equals `source_table_xpath is not null` (contract checks); only matters for nested tables, none in `data/`. Removing it needs a controlled rebuild of `sections` + `content_blocks` with no measurable gain; deferred to the next narrative rebuild |
 
-`xbrl_dimensions` có grain **mức context** (khả năng A): khoá `context_key`, không có `fact_id`; stage đọc member từ segment/scenario của context, và số row mong đợi suy từ `segment_xml`/`scenario_xml` đã lưu. 61.776 fact dùng 28.832 context có dimension (trung bình 4,4 fact/context), nên flatten theo fact sẽ nhân số row mà không thêm ngữ nghĩa; fact lấy dimension bằng `xbrl_facts.context_key = xbrl_dimensions.context_key`.
+`xbrl_dimensions` has **context-level** grain: key `context_key`, no `fact_id`. The stage reads members from the context's segment/scenario, and the expected row count derives from the stored `segment_xml`/`scenario_xml`. 61,776 facts use 28,832 dimensional contexts (4.4 facts per context), so per-fact rows would multiply volume with no new meaning; join with `xbrl_facts.context_key = xbrl_dimensions.context_key`.
 
 ## 6. Integrity audit
 
-Một cài đặt audit duy nhất (`quality/sec_filings/silver_audit*.py`; bảng, khoá và FK khai báo ở `silver_model.py`), chạy bởi stage cuối `integrity` của pipeline, `build_silver.py --check-only` và `scripts/sec_filings/audit_silver.py` (thêm `--sample-per-form`, `--batch-size`, `--verify-source-hashes`). Chỉ đọc: catalog mở read-only, không tạo bảng, metadata bảng và stat file catalog/warehouse trước/sau phải bằng nhau. Bộ nhớ không tăng theo số row: đọc từng file Parquet theo batch, cột khoá/lineage/group được chép vào một DuckDB tạm trên đĩa và kiểm bằng SQL. Kiểm:
+One audit implementation (`quality/sec_filings/silver_audit*.py`; tables, keys and FKs declared in `silver_model.py`), run by the final `integrity` stage, `build_silver.py --check-only` and `scripts/sec_filings/audit_silver.py` (adds `--sample-per-form`, `--batch-size`, `--verify-source-hashes`). Read-only: the catalog is opened read-only, no tables are created, and table metadata plus catalog/warehouse file stats must be equal before and after. Memory does not grow with row count: Parquet files are read in batches, key/lineage/group columns go to a scratch DuckDB database on disk and are checked with SQL. Checks:
 
-- catalog đủ 19 bảng code định nghĩa (bảng lạ là warning), tên `sec_filings.documents`;
-- contract Pydantic ↔ schema Arrow ↔ schema Iceberg (field ID, kiểu, nullability) ↔ schema và field ID của từng file Parquet; partition spec, location, số file/record khớp snapshot summary;
-- contract từng row (giá trị cho phép, timestamp có timezone, định dạng hash, decimal hữu hạn, ID và hash dẫn xuất của row);
-- primary key và các khoá grain ở mục 1;
-- 32 foreign key kèm field copy từ cha (`filing_id`, `document_id`, `filing_date`, `source_document_sha256`, `source_path`…); FK nullable chỉ kiểm khi khác null;
-- group: ordinal 1..N và count khai báo của mọi group; count do cha khai báo (`fact_count`, `context_count`, `unit_count`, `cell_count`, `relationship_count`, số member của context);
-- cardinality và ngữ nghĩa: mỗi filing có document, entity và đúng một primary document cùng form; narrative chỉ ở primary HTML; cây section (một root, không tự làm cha, level cha thấp hơn, range lồng nhau, start tăng dần, root phủ mọi block, block nằm trong section sâu nhất); block `table` trỏ tới `<table>` và có đúng một `document_tables`, không còn `table_cell`; số header và lưới của cell; link chỉ từ HTML; exhibit đọc từ primary document; nguồn instance thuộc filing, đúng thứ tự, `source_set_sha256` tính lại; fact từ document nguồn của instance; footnote resource nhất quán; thuộc tính relationship theo loại linkbase; `source_document_id` của label/relationship là document đã lưu (của chính filing) hoặc URL;
-- Bronze: file của mọi filing nằm trong `data_dir` và tồn tại; `--verify-source-hashes` hash lại mọi submission, primary document, span của document và entity;
-- lineage mẫu: filing mới nhất của mỗi form (10-K, 10-Q, 8-K) được dựng lại từ Bronze bằng code của stage (documents, entities, sections, blocks, tables, cells) và so với Silver; `section_text_sha256`, `table_content_sha256`, text block bằng cell nối lại và `network_hash` chỉ tính lại trên filing mẫu, vì cần text của cả group.
+- the catalog has all 19 tables the code defines (unknown tables warn);
+- pydantic contract ↔ Arrow schema ↔ Iceberg schema (field IDs, types, nullability) ↔ each Parquet file's schema and field IDs; partition spec and rules version (the `lexifin.rules-version` table property, AGENTS.md) equal the code's; location, file/record counts match the snapshot summary;
+- every row's contract (allowed values, timezone-aware timestamps, hash formats, finite decimals, derived IDs and hashes);
+- primary keys and the grain keys of section 1;
+- 32 foreign keys plus fields copied from the parent (`filing_id`, `document_id`, `filing_date`, `source_document_sha256`, `source_path`…); nullable FKs checked only when non-null;
+- groups: ordinals 1..N and declared counts of every group; parent-declared counts (`fact_count`, `context_count`, `unit_count`, `cell_count`, `relationship_count`, members per context);
+- cardinality and semantics: each filing has documents, entities and exactly one primary document of the same form; narrative only on primary HTML; section tree (one root, no self-parent, parent level lower, nested ranges, increasing starts, root covers every block, block in its deepest section); `table` blocks point to a `<table>` and have exactly one `document_tables` row, no `table_cell` blocks remain; cell header counts and grid; links only from HTML; exhibits read from the primary document; instance sources belong to the filing, are ordered, and `source_set_sha256` is recomputed; facts come from the instance's source documents; consistent footnote resources; relationship attributes per linkbase type; label/relationship `source_document_id` is a stored document of the same filing or a URL;
+- Bronze: every filing's files are inside the Bronze dir and exist; `--verify-source-hashes` rehashes every submission, primary document, and document/entity span;
+- sampled lineage: the latest filing of each form (10-K, 10-Q, 8-K) is rebuilt from Bronze with the stage code (documents, entities, sections, blocks, tables, cells) and compared with Silver; `section_text_sha256`, `table_content_sha256`, block text vs joined cells, and `network_hash` are recomputed only on samples, since they need a whole group's text.
 
-Kết quả trên `data/` (2026-10-07): 263 PASS, 2 WARN (149 `public_document_count`, 1.154 link unresolved), 0 FAIL, 1 SKIP (`source_hashes` khi không có `--verify-source-hashes`); ~80 s, RSS tối đa ~0,7 GB, SQLite tạm ~1,1 GB trên đĩa (bản scratch SQLite trước khi chuyển sang DuckDB).
+Result on `data/` (2026-10-07, SQLite scratch before the DuckDB switch): 263 PASS, 2 WARN (149 `public_document_count`, 1,154 unresolved links), 0 FAIL, 1 SKIP (`source_hashes` without `--verify-source-hashes`); ~80 s, peak RSS ~0.7 GB, ~1.1 GB scratch on disk.
 
-## 7. Đường join tiêu biểu
+## 7. Typical joins
 
-Các query dưới đây chạy trong `tests/integration/sec_filings/test_full_silver_pipeline.py` (DuckDB trên Arrow đọc qua PyIceberg). Không cái nào tách composite ID để join hay phụ thuộc thứ tự row.
+These queries run in `tests/integration/sec_filings/test_full_silver_pipeline.py` (DuckDB on Arrow read through PyIceberg). None splits composite IDs to join or depends on row order.
 
 ```sql
--- 1. Filing của một công ty theo thời gian
+-- 1. A company's filings over time
 select f.form, f.filing_date from filing_entities e
 join filings f on f.filing_id = e.filing_id
 where e.cik = '0000320193' order by f.filing_date;
 
--- 2. Nội dung có thứ tự của Item 1A (range [start, end) của section)
+-- 2. Ordered content of Item 1A (section range [start, end))
 select b.text from filings f
 join documents d on d.filing_id = f.filing_id and d.role = 'primary_document'
 join sections s on s.document_id = d.document_id
@@ -200,25 +198,25 @@ join content_blocks b on b.document_id = s.document_id
  and b.block_ordinal >= s.start_block_ordinal and b.block_ordinal < s.end_block_ordinal
 where f.filing_id = ? and s.section_code = 'ITEM 1A' order by b.block_ordinal;
 
--- 3. Root → PART → ITEM bằng self-join
+-- 3. Root → PART → ITEM by self-join
 select p.section_code, c.section_code from sections c
 join sections p on p.section_id = c.parent_section_id
 join sections r on r.section_id = p.parent_section_id
 where c.document_id = ? and r.parent_section_id is null order by c.section_ordinal;
 
--- 4. Dựng lại lưới của một bảng HTML
+-- 4. Rebuild an HTML table's grid
 select c.row_ordinal, c.column_ordinal, c.rowspan, c.colspan, c.text
 from content_blocks b join document_tables t on t.block_id = b.block_id
 join document_table_cells c on c.table_id = t.table_id
 where b.block_id = ? order by c.cell_ordinal;
 
--- 5. Exhibit Index của một filing và attachment (nếu có)
+-- 5. A filing's Exhibit Index and attachments (if any)
 select x.exhibit_number, x.description, x.href, d.filename from exhibits x
 left join documents d on d.document_id = x.resolved_document_id
 where x.filing_id = ? order by x.exhibit_ordinal;
--- attachment của filing: select * from documents where filing_id = ? and role = 'exhibit'
+-- attachments: select * from documents where filing_id = ? and role = 'exhibit'
 
--- 6. Fact với concept, context, unit và dimension (một row cho mỗi dimension)
+-- 6. Facts with concept, context, unit and dimensions (one row per dimension)
 select c.local_name, f.numeric_value, x.period_type, x.end_date, u.normalized_expression,
        dc.local_name, coalesce(m.local_name, d.typed_member_value)
 from xbrl_facts f
@@ -230,8 +228,8 @@ left join xbrl_concepts dc on dc.concept_id = d.dimension_concept_id
 left join xbrl_concepts m on m.concept_id = d.member_concept_id
 where f.instance_id = ?;
 
--- 7. Network → relationship → concept → label của DTS của instance
---    (một label mỗi relationship: label của chính filing trước, rồi taxonomy công bố)
+-- 7. Network → relationship → concept → label within the instance's DTS
+--    (one label per relationship: the filing's own label first, then the published taxonomy)
 with dts_labels as (
   select l.concept_id, l.label_text, d.filing_id from xbrl_labels l
   left join documents d on d.document_id = l.source_document_id
@@ -248,28 +246,28 @@ where n.instance_id = ?
 qualify row_number() over (partition by r.relationship_id order by l.filing_id is null) = 1;
 
 -- 8. Provenance: block/cell → document → filing; fact → document (+ cell);
---    relationship → file DTS
+--    relationship → DTS file
 select f.full_submission_path, d.document_start_byte, d.content_sha256, b.source_xpath
 from content_blocks b join documents d on d.document_id = b.document_id
 join filings f on f.filing_id = d.filing_id where b.block_id = ?;
 ```
 
-`xbrl_labels` là từ điển trên mọi file DTS: cùng một concept có label từ nhiều filing (extension của từng filing) và từ taxonomy công bố. Muốn label của một instance thì lọc như query 7 (file thuộc filing của instance, hoặc URL), nếu không sẽ nhân dòng. Ngay trong một DTS, một concept vẫn có thể có hai label hiệu lực cùng role và ngôn ngữ, vì filer định nghĩa lại label của concept chuẩn: 109 concept trong DTS 10-K FY2025 của Apple (vd. concept `ecd`) có cả label trong `aapl-20250927_lab.xml` lẫn label của `ecd-sub-2025.xsd`. Query 7 chọn label của filer; trên DTS đó nó trả đúng 767 dòng cho 767 relationship presentation.
+`xbrl_labels` is a dictionary over all DTS files: one concept has labels from many filings (each filing's extension) and from published taxonomies. To get an instance's labels, filter as in query 7 (file of the instance's filing, or a URL), or rows multiply. Even within one DTS a concept can have two effective labels with the same role and language when the filer redefines a standard concept's label: 109 concepts in Apple's FY2025 10-K DTS (e.g. `ecd`) have labels in both `aapl-20250927_lab.xml` and `ecd-sub-2025.xsd`. Query 7 picks the filer's label and returns exactly 767 rows for the 767 presentation relationships of that DTS.
 
-## 8. Giới hạn đã biết
+## 8. Known limits
 
-- `xbrl_labels.source_document_id` và `xbrl_relationships.source_document_id` mang hai loại giá trị (`document_id` hoặc URL taxonomy) dưới cùng một tên cột. Contract và audit phân biệt được, nhưng FK chỉ có nghĩa khi không phải URL. Tách thành `source_document_id` (nullable FK) + `source_uri` là breaking change: đổi `label_id`, phải rebuild có kiểm soát `xbrl_labels` + `xbrl_networks` + `xbrl_relationships` (~16 phút offline); chưa làm.
-- `filings.accepted_at` là giờ naive như header EDGAR ghi (giờ miền Đông Mỹ, không có offset); không tự đổi sang UTC.
-- `filings.public_document_count` không đáng tin (149/343 filing lớn hơn số `<DOCUMENT>` thật): chỉ warning.
-- `inside_table` dư thừa với `source_table_xpath` (mục 5).
-- Integrity gate chỉ hash lại Bronze của filing mẫu; dùng `scripts/sec_filings/audit_silver.py --verify-source-hashes` để hash lại mọi filing.
-- Không có lock: không chạy hai build cùng `--data-dir`. Không có global rollback: conflict khi phân loại làm stage reject trước lần ghi đầu; lỗi trong một lô chỉ chặn lô đó, các lô trước đã commit và được skip ở lần chạy sau.
-- `exhibits` phụ thuộc quy tắc nhận bảng Exhibit Index (AGENTS.md); đổi quy tắc thì filing có entry khác sẽ conflict cho tới khi rebuild có kiểm soát bảng `exhibits`.
+- `xbrl_labels.source_document_id` and `xbrl_relationships.source_document_id` hold two kinds of value (`document_id` or taxonomy URL) under one column name. Contract and audit tell them apart, but the FK only applies to non-URLs. Splitting into `source_document_id` (nullable FK) + `source_uri` is breaking: it changes `label_id` and needs a controlled rebuild of `xbrl_labels` + `xbrl_networks` + `xbrl_relationships` (~16 min offline). Not done.
+- `filings.accepted_at` is naive time as EDGAR writes it (US Eastern, no offset); not converted to UTC.
+- `filings.public_document_count` is unreliable (149/343 filings exceed the real `<DOCUMENT>` count): warning only.
+- `inside_table` duplicates `source_table_xpath` (section 5).
+- The integrity gate rehashes Bronze only for sampled filings; use `scripts/sec_filings/audit_silver.py --verify-source-hashes` to rehash all.
+- No lock: do not run two builds on one `--data-dir`. No global rollback: a conflict found while classifying rejects the stage before its first write; a failed batch blocks only itself, earlier batches stay committed and are skipped next run.
+- Stages skip stored groups by source hash, so a rule change is caught only by the rules version (AGENTS.md): a table's `rules_version` must be bumped with the change, which the fixture rows digest test enforces only as far as the fixtures reach. `exhibits` is also rebuilt and compared on every run.
 
-## 9. Hiệu năng (đo trên `data/`, 2026-10-07)
+## 9. Performance (`data/`, 2026-10-07)
 
-- Dựng từ đầu (offline, cache taxonomy ấm): ~41 phút, RSS tối đa ~2,6 GB; ba stage XBRL chiếm ~36 phút (Arelle nạp DTS mỗi instance). Chạy lại khi không có Bronze mới: ~1,5 phút, RSS tối đa ~0,75 GB; mỗi stage bảng 2–5 s và ≤ 0,4 GB, integrity ~75 s. Các stage đọc tóm tắt group thay vì row và commit theo lô, nên bộ nhớ theo kích thước lô và số group, không theo số row (AGENTS.md).
-- Audit (`--check-only`, stage `integrity`, `audit_silver.py`): ~80 s, RSS tối đa ~0,7 GB (đọc batch ~60 s, chủ yếu là validate contract từng row; SQL ~15 s; lineage 3 filing mẫu ~4 s), SQLite tạm ~1,1 GB trên đĩa (bản scratch SQLite trước khi chuyển sang DuckDB).
-- Kích thước: toàn bộ ~98 MB Parquet. Lớn nhất là `xbrl_relationships` (26 MB, 1 file), `xbrl_facts` (23 MB, 32 file vì `bucket(32, instance_id)`), `xbrl_labels` (13 MB), `xbrl_concepts` (10 MB), `document_table_cells` (9 MB, 6 file theo năm). Mỗi bảng có 1 snapshot.
-- Query tiêu biểu (DuckDB trên Arrow, sau khi nạp đúng các cột cần ~0,4 s): 3–90 ms cho query 1–6 và 8, ~0,4–0,7 s cho query 7 (lọc label theo DTS).
-- Partition giữ nguyên: dữ liệu nhỏ, bảng partition theo năm có 6 file/bảng; `xbrl_facts` có 32 file nhỏ (~0,7 MB) nhưng chưa có query pattern đo được nào bị chậm vì việc đó. Chỉ đổi partition khi có query cụ thể và số đo.
+- Full build (offline, warm taxonomy cache): ~41 min, peak RSS ~2.6 GB; the three XBRL stages take ~36 min (Arelle loads each instance's DTS). Rerun with no new Bronze: ~1.5 min, peak RSS ~0.75 GB; each table stage 2–5 s and ≤ 0.4 GB, integrity ~75 s. Stages read group summaries instead of rows and commit in batches, so memory follows batch size and group count, not row count (AGENTS.md).
+- Audit (`--check-only`, `integrity` stage, `audit_silver.py`): ~80 s, peak RSS ~0.7 GB (batch reads ~60 s, mostly per-row contract validation; SQL ~15 s; lineage of 3 sampled filings ~4 s), ~1.1 GB scratch on disk (SQLite scratch before the DuckDB switch).
+- Size: ~98 MB of Parquet. Largest: `xbrl_relationships` (26 MB, 1 file), `xbrl_facts` (23 MB, 32 files from `bucket(32, instance_id)`), `xbrl_labels` (13 MB), `xbrl_concepts` (10 MB), `document_table_cells` (9 MB, 6 files by year). One snapshot per table.
+- Typical queries (DuckDB on Arrow, after loading the needed columns in ~0.4 s): 3–90 ms for queries 1–6 and 8, ~0.4–0.7 s for query 7 (DTS label filter).
+- Partitioning unchanged: data is small, year-partitioned tables have 6 files each; `xbrl_facts` has 32 small files (~0.7 MB) but no measured query pattern is slowed by it. Change partitioning only with a concrete query and measurements.

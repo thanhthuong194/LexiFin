@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import sys
 from datetime import date
@@ -20,7 +21,11 @@ from src.data_pipeline.pipelines.sec_filings.bronze_to_silver import (
 )
 from src.data_pipeline.quality.sec_filings.silver_audit import audit_silver
 from src.data_pipeline.quality.sec_filings.silver_model import SILVER_TABLES
-from src.data_pipeline.storage.iceberg import open_silver_catalog
+from src.data_pipeline.storage.iceberg import (
+    RULES_VERSION_PROPERTY,
+    open_silver_catalog,
+    table_rules_version,
+)
 from src.data_pipeline.storage.sec_filings.xbrl_facts import XBRL_FACTS_SPEC
 
 pytestmark = pytest.mark.integration
@@ -36,6 +41,85 @@ TEN_K_INSTANCE = f"{TEN_K_ID}:xbrl:inline:default"
 EIGHT_K_ID = "sec:0000789019-25-000010"
 NEW_FILING = ("0000320193", "10-Q", "0000320193-26-000001", "20260130")
 NEW_ID = "sec:0000320193-26-000001"
+# Rules version and rows digest (`_rows_digest`) of each table built from FILINGS.
+FIXTURE_ROWS: dict[str, tuple[int, str]] = {
+    "sec_filings.filings": (
+        1,
+        "e6813720bc28cd533771b482ad575b9041d6a28420628b7ef8d2dde6db7b8713",
+    ),
+    "sec_filings.documents": (
+        1,
+        "c1bf5be218e0a0544c356305ef84fe2cf88df6bfa85bd1a8679fd59afda17a65",
+    ),
+    "sec_filings.filing_entities": (
+        1,
+        "a9f9a52ad139036ed4e1f65bf6e92d717bbbd6bd711f10f9e94b966ff81a28b9",
+    ),
+    "sec_filings.sections": (
+        1,
+        "8fbb83b22060035d7370aef5d8909fb372be9c1baba03ea2dba5dc3023a03f27",
+    ),
+    "sec_filings.content_blocks": (
+        1,
+        "66688c5a553c5f4288e6c6423fe2b361fbe2214355063681ac2b6cd4cf062100",
+    ),
+    "sec_filings.document_tables": (
+        1,
+        "1701e01fb49964b4885903cc1d9230feb799786496d8e504f16fbbb10c282a4f",
+    ),
+    "sec_filings.document_table_cells": (
+        1,
+        "f2015e1ac75a3ba801aa9fcd3228f5cd425792c01a47be2fc690c7370a49f7e1",
+    ),
+    "sec_filings.document_links": (
+        1,
+        "ef6cdcef9a92e9b7e06423e342dce7e09f09de1cef8fec07ee918739599130e9",
+    ),
+    "sec_filings.exhibits": (
+        1,
+        "327941427a100c0e81406ee02551be81a62e0fba94740de32ef338c29f2794df",
+    ),
+    "sec_filings.xbrl_instances": (
+        1,
+        "c592741365344e45ae0753594a261b3e07777510be249872b3a01363ae1709a3",
+    ),
+    "sec_filings.xbrl_contexts": (
+        1,
+        "21094100d3a5e668c37911867d18b8a4b0dedf4ba683342b400c13928dc22e10",
+    ),
+    "sec_filings.xbrl_units": (
+        1,
+        "ef022e2550e6a35dfeb08bc6f5af6b919deab2c12d7adce140a50c77b9fc5480",
+    ),
+    "sec_filings.xbrl_concepts": (
+        1,
+        "790e3b024c61f9a81dbff7dbfb30560f9a88131fc2f461c1cb55545d9847d6b6",
+    ),
+    "sec_filings.xbrl_facts": (
+        1,
+        "80990c6684e766b22b7a76e0e239013ab826cc4be1c6d6b0b38c9507b8eaa8ee",
+    ),
+    "sec_filings.xbrl_dimensions": (
+        1,
+        "68fbb4646146486d6b7ff1928888e5d977adb1a8e57f6de960a4ee091bdde882",
+    ),
+    "sec_filings.xbrl_fact_footnotes": (
+        1,
+        "f0753e1128ad63b903c5ec02674ee04a87228828a33b1fe2ab2b6b5741cd1730",
+    ),
+    "sec_filings.xbrl_labels": (
+        1,
+        "78617a43a5fd80ef3883cb972c889beebc57dcbdf2cf2db7f8953114461b0405",
+    ),
+    "sec_filings.xbrl_networks": (
+        1,
+        "990a3aafdb45472c7162c3eac92b9dac2dd8c33b3be33effe534592afbfb1671",
+    ),
+    "sec_filings.xbrl_relationships": (
+        1,
+        "5d1804b1b057f277dc9e104c558611775c6d4e4eee5d87d95cd179d32b420415",
+    ),
+}
 
 
 def _write(data_dir: Path, write_sec_filing, filings=FILINGS) -> None:
@@ -309,6 +393,45 @@ def test_new_filing_appends_only_its_own_groups(silver: Path, write_sec_filing) 
     assert len(new_instances) == 1
 
 
+def test_a_table_built_with_other_rules_blocks_runs_until_rebuilt(
+    silver: Path, write_sec_filing
+) -> None:
+    sections, blocks = "sec_filings.sections", "sec_filings.content_blocks"
+    with open_silver_catalog(silver) as catalog:
+        table = catalog.load_table(blocks)
+        assert table_rules_version(table) == 1
+        # Tables created before the property existed hold rows of version 1.
+        with table.transaction() as change:
+            change.remove_properties(RULES_VERSION_PROPERTY)
+        assert table_rules_version(catalog.load_table(blocks)) == 1
+        with catalog.load_table(blocks).transaction() as change:
+            change.set_properties({RULES_VERSION_PROPERTY: "2"})
+    _write(silver, write_sec_filing, [NEW_FILING])
+    snapshots = _snapshots(silver)
+
+    blocked = run_sec_filings_silver(silver)
+
+    assert blocked.table_problems == (
+        (
+            f"{blocks} rows were built with rules version 2, the code builds "
+            "version 1: rebuild the table under control"
+        ),
+    )
+    assert blocked.stages_skipped == blocked.stages_requested
+    assert _snapshots(silver) == snapshots
+    # Stages that neither read nor write the table still run; the audit fails.
+    assert run_sec_filings_silver(silver, to_stage="filing_entities").completed
+    report = audit_silver(silver)
+    assert [(c.check_name, c.table) for c in report.checks if c.status == "FAIL"] == [
+        ("table_definition", blocks)
+    ]
+    # The controlled rebuild: drop the stage's tables, then build again.
+    with open_silver_catalog(silver) as catalog:
+        for identifier in (sections, blocks):
+            catalog.purge_table(identifier)
+    assert run_sec_filings_silver(silver).completed
+
+
 def test_corrupted_state_fails_the_integrity_gate(
     silver: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -394,14 +517,10 @@ def test_xbrl_workers_build_the_same_rows(
         == 0
     )
 
-    def content(data_dir: Path, identifier: str) -> list[str]:
-        return sorted(
-            repr(sorted((k, v) for k, v in row.items() if k != "processed_at"))
-            for row in _rows(data_dir, identifier)
-        )
-
     for table in SILVER_TABLES:
-        assert content(parallel, table.identifier) == content(serial, table.identifier)
+        assert _content(parallel, table.identifier) == _content(
+            serial, table.identifier
+        )
     assert _rows(serial, "sec_filings.xbrl_relationships")
 
 
@@ -423,7 +542,7 @@ def test_from_stage_needs_the_tables_of_the_stages_it_skips(
 
     no_catalog = run_sec_filings_silver(tmp_path, from_stage="narrative")
 
-    assert no_catalog.prerequisite_problems == (
+    assert no_catalog.table_problems == (
         f"no Silver catalog under {tmp_path.resolve()}",
     )
     assert no_catalog.stages_skipped == no_catalog.stages_requested
@@ -432,7 +551,7 @@ def test_from_stage_needs_the_tables_of_the_stages_it_skips(
     no_narrative = run_sec_filings_silver(
         tmp_path, from_stage="document_tables", to_stage="document_tables"
     )
-    assert no_narrative.prerequisite_problems == (
+    assert no_narrative.table_problems == (
         "sec_filings.sections does not exist",
         "sec_filings.content_blocks does not exist",
     )
@@ -548,6 +667,25 @@ def _content(data_dir: Path, identifier: str) -> list[str]:
         repr(sorted((k, v) for k, v in row.items() if k != "processed_at"))
         for row in _rows(data_dir, identifier)
     )
+
+
+def _rows_digest(data_dir: Path, identifier: str) -> str:
+    return hashlib.sha256(
+        "\n".join(_content(data_dir, identifier)).encode()
+    ).hexdigest()
+
+
+def test_rows_change_only_with_the_rules_version(silver: Path) -> None:
+    built = {
+        t.identifier: (t.spec.rules_version, _rows_digest(silver, t.identifier))
+        for t in SILVER_TABLES
+    }
+
+    # A different digest means the fixture Bronze now gives different rows.
+    # If the code changed them, bump that table's rules_version (stored rows
+    # then need a controlled rebuild, AGENTS.md) and record both here; if
+    # only the fixtures changed, record the new digest.
+    assert built == FIXTURE_ROWS
 
 
 def _count_loads(monkeypatch: pytest.MonkeyPatch) -> list[str]:

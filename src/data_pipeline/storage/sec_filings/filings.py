@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
-from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 from pyiceberg.transforms import YearTransform
 
@@ -35,12 +33,6 @@ class StoredChecksums:
 
     full_submission_sha256: str
     primary_document_sha256: str | None
-
-
-def open_filings_table(catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
-    """Load or create `sec_filings.filings`, returning whether it was created."""
-
-    return FILINGS_SPEC.open(catalog, data_dir)
 
 
 def read_stored_checksums(table: Table) -> dict[str, StoredChecksums]:

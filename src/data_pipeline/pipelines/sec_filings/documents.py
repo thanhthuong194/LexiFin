@@ -35,11 +35,11 @@ from src.data_pipeline.storage.iceberg import (
     verify_append,
 )
 from src.data_pipeline.storage.sec_filings.documents import (
+    DOCUMENTS_SPEC,
     DOCUMENTS_TABLE,
-    open_documents_table,
 )
 from src.data_pipeline.storage.sec_filings.filings import (
-    open_filings_table,
+    FILINGS_SPEC,
     read_filings,
 )
 from src.data_pipeline.transforms.sec_filings.documents import (
@@ -274,13 +274,13 @@ def _run_documents(
     run: tuple[SecBronze, datetime],
     summary: DocumentsStageSummary,
 ) -> None:
-    filings_table, _ = open_filings_table(catalog, data_dir)
+    filings_table, _ = FILINGS_SPEC.open(catalog, data_dir)
     parents = sorted(
         read_filings(filings_table), key=lambda p: (p.filing_date, p.filing_id)
     )
     summary.filings_considered = len(parents)
 
-    table, created = open_documents_table(catalog, data_dir)
+    table, created = DOCUMENTS_SPEC.open(catalog, data_dir)
     logger.info(
         "documents_table_created" if created else "documents_table_loaded",
         location=table.location(),

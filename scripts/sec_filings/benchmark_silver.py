@@ -374,17 +374,27 @@ def _table(header: Sequence[str], rows: Sequence[Sequence[object]]) -> list[str]
 
 
 def _git_revision() -> str:
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args],
-            cwd=REPOSITORY_ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
+    """The checked-out commit, or "unknown" without a usable git checkout:
+    the report is written after hours of runs and must not fail here."""
 
-    dirty = " (có thay đổi chưa commit)" if git("status", "--porcelain") else ""
-    return git("rev-parse", "--short", "HEAD") + dirty
+    def git(*args: str) -> str | None:
+        try:
+            done = subprocess.run(
+                ["git", *args],
+                cwd=REPOSITORY_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    revision = git("rev-parse", "--short", "HEAD")
+    if revision is None:
+        return "unknown"
+    dirty = " (uncommitted changes)" if git("status", "--porcelain") else ""
+    return revision + dirty
 
 
 def _machine() -> str:
@@ -396,24 +406,24 @@ def _machine() -> str:
 def _header(
     builds: Sequence[Scenario], settings: Settings, bronze_dir: Path
 ) -> list[str]:
-    network = "online (tải taxonomy còn thiếu, thời gian không so được với offline)"
+    network = "online (fetches missing taxonomies; times not comparable with offline)"
     return [
         f"# Silver benchmark {datetime.now(UTC):%Y-%m-%d %H:%M} UTC",
         "",
-        f"- Code: `{_git_revision()}`; máy: {_machine()}",
+        f"- Code: `{_git_revision()}`; machine: {_machine()}",
         f"- Bronze: `{bronze_dir}`; taxonomy: `{settings.taxonomy_cache_dir}`, "
         + (network if settings.allow_taxonomy_network else "offline")
         + f"; XBRL workers: {settings.xbrl_workers}"
         + f"; audit workers: {settings.audit_workers}",
         (
-            f"- Mức dữ liệu: {', '.join(b.sample.label for b in builds)} filing của "
-            "Bronze (mẫu lồng nhau theo hash filing_id)"
+            f"- Samples: {', '.join(b.sample.label for b in builds)} of Bronze filings "
+            "(nested samples by filing_id hash)"
         ),
         (
-            "- Mỗi stage chạy trong một process riêng: thời gian gồm cả khởi động process "
-            "(import, mở catalog: ~1–3 s mỗi stage). RAM tối đa = high-water mark của "
-            "kernel cho process lớn nhất; RAM cây = tổng RSS của process và mọi process "
-            f"con, lấy mẫu mỗi {settings.sample_seconds:g} s."
+            "- Each stage runs in its own process: time includes process startup "
+            "(imports, opening the catalog: ~1–3 s per stage). Peak RAM = kernel "
+            "high-water mark of the largest process; tree RAM = summed RSS of the "
+            f"process and all children, sampled every {settings.sample_seconds:g} s."
         ),
         "",
     ]
@@ -440,21 +450,21 @@ def _totals(builds: Sequence[Scenario]) -> list[str]:
             )
         )
     return [
-        "## 1. Tổng thời gian, RAM tối đa, throughput (build từ đầu)",
+        "## 1. Totals, peak RAM, throughput (full build)",
         "",
         *_table(
             (
-                "Mức",
-                "Filing",
+                "Sample",
+                "Filings",
                 "Bronze (MiB)",
                 "10-K/10-Q/8-K",
-                "Thời gian",
+                "Time",
                 "CPU",
-                "RAM tối đa (MiB)",
-                "RAM cây (MiB)",
-                "Filing/phút",
-                "MiB Bronze/phút",
-                "Row ghi",
+                "Peak RAM (MiB)",
+                "Tree RAM (MiB)",
+                "Filings/min",
+                "Bronze MiB/min",
+                "Rows written",
             ),
             rows,
         ),
@@ -477,18 +487,18 @@ def _stages(build: Scenario) -> list[str]:
         for s in build.stages
     ]
     return [
-        f"## 2. Theo stage, mức {build.sample.label} ({build.sample.filings} filing)",
+        f"## 2. Per stage, sample {build.sample.label} ({build.sample.filings} filings)",
         "",
-        "CPU/wall ≈ 1: stage bị giới hạn bởi CPU một lõi; thấp hơn nhiều: chờ I/O.",
+        "CPU/wall ≈ 1: bound by one CPU core; much lower: waiting on I/O.",
         "",
         *_table(
             (
                 "Stage",
-                "Thời gian (s)",
-                "% tổng",
+                "Time (s)",
+                "% of total",
                 "CPU/wall",
-                "RAM tối đa (MiB)",
-                "Row ghi",
+                "Peak RAM (MiB)",
+                "Rows written",
                 "Row/s",
                 "ms/filing",
             ),
@@ -514,22 +524,22 @@ def _halves(samples: Sequence[tuple[float, int]]) -> tuple[int, int]:
 
 def _scaling(builds: Sequence[Scenario], project_filings: int | None) -> list[str]:
     if len(builds) < 2:
-        return ["## 3. Scaling", "", "Cần ít nhất hai mức `--fractions`.", ""]
+        return ["## 3. Scaling", "", "Needs at least two `--fractions`.", ""]
     low, high = builds[0], builds[-1]
     if low.sample.filings == high.sample.filings:
         return [
             "## 3. Scaling",
             "",
-            "Mức nhỏ nhất và lớn nhất có cùng số filing: chọn `--fractions` cách xa hơn.",
+            "Smallest and largest samples have the same filing count: pick `--fractions` further apart.",
             "",
         ]
     header = [
         *(f"t {b.sample.label} (s)" for b in builds),
         *(f"RAM {b.sample.label} (MiB)" for b in builds),
-        "RAM nửa đầu / nửa sau (MiB)",
+        "RAM first / second half (MiB)",
     ]
     if project_filings:
-        header.append(f"t dự báo {project_filings:,} filing")
+        header.append(f"t projected {project_filings:,} filings")
     rows = []
     for name in (stage.name for stage in SILVER_STAGES):
         results = [r for b in builds if (r := b.stage(name))]
@@ -549,17 +559,17 @@ def _scaling(builds: Sequence[Scenario], project_filings: int | None) -> list[st
             row.append(_seconds(walls[-1] + max(slope, 0) * extra))
         rows.append(row)
     return [
-        "## 3. Scaling theo stage",
+        "## 3. Scaling per stage",
         "",
         (
-            f"Thời gian dự báo: tuyến tính giữa mức nhỏ nhất ({low.sample.label}) và lớn "
-            f"nhất ({high.sample.label}); chỉ đúng khi tỉ lệ form và kích thước filing giống "
-            "mẫu. RAM không được ngoại suy: stage dựng và commit theo lô, nên peak là của lô "
-            "nặng nhất, và giữa các mức nhỏ RAM còn tăng vì lô chưa đầy. RAM nửa đầu / nửa "
-            "sau là peak RSS (cả cây process) trong hai nửa thời gian của lần chạy lớn nhất: "
-            "chỉ khi stage chạy nhiều lô, nửa sau cao hơn hẳn nửa đầu mới là dấu hiệu RAM leo "
-            "theo dữ liệu (với một lô, hay stage ngắn mà nửa đầu là lúc khởi động, nửa sau "
-            "luôn cao hơn)."
+            f"Projected time: linear between the smallest ({low.sample.label}) and "
+            f"largest ({high.sample.label}) samples; valid only when form mix and filing "
+            "size match the sample. RAM is not extrapolated: stages build and commit in "
+            "batches, so peak is the heaviest batch, and on small samples RAM still grows "
+            "because batches are not full. RAM first / second half is peak tree RSS in "
+            "each half of the largest run: only for a stage with many batches does a much "
+            "higher second half mean RAM climbs with data (with one batch, or a short "
+            "stage whose first half is startup, the second half is always higher)."
         ),
         "",
         *_table(["Stage", *header], rows),
@@ -568,11 +578,11 @@ def _scaling(builds: Sequence[Scenario], project_filings: int | None) -> list[st
 
 def _bottlenecks(build: Scenario, top: int = 3) -> list[str]:
     lines = [
-        f"## 4. Bottleneck, mức {build.sample.label}",
+        f"## 4. Bottlenecks, sample {build.sample.label}",
         "",
         (
-            "Các stage chậm nhất và thao tác/pha tốn thời gian nhất trong log của chúng "
-            "(thao tác có thể lồng nhau; pha `*_ms` là tổng qua các lô)."
+            "Slowest stages and the costliest operations/phases in their logs "
+            "(operations may nest; `*_ms` phases are summed over batches)."
         ),
         "",
     ]
@@ -615,22 +625,22 @@ def _reruns(reruns: Sequence[Scenario]) -> list[str]:
         for name in (stage.name for stage in SILVER_STAGES)
     ]
     return [
-        "## 5. Chạy lại (incremental)",
+        "## 5. Reruns (incremental)",
         "",
         (
-            "`rerun`: chạy lại khi không có filing mới. `delta`: Silver của mức nhỏ hơn "
-            "được cập nhật lên mức lớn nhất (chỉ phần filing chưa có là mới)."
+            "`rerun`: no new filings. `delta`: Silver of a smaller sample updated to "
+            "the largest (only filings not yet stored are new)."
         ),
         "",
         *_table(
             (
-                "Kịch bản",
+                "Scenario",
                 "Bronze",
-                "Filing mới",
-                "Thời gian",
-                "RAM tối đa (MiB)",
-                "Row ghi",
-                "Không tính integrity",
+                "New filings",
+                "Time",
+                "Peak RAM (MiB)",
+                "Rows written",
+                "Excluding integrity",
             ),
             rows,
         ),
@@ -643,10 +653,10 @@ def _failures(scenarios: Sequence[Scenario], work_dir: Path) -> list[str]:
     if not failed:
         return []
     return [
-        "## Lỗi",
+        "## Failures",
         "",
         *(
-            f"- `{s.name}` dừng ở stage `{f.stage}` (exit {f.process.exit_code}); "
+            f"- `{s.name}` stopped at stage `{f.stage}` (exit {f.process.exit_code}); "
             f"log: `{work_dir / 'logs' / f'{s.name}.{f.stage}.jsonl'}`"
             for s, f in failed
         ),
@@ -675,7 +685,7 @@ def render_report(
         ]
     lines += _reruns(reruns)
     lines.append(
-        f"Log từng process: `{settings.work_dir / 'logs'}`; RSS theo thời gian: "
+        f"Per-process logs: `{settings.work_dir / 'logs'}`; RSS over time: "
         f"`{settings.work_dir / 'rss_samples.csv'}`."
     )
     return "\n".join(lines) + "\n"
