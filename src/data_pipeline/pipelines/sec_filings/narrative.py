@@ -49,7 +49,7 @@ from src.data_pipeline.storage.sec_filings.content_blocks import (
 from src.data_pipeline.storage.sec_filings.documents import (
     DOCUMENTS_SPEC,
     read_document_content,
-    read_primary_html_documents,
+    read_narrative_documents,
 )
 from src.data_pipeline.storage.sec_filings.sections import (
     SECTIONS_SPEC,
@@ -61,6 +61,7 @@ from src.data_pipeline.transforms.sec_filings.narrative import (
     DocumentNarrative,
     build_document_narrative,
     detect_section_headings,
+    is_textless_exhibit,
 )
 from src.utils.logger import get_logger, log_context
 from src.utils.timer import timed_operation
@@ -80,12 +81,15 @@ StoredRows = Mapping[str, Sequence[dict[str, Any]]]
 class NarrativeStageSummary:
     """Outcome of one `sec_filings.sections` + `sec_filings.content_blocks` run.
 
-    Each considered primary HTML document is counted in exactly one of
-    inserted (both groups new), skipped (both complete), resumed (exact stored
-    sections, blocks appended now), conflicted (invalid or changed stored
-    state) or failed (unreadable source, parse or validation error); a
-    rejected run counts would-be inserts and resumes in neither. Block metrics
-    describe the documents built in this run. `legacy_table_cell_blocks`
+    Each considered narrative document (`is_narrative_document`) is counted
+    in exactly one of inserted (both groups new), skipped (both complete),
+    resumed (exact stored sections, blocks appended now), without_text (an
+    exhibit with no visible text, such as an image-only slide deck: no rows,
+    so it is parsed again every run), conflicted (invalid or changed stored
+    state) or failed (unreadable source, parse or validation error; a primary
+    document without text fails); a rejected run counts would-be inserts and
+    resumes in neither. Block metrics describe the documents built in this
+    run. `legacy_table_cell_blocks`
     counts stored rows from the retired one-block-per-cell table layout; any
     rejects the run until both narrative tables are rebuilt.
     """
@@ -98,6 +102,7 @@ class NarrativeStageSummary:
     documents_resumed: int = 0
     documents_conflicted: int = 0
     documents_failed: int = 0
+    documents_without_text: int = 0
     sections_inserted: int = 0
     blocks_inserted: int = 0
     heading_blocks: int = 0
@@ -200,7 +205,9 @@ def _classify(
     plan = _Plan(parents)
     known = {parent.document_id for parent in parents}
     for document_id in sorted((set(stored_sections) | set(stored_blocks)) - known):
-        _conflict(summary, "rows have no primary HTML parent", document_id=document_id)
+        _conflict(
+            summary, "rows have no narrative document parent", document_id=document_id
+        )
     for parent in parents:
         sections = stored_sections.get(parent.document_id)
         blocks = stored_blocks.get(parent.document_id)
@@ -278,6 +285,10 @@ def _build_candidates(
                 verified_documents += 1
                 verified_bytes += len(content)
                 blocks = extract_blocks(parse_html(content)).blocks
+                if is_textless_exhibit(parent, blocks):
+                    summary.documents_without_text += 1
+                    logger.warning("narrative_document_without_text")
+                    continue
                 headings = detect_section_headings(parent.document_type, blocks)
                 narrative = build_document_narrative(
                     parent, blocks, headings, processed_at
@@ -293,7 +304,7 @@ def _build_candidates(
             _record_metrics(narrative, summary)
             built[parent.document_id] = narrative
     logger.info(
-        "primary_document_content_verified",
+        "narrative_document_content_verified",
         documents=verified_documents,
         bytes=verified_bytes,
     )
@@ -465,6 +476,9 @@ def _run_batch(run: _Run, batch: Sequence[DocumentRecord], resumed: set[str]) ->
         _validate_built(batch, built, stored_sections, summary)
     if summary.documents_failed or summary.documents_conflicted:
         return False
+    batch = [parent for parent in batch if parent.document_id in built]
+    if not batch:
+        return True
     _write(run, batch, built, resumed)
     resumed_now = sum(parent.document_id in resumed for parent in batch)
     summary.documents_inserted += len(batch) - resumed_now
@@ -523,7 +537,7 @@ def _run_narrative(
         return
     with timed_operation("narrative.read"):
         parents = sorted(
-            read_primary_html_documents(documents_table),
+            read_narrative_documents(documents_table),
             key=lambda parent: (parent.filing_date, parent.document_id),
         )
         stored_sections = summarize_groups(
@@ -541,7 +555,7 @@ def _run_narrative(
             uniform=_LINEAGE_COLUMNS,
         )
     summary.documents_considered = len(parents)
-    logger.info("primary_documents_loaded", documents=len(parents))
+    logger.info("narrative_documents_loaded", documents=len(parents))
 
     with timed_operation("narrative.validate", phase="existing_state"):
         plan = _classify(parents, stored_sections, stored_blocks, summary)
@@ -560,7 +574,8 @@ def run_narrative_stage(
 ) -> NarrativeStageSummary:
     """Build `sec_filings.sections` and `sec_filings.content_blocks` together.
 
-    Every primary HTML document of `sec_filings.documents` is classified
+    Every narrative document of `sec_filings.documents` (primary HTML and
+    EX-99 HTML exhibits, `is_narrative_document`) is classified
     against summaries of both tables before any parsing; any conflict
     rejects the run before the first write. Documents to build are parsed,
     validated and committed in batches of DOCUMENTS_PER_COMMIT: sections

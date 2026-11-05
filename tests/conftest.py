@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -428,6 +428,32 @@ SEC_DOCUMENTS = (
     ("XML", "7", "R1.htm", "IDEA: XBRL DOCUMENT", "\n<html>cover page</html>\n"),
 )
 
+# EX-99 exhibits as 8-Ks attach them, for `extra_documents`: a press release
+# (text, a table, and lines that would start sections in a primary document)
+# and an image-only slide deck (no visible text).
+PRESS_RELEASE = (
+    "EX-99.1",
+    "8",
+    "ex99-1.htm",
+    "PRESS RELEASE",
+    (
+        "\n<html><body><div>TABLE OF CONTENTS</div>"
+        "<p>Example Corp reports record quarterly revenue.</p>"
+        "<div>Item 2.02</div>"
+        "<table><tr><td>Revenue</td><td>$1,250</td></tr>"
+        "<tr><td>Net income</td><td>$250</td></tr></table>"
+        "<p>&#8220;We delivered strong results,&#8221; said the CEO.</p>"
+        "</body></html>\n"
+    ),
+)
+SLIDES = (
+    "EX-99.2",
+    "9",
+    "ex99-2.htm",
+    "INVESTOR PRESENTATION",
+    '\n<html><body><p><img src="slide1.jpg" alt="Slide 1"></p></body></html>\n',
+)
+
 SecFilingWriter = Callable[..., Path]
 
 
@@ -455,8 +481,9 @@ def write_sec_filing() -> SecFilingWriter:
     8-Ks). The submission holds SEC_DOCUMENTS with the primary document typed
     as the header form; `primary_text` replaces its <TEXT> content, and the
     extracted XBRL instance is EDGAR's XML rendering of the form's Inline
-    XBRL, left out when `xbrl_instance` is false. Returns
-    the accession directory.
+    XBRL, left out when `xbrl_instance` is false; `extra_documents` (same
+    tuples as SEC_DOCUMENTS) are appended after them. Returns the accession
+    directory.
     """
 
     def write(
@@ -473,6 +500,7 @@ def write_sec_filing() -> SecFilingWriter:
         primary_text: str | None = None,
         xbrl_instance: bool = True,
         primary_html: bytes | None = b"<html>primary</html>",
+        extra_documents: Sequence[tuple[str, str, str, str | None, str]] = (),
     ) -> Path:
         directory = (
             data_dir
@@ -492,7 +520,7 @@ def write_sec_filing() -> SecFilingWriter:
             accession=header_accession or accession,
             form=submission_form,
             filed=filed,
-            document_count=len(SEC_DOCUMENTS),
+            document_count=len(SEC_DOCUMENTS) + len(extra_documents),
             entities="".join(
                 SEC_FILER_TEMPLATE.format(
                     name=name, cik=filer_cik, form=submission_form
@@ -512,7 +540,7 @@ def write_sec_filing() -> SecFilingWriter:
             others = [doc for doc in others if doc[2] != "primary_htm.xml"]
         documents = "".join(
             _document_block(submission_form, document)
-            for document in (primary, *others)
+            for document in (primary, *others, *extra_documents)
         )
         (directory / "full-submission.txt").write_text(
             f"{header}{documents}</SEC-DOCUMENT>\n", encoding="ascii"

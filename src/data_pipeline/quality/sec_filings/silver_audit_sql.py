@@ -40,6 +40,7 @@ from src.data_pipeline.storage.sec_filings.document_tables import DOCUMENT_TABLE
 from src.data_pipeline.storage.sec_filings.documents import (
     DOCUMENTS_SPEC,
     DOCUMENTS_TABLE,
+    NARRATIVE_DOCUMENT_SQL,
 )
 from src.data_pipeline.storage.sec_filings.exhibits import EXHIBITS_TABLE
 from src.data_pipeline.storage.sec_filings.filing_entities import (
@@ -89,7 +90,10 @@ class GroupRule:
     """Rows of `table` grouped by `group` have ordinals exactly 1..N.
 
     When the contract has a `declared` count column, every row of the group
-    holds N in it.
+    holds N in it. (`group`, `ordinal`) must be a unique key of the table
+    (`AuditedTable.unique`): with no repeated ordinal, MIN = 1 and MAX = N
+    rows mean exactly 1..N, so the check needs no COUNT(DISTINCT), which
+    DuckDB cannot spill to disk (out of memory on 115M cells).
     """
 
     table: str
@@ -150,14 +154,14 @@ class SqlRule:
     severity: Status = "FAIL"
 
 
-def _primary_html_only(identifier: str) -> SqlRule:
+def _narrative_documents_only(identifier: str) -> SqlRule:
     return SqlRule(
-        "primary_html_documents_only",
+        "narrative_documents_only",
         identifier,
-        "rows belong to primary HTML documents only",
+        "rows belong to narrative documents only (primary HTML, EX-99 HTML exhibits)",
         f"SELECT DISTINCT x.document_id FROM {_name(identifier)} x "
         "JOIN documents d ON d.document_id = x.document_id "
-        "WHERE d.role != 'primary_document' OR d.content_kind != 'html'",
+        f"WHERE NOT {NARRATIVE_DOCUMENT_SQL}",
     )
 
 
@@ -195,22 +199,22 @@ SQL_RULES = (
     SqlRule("primary_document_form", DOCUMENTS_TABLE, "the primary document's type is the filing form", "SELECT d.document_id FROM documents d JOIN filings f ON f.filing_id = d.filing_id WHERE d.role = 'primary_document' AND d.document_type != f.form"),
     SqlRule("public_document_count", DOCUMENTS_TABLE, "the header PUBLIC DOCUMENT COUNT equals the stored <DOCUMENT> blocks (the header is known to overcount: warning only)", "SELECT f.filing_id FROM filings f WHERE f.public_document_count != (SELECT COUNT(*) FROM documents d WHERE d.filing_id = f.filing_id)", "WARN"),
     SqlRule("has_narrative", SECTIONS_TABLE, "every primary HTML document has sections", "SELECT d.document_id FROM documents d WHERE d.role = 'primary_document' AND d.content_kind = 'html' AND NOT EXISTS (SELECT 1 FROM sections s WHERE s.document_id = d.document_id)"),
-    _primary_html_only(SECTIONS_TABLE),
+    _narrative_documents_only(SECTIONS_TABLE),
     SqlRule("one_root", SECTIONS_TABLE, "every document has exactly one root section (null parent)", "SELECT document_id FROM sections GROUP BY document_id HAVING SUM(parent_section_id IS NULL) != 1"),
     SqlRule("no_self_parent", SECTIONS_TABLE, "no section is its own parent", "SELECT section_id FROM sections WHERE parent_section_id = section_id"),
     SqlRule("parent_shallower", SECTIONS_TABLE, "a parent's level is below its child's, so levels strictly decrease up every parent chain and no chain can cycle", "SELECT c.section_id FROM sections c JOIN sections p ON p.section_id = c.parent_section_id WHERE p.level >= c.level"),
     SqlRule("range_in_parent", SECTIONS_TABLE, "a section's block range lies inside its parent's", "SELECT c.section_id FROM sections c JOIN sections p ON p.section_id = c.parent_section_id WHERE c.start_block_ordinal < p.start_block_ordinal OR c.end_block_ordinal > p.end_block_ordinal"),
     SqlRule("increasing_starts", SECTIONS_TABLE, "detected sections start in strictly increasing block order", "SELECT section_id FROM (SELECT section_id, section_ordinal, start_block_ordinal, LAG(start_block_ordinal) OVER (PARTITION BY document_id ORDER BY section_ordinal) AS previous FROM sections) WHERE section_ordinal > 2 AND start_block_ordinal <= previous"),
     SqlRule("root_spans_blocks", SECTIONS_TABLE, "the root section spans exactly the document's blocks", "SELECT s.section_id FROM sections s WHERE s.parent_section_id IS NULL AND s.end_block_ordinal != 1 + (SELECT COUNT(*) FROM content_blocks b WHERE b.document_id = s.document_id)"),
-    SqlRule("root_only_document", SECTIONS_TABLE, "documents have a detected section besides the root (warning only)", "SELECT document_id FROM sections GROUP BY document_id HAVING COUNT(*) = 1", "WARN"),
+    SqlRule("root_only_document", SECTIONS_TABLE, "primary documents have a detected section besides the root (exhibits are root only by design; warning only)", "SELECT s.document_id FROM sections s JOIN documents d ON d.document_id = s.document_id WHERE d.role = 'primary_document' GROUP BY s.document_id HAVING COUNT(*) = 1", "WARN"),
     SqlRule("repeated_section_code", SECTIONS_TABLE, "no section code repeats under the same parent code (warning only)", "SELECT c.document_id || ' ' || c.section_code FROM sections c JOIN sections p ON p.section_id = c.parent_section_id GROUP BY c.document_id, p.section_code, c.section_code HAVING COUNT(*) > 1", "WARN"),
-    _primary_html_only(CONTENT_BLOCKS_TABLE),
+    _narrative_documents_only(CONTENT_BLOCKS_TABLE),
     SqlRule("block_in_section_range", CONTENT_BLOCKS_TABLE, "a block lies inside its section's block range", "SELECT b.block_id FROM content_blocks b JOIN sections s ON s.section_id = b.section_id WHERE b.block_ordinal < s.start_block_ordinal OR b.block_ordinal >= s.end_block_ordinal"),
     SqlRule("block_in_deepest_section", CONTENT_BLOCKS_TABLE, "no deeper section of the document contains the block", "SELECT b.block_id FROM content_blocks b JOIN sections s ON s.section_id = b.section_id WHERE EXISTS (SELECT 1 FROM sections d WHERE d.document_id = b.document_id AND d.level > s.level AND d.start_block_ordinal <= b.block_ordinal AND b.block_ordinal < d.end_block_ordinal)"),
     SqlRule("no_table_cell_blocks", CONTENT_BLOCKS_TABLE, f"no block uses the retired table_cell layout (rebuild under control, in order: {', '.join(TABLE_SEMANTICS_REBUILD)})", "SELECT block_id FROM content_blocks WHERE block_type = 'table_cell'"),
     SqlRule("table_block_source", CONTENT_BLOCKS_TABLE, "a table block has source_tag 'table' and an XPath ending at a <table>", "SELECT block_id FROM content_blocks WHERE block_type = 'table' AND (source_tag != 'table' OR rtrim(source_xpath, '0123456789[]') NOT LIKE '%/table')"),
     SqlRule("table_block_has_table", CONTENT_BLOCKS_TABLE, "every table block has its document_tables row", "SELECT b.block_id FROM content_blocks b WHERE b.block_type = 'table' AND NOT EXISTS (SELECT 1 FROM document_tables t WHERE t.block_id = b.block_id)"),
-    _primary_html_only(DOCUMENT_TABLES_TABLE),
+    _narrative_documents_only(DOCUMENT_TABLES_TABLE),
     SqlRule("header_cell_count", DOCUMENT_TABLES_TABLE, "header_cell_count equals the table's <th> cells", "SELECT t.table_id FROM document_tables t WHERE t.header_cell_count != (SELECT COUNT(*) FROM document_table_cells c WHERE c.table_id = t.table_id AND c.is_header)"),
     SqlRule("cells_fill_grid", DOCUMENT_TABLES_TABLE, "cells lie within row_count rows and span exactly column_count columns", "SELECT t.table_id FROM document_tables t JOIN (SELECT table_id, MAX(row_ordinal) AS last_row, MAX(column_ordinal + colspan - 1) AS last_column FROM document_table_cells GROUP BY table_id) g ON g.table_id = t.table_id WHERE g.last_row > t.row_count OR g.last_column != t.column_count"),
     SqlRule("table_on_table_block", DOCUMENT_TABLES_TABLE, "every document table belongs to a table block", "SELECT t.table_id FROM document_tables t JOIN content_blocks b ON b.block_id = t.block_id WHERE b.block_type != 'table'"),
@@ -589,7 +593,7 @@ def _check_groups(
     scratch: ScratchDatabase, report: SilverAuditReport, progress: Progress
 ) -> None:
     for rule in GROUP_RULES:
-        complete = f"MIN({rule.ordinal}) = 1 AND MAX({rule.ordinal}) = COUNT(*) AND COUNT(DISTINCT {rule.ordinal}) = COUNT(*)"
+        complete = f"MIN({rule.ordinal}) = 1 AND MAX({rule.ordinal}) = COUNT(*)"
         declared = "NULL, NULL"
         if rule.declared is not None:
             complete += f" AND MIN({rule.declared}) = COUNT(*) AND MAX({rule.declared}) = COUNT(*)"
@@ -604,15 +608,14 @@ def _check_groups(
             + (f" and every row declares {rule.declared} = N" if rule.declared else ""),
         ) as run:
             run.rows_checked = scratch.row_counts[rule.table]
-            for group, rows, low, high, distinct, *counts in scratch.rows(
+            for group, rows, low, high, *counts in scratch.rows(
                 f"SELECT {rule.group}, COUNT(*), MIN({rule.ordinal}), "
-                f"MAX({rule.ordinal}), COUNT(DISTINCT {rule.ordinal}), {declared} "
+                f"MAX({rule.ordinal}), {declared} "
                 f"FROM {_name(rule.table)} GROUP BY {rule.group} HAVING NOT ({complete})"
             ):
                 run.found(
                     group,
-                    f"{group}: {rows} rows, {distinct} distinct ordinals "
-                    f"{low}..{high}, declared {counts}",
+                    f"{group}: {rows} rows, ordinals {low}..{high}, declared {counts}",
                 )
         progress.complete(step)
 

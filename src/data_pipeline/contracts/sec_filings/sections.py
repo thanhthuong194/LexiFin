@@ -43,7 +43,7 @@ def section_id_for(document_id: str, section_ordinal: int) -> str:
 
 
 class SectionRecord(ContractModel):
-    """One structural section (root, TOC, PART, ITEM, ...) of a primary HTML document.
+    """One structural section (root, TOC, PART, ITEM, ...) of a narrative HTML document.
 
     Field order matches SECTIONS_ARROW_SCHEMA. The block range is
     [start_block_ordinal, end_block_ordinal): inclusive start, exclusive end,

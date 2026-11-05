@@ -63,6 +63,7 @@ from src.data_pipeline.storage.sec_filings.document_table_cells import (
 from src.data_pipeline.storage.sec_filings.document_tables import DOCUMENT_TABLES_TABLE
 from src.data_pipeline.storage.sec_filings.documents import (
     DOCUMENTS_TABLE,
+    is_narrative_document,
     read_document_content,
 )
 from src.data_pipeline.storage.sec_filings.filing_entities import FILING_ENTITIES_TABLE
@@ -105,6 +106,7 @@ from src.data_pipeline.transforms.sec_filings.html_tables import (
 from src.data_pipeline.transforms.sec_filings.narrative import (
     build_document_narrative,
     detect_section_headings,
+    is_textless_exhibit,
 )
 
 # Facts printed per sample: the first numeric facts without and with
@@ -391,13 +393,13 @@ def _check_narrative(
     report: SilverAuditReport,
     sample: FilingSample,
 ) -> None:
-    """Sections and blocks rebuilt from the primary document equal Silver."""
+    """Sections and blocks rebuilt from the document equal Silver."""
 
     document = narrative.document
     with report.check(
         "sample_narrative",
         SECTIONS_TABLE,
-        "sections and blocks rebuilt from the primary HTML equal the stored rows "
+        "sections and blocks rebuilt from the document's HTML equal the stored rows "
         "(block text hashes included); section_text_sha256 recomputed from the "
         "stored blocks; every block in its deepest section",
     ) as run:
@@ -469,7 +471,7 @@ def _check_tables(
     ) as run:
         run.rows_checked = len(narrative.tables) + len(narrative.cells)
         if not table_blocks and not narrative.tables:
-            run.skip("the primary document has no table blocks")
+            run.skip("the document has no table blocks")
             return
         problem = table_blocks_sync_problem(html.blocks, table_blocks)
         if problem is not None:
@@ -503,14 +505,34 @@ def _check_tables(
     )
 
 
-def _check_primary(
+def _check_without_text(
+    narrative: _Narrative, report: SilverAuditReport, sample: FilingSample
+) -> None:
+    """An exhibit without visible text has no stored narrative rows."""
+
+    document = narrative.document
+    with report.check(
+        "sample_narrative",
+        SECTIONS_TABLE,
+        "an exhibit without visible text has no sections, blocks or tables",
+    ) as run:
+        stored = [*narrative.sections, *narrative.blocks, *narrative.tables]
+        run.rows_checked = len(stored)
+        if stored:
+            run.found(
+                document.document_id, f"{len(stored)} rows for a textless exhibit"
+            )
+    sample.lines.append("narrative: no visible text")
+
+
+def _check_narrative_document(
     rows: SampleRows,
     document: DocumentRecord,
     bronze: SecBronze,
     report: SilverAuditReport,
     sample: FilingSample,
 ) -> None:
-    """Parse the verified primary HTML once; check narrative and tables against it."""
+    """Parse one verified narrative HTML once; check narrative and tables against it."""
 
     try:
         narrative = _read_narrative(rows, document)
@@ -521,6 +543,9 @@ def _check_primary(
         )
         return
     html = extract_blocks(root)
+    if is_textless_exhibit(document, html.blocks):
+        _check_without_text(narrative, report, sample)
+        return
     _check_narrative(narrative, html, report, sample)
     _check_tables(narrative, root, html, report, sample)
 
@@ -706,10 +731,13 @@ def check_sample(
     if raw is None:
         return
     _check_documents(stored, raw, bronze, report)
-    primary = next((d for d in stored.documents if d.role == "primary_document"), None)
-    if primary is not None and primary.content_kind == "html":
-        sample.lines.append(
-            f"primary document: {primary.filename} ({primary.document_id})"
-        )
-        _check_primary(rows, primary, bronze, report, sample)
+    for document in stored.documents:
+        if is_narrative_document(
+            document.role, document.content_kind, document.document_type
+        ):
+            sample.lines.append(
+                f"{document.document_type} document: {document.filename} "
+                f"({document.document_id})"
+            )
+            _check_narrative_document(rows, document, bronze, report, sample)
     _check_xbrl(rows, stored, report, sample, concept_names)

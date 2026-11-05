@@ -63,7 +63,7 @@ from src.data_pipeline.storage.sec_filings.document_tables import (
 )
 from src.data_pipeline.storage.sec_filings.documents import (
     DOCUMENTS_SPEC,
-    read_primary_html_documents,
+    read_narrative_documents,
 )
 from src.utils.logger import get_logger, log_context
 from src.utils.timer import timed_operation
@@ -97,7 +97,7 @@ _TABLE_HEAD = (
 class DocumentTablesStageSummary:
     """Outcome of one `document_tables` + `document_table_cells` run.
 
-    Each primary HTML document is counted once: without tables (no table
+    Each narrative document is counted once: without tables (no table
     blocks, nothing stored), inserted, skipped (both groups complete), resumed
     (exact stored tables, cells appended now), conflicted or failed. A rejected
     run counts would-be inserts and resumes in neither. `empty_cells` and
@@ -243,7 +243,7 @@ def _read_state(
     dict[str, list[TableHead]],
     dict[str, GroupSummary],
 ]:
-    """Primary HTML documents, their table blocks' heads in block order, the
+    """Narrative documents, their table blocks' heads in block order, the
     stored tables' heads, and a summary of each stored table's cells.
 
     Only key and lineage columns are read: memory follows the number of
@@ -253,7 +253,7 @@ def _read_state(
     documents_table, _ = DOCUMENTS_SPEC.open(catalog, data_dir)
     blocks_table, _ = CONTENT_BLOCKS_SPEC.open(catalog, data_dir)
     parents = sorted(
-        read_primary_html_documents(documents_table),
+        read_narrative_documents(documents_table),
         key=lambda parent: (parent.filing_date, parent.document_id),
     )
     blocks: dict[str, list[BlockHead]] = defaultdict(list)

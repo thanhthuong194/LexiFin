@@ -34,7 +34,7 @@ from src.data_pipeline.storage.iceberg import (
 )
 from src.data_pipeline.storage.sec_filings.document_links import DOCUMENT_LINKS_SPEC
 from src.data_pipeline.storage.sec_filings.documents import DOCUMENTS_SPEC
-from tests.conftest import STATEMENT_ROLE
+from tests.conftest import PRESS_RELEASE, SLIDES, STATEMENT_ROLE
 
 pytestmark = pytest.mark.integration
 
@@ -58,6 +58,8 @@ TEN_K = f"{TEN_K_FILING}:document:0001"
 TEN_Q = f"{TEN_Q_FILING}:document:0001"
 EIGHT_K = f"{EIGHT_K_FILING}:document:0001"
 EIGHT_K_TABLE = f"{EIGHT_K}:block:000005:table"
+PRESS_RELEASE_DOCUMENT = f"{EIGHT_K_FILING}:document:0007"
+SLIDES_DOCUMENT = f"{EIGHT_K_FILING}:document:0008"
 TEN_K_INSTANCE = f"{TEN_K_FILING}:xbrl:inline:default"
 PRESENTATION = network_id_for(TEN_K_INSTANCE, "presentation", STATEMENT_ROLE)
 SCHEMAS = {table.identifier: table.spec.arrow_schema for table in SILVER_TABLES}
@@ -72,7 +74,14 @@ def silver(tmp_path: Path, write_sec_filing) -> Path:
         ("0000320193", "10-Q", "0000320193-25-000057", "20250502"),
         ("0000789019", "8-K", "0000789019-25-000010", "20250129"),
     ]:
-        write_sec_filing(tmp_path, cik=cik, form=form, accession=accession, filed=filed)
+        write_sec_filing(
+            tmp_path,
+            cik=cik,
+            form=form,
+            accession=accession,
+            filed=filed,
+            extra_documents=(PRESS_RELEASE, SLIDES) if form == "8-K" else (),
+        )
     assert run_sec_filings_silver(tmp_path).completed
     return tmp_path
 
@@ -179,6 +188,9 @@ def test_healthy_silver_passes_and_traces_every_form_to_bronze(silver: Path) -> 
     ten_k = "\n".join(report.samples[0].lines)
     assert "SHA-256 verified" in ten_k and "fact 1:" in ten_k
     assert "PART" in ten_k and "ITEM" in ten_k
+    eight_k = "\n".join(report.samples[2].lines)
+    assert "EX-99.1 document: ex99-1.htm" in eight_k
+    assert "narrative: no visible text" in eight_k
     assert report.snapshot_changes == {}
     assert _snapshots(silver) == states
     assert _files(silver) == files
@@ -226,6 +238,9 @@ def test_null_link_targets_are_not_orphans(silver: Path) -> None:
         (_change(DIMENSIONS, "context_key", context_key_for(TEN_K_INSTANCE, "FY_Widgets")), "declared_count:expected_dimension_count", CONTEXTS),
         (_change(RELATIONSHIPS, "network_id", PRESENTATION), "declared_count:relationship_count", NETWORKS),
         (_change(RELATIONSHIPS, "network_id", PRESENTATION, {"weight": "1"}), "relationship_attributes", RELATIONSHIPS),
+        (_change(BLOCKS, "document_id", PRESS_RELEASE_DOCUMENT, {"document_id": f"{EIGHT_K_FILING}:document:0002"}), "narrative_documents_only", BLOCKS),
+        (_change(BLOCKS, "block_id", f"{PRESS_RELEASE_DOCUMENT}:block:000002", {"text": "Changed."}), "sample_narrative", SECTIONS),
+        (_change(SECTIONS, "document_id", PRESS_RELEASE_DOCUMENT, {"document_id": SLIDES_DOCUMENT, "section_id": f"{SLIDES_DOCUMENT}:section:0001"}, keep=True), "sample_narrative", SECTIONS),
     ],
     ids=[
         "duplicate-document-id",
@@ -250,6 +265,9 @@ def test_null_link_targets_are_not_orphans(silver: Path) -> None:
         "context-without-its-dimensions",
         "network-without-relationships",
         "attribute-of-another-linkbase-type",
+        "exhibit-blocks-on-a-non-narrative-document",
+        "exhibit-text-differs-from-bronze",
+        "rows-for-a-textless-exhibit",
     ],
 )  # fmt: skip
 def test_broken_silver_fails_the_check_without_changes(

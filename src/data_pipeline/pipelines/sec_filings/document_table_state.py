@@ -108,7 +108,7 @@ class TableHead:
 
 @dataclass
 class TableClassification:
-    """Every primary document sorted before any parsing.
+    """Every narrative document sorted before any parsing.
 
     `new` documents have table blocks but nothing stored; `resumed` ones have
     complete stored tables and no cells. Conflicts hold (context, reason).
@@ -223,7 +223,7 @@ def classify_documents(
         cell_tables[str(summary.value("document_id"))].add(table_id)
     for document_id in sorted((set(tables) | set(cell_tables)) - known):
         result.conflicts.append(
-            ({"document_id": document_id}, "rows have no primary HTML parent")
+            ({"document_id": document_id}, "rows have no narrative document parent")
         )
     for parent in parents:
         stored = tables.get(parent.document_id)

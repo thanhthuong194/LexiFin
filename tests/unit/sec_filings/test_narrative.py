@@ -21,7 +21,10 @@ from src.data_pipeline.quality.sec_filings.narrative import (
     sections_problem,
 )
 from src.data_pipeline.storage.bronze import SecBronze
-from src.data_pipeline.storage.sec_filings.documents import read_document_content
+from src.data_pipeline.storage.sec_filings.documents import (
+    is_narrative_document,
+    read_document_content,
+)
 from src.data_pipeline.transforms.sec_filings.html_blocks import (
     HtmlBlock,
     extract_blocks,
@@ -320,6 +323,44 @@ def test_eight_k_detects_decimal_items_signature_and_exhibit_index() -> None:
     root = narrative.sections[0].section_id
     assert {s.parent_section_id for s in narrative.sections[1:]} == {root}
     assert _codes("<div>Item 2.02 Results of Operations.</div>") == []
+
+
+@pytest.mark.parametrize("exhibit_type", ["EX-99.1", "EX-99.01", "ex-99"])
+def test_exhibits_are_one_root_section_whatever_their_headings(
+    exhibit_type: str,
+) -> None:
+    body = (
+        "<div>TABLE OF CONTENTS</div><div>Item 2.02 Results of Operations.</div>"
+        "<div>PART I</div><p>Revenue rose.</p><div>SIGNATURES</div>"
+    )
+
+    narrative = _narrative(body, exhibit_type)
+
+    assert [(s.section_kind, s.title) for s in narrative.sections] == [
+        ("document", f"{exhibit_type} Document")
+    ]
+    assert {b.block_type for b in narrative.blocks} == {"paragraph"}
+    assert {b.section_id for b in narrative.blocks} == {
+        narrative.sections[0].section_id
+    }
+
+
+@pytest.mark.parametrize(
+    ("role", "content_kind", "document_type", "narrative"),
+    [
+        ("primary_document", "html", "10-K", True),
+        ("exhibit", "html", "EX-99.1", True),
+        ("exhibit", "html", "ex-99.2", True),
+        ("exhibit", "html", "EX-31.1", False),
+        ("exhibit", "binary", "EX-99.1", False),
+        ("generated", "html", "XML", False),
+        ("primary_document", "text", "8-K", False),
+    ],
+)
+def test_narrative_documents_are_primary_html_and_ex_99_html(
+    role: str, content_kind: str, document_type: str, narrative: bool
+) -> None:
+    assert is_narrative_document(role, content_kind, document_type) is narrative
 
 
 @pytest.mark.parametrize(

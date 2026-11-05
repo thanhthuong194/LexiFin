@@ -2,7 +2,7 @@
 
 This describes the Silver model **as the code writes it**: 19 Iceberg tables in namespace `sec_filings`, built from SEC Bronze by `scripts/sec_filings/build_silver.py`. The source of truth is the catalog and the code: schemas in `src/data_pipeline/contracts/sec_filings/`, table specs (identifier, schema, partition) in the `*_SPEC` constants of `src/data_pipeline/storage/sec_filings/`, stage order in `SILVER_STAGES` (`pipelines/sec_filings/silver_stages.py`), audited tables/keys/FKs in `quality/sec_filings/silver_model.py`, the audit in `quality/sec_filings/silver_audit.py`.
 
-"Rows" are from `data/` (343 filings, 5 companies), measured 2026-10-07; each table has exactly one snapshot.
+"Rows" are from `data/` (343 filings, 5 companies), measured 2026-10-07; each table has exactly one snapshot, except `sections`, `content_blocks`, `document_tables` and `document_table_cells` (2026-11-03: a second snapshot adds the EX-99 exhibits).
 
 ## 1. Tables
 
@@ -11,10 +11,10 @@ This describes the Silver model **as the code writes it**: 19 Iceberg tables in 
 | `filings` | one SEC submission (accession number) | `filing_id` | — | `year(filing_date)` | 343 |
 | `documents` | one `<DOCUMENT>` block in `full-submission.txt` | `document_id` | `filings` | `year(filing_date)` | 12,809 |
 | `filing_entities` | one entity-role block (`FILER:`…) in a filing's SEC header | `filing_entity_id` | `filings` | none | 343 |
-| `sections` | one canonical section (root, PART, ITEM, SIGNATURES, EXHIBIT INDEX, TOC) found in the primary HTML | `section_id` | `documents`, `sections` (parent) | `year(filing_date)` | 2,803 |
-| `content_blocks` | one visible content block of the primary HTML, in order | `block_id` | `documents`, `sections` | `year(filing_date)` | 83,301 |
-| `document_tables` | one physical HTML table, matching exactly one `table` content block | `table_id` | `content_blocks` | `year(filing_date)` | 10,184 |
-| `document_table_cells` | one visible cell of an HTML table | `cell_id` | `document_tables` | `year(filing_date)` | 878,380 |
+| `sections` | one canonical section (root, PART, ITEM, SIGNATURES, EXHIBIT INDEX, TOC) of a narrative document (primary HTML, or an EX-99 HTML exhibit: root only) | `section_id` | `documents`, `sections` (parent) | `year(filing_date)` | 2,982 |
+| `content_blocks` | one visible content block of a narrative document, in order | `block_id` | `documents`, `sections` | `year(filing_date)` | 97,432 |
+| `document_tables` | one physical HTML table, matching exactly one `table` content block | `table_id` | `content_blocks` | `year(filing_date)` | 11,960 |
+| `document_table_cells` | one visible cell of an HTML table | `cell_id` | `document_tables` | `year(filing_date)` | 1,152,209 |
 | `document_links` | one `<a href>` in an HTML document | `link_id` | `documents` (source, target) | `year(filing_date)` | 365,221 |
 | `exhibits` | one Exhibit Index entry declared in the primary document | `exhibit_id` | `filings`, `documents` (source, target) | `year(filing_date)` | 2,696 |
 | `xbrl_instances` | one logical XBRL instance (Inline target or XML) of a filing | `instance_id` | `filings` | none | 343 |
@@ -44,7 +44,7 @@ Checked on real data: no orphans, every field copied from a parent matches it, e
 | --- | --- | --- |
 | `filings` → `documents` | 1 — 1..N | 6–90 documents per filing |
 | `filings` → `filing_entities` | 1 — 1..N | `data/`: exactly 1 entity (`filer`) per filing; multi-registrant 8-Ks have more |
-| `documents` → `sections` / `content_blocks` | 1 — 0..N | only the primary HTML document has narrative; each parsed document has exactly 1 root |
+| `documents` → `sections` / `content_blocks` | 1 — 0..N | only narrative documents (primary HTML, EX-99 HTML exhibits) have narrative; each parsed document has exactly 1 root; an exhibit has only its root; an exhibit without visible text has no rows |
 | `sections.parent_section_id` → `sections` | 0..1 — 0..N | root has null parent; PART → ITEM; parent is in the same document, level = parent level + 1 (no cycles); parent range contains child range |
 | `sections` → `content_blocks` | 1 — 0..N | each block belongs to the deepest section containing it |
 | `content_blocks` → `document_tables` | 1 — 0..1 | only `table` blocks, each with exactly 1 table |
@@ -174,9 +174,9 @@ One audit implementation (`quality/sec_filings/silver_audit*.py`; tables, keys a
 - primary keys and the grain keys of section 1;
 - 32 foreign keys plus fields copied from the parent (`filing_id`, `document_id`, `filing_date`, `source_document_sha256`, `source_path`…); nullable FKs checked only when non-null;
 - groups: ordinals 1..N and declared counts of every group; parent-declared counts (`fact_count`, `context_count`, `unit_count`, `cell_count`, `relationship_count`, members per context);
-- cardinality and semantics: each filing has documents, entities and exactly one primary document of the same form; narrative only on primary HTML; section tree (one root, no self-parent, parent level lower, nested ranges, increasing starts, root covers every block, block in its deepest section); `table` blocks point to a `<table>` and have exactly one `document_tables` row, no `table_cell` blocks remain; cell header counts and grid; links only from HTML; exhibits read from the primary document; instance sources belong to the filing, are ordered, and `source_set_sha256` is recomputed; facts come from the instance's source documents; consistent footnote resources; relationship attributes per linkbase type; label/relationship `source_document_id` is a stored document of the same filing or a URL;
+- cardinality and semantics: each filing has documents, entities and exactly one primary document of the same form; narrative only on narrative documents (primary HTML, EX-99 HTML), every primary HTML has sections; section tree (one root, no self-parent, parent level lower, nested ranges, increasing starts, root covers every block, block in its deepest section); `table` blocks point to a `<table>` and have exactly one `document_tables` row, no `table_cell` blocks remain; cell header counts and grid; links only from HTML; exhibits read from the primary document; instance sources belong to the filing, are ordered, and `source_set_sha256` is recomputed; facts come from the instance's source documents; consistent footnote resources; relationship attributes per linkbase type; label/relationship `source_document_id` is a stored document of the same filing or a URL;
 - Bronze: every filing's files are inside the Bronze dir and exist; `--verify-source-hashes` rehashes every submission, primary document, and document/entity span;
-- sampled lineage: the latest filing of each form (10-K, 10-Q, 8-K) is rebuilt from Bronze with the stage code (documents, entities, sections, blocks, tables, cells) and compared with Silver; `section_text_sha256`, `table_content_sha256`, block text vs joined cells, and `network_hash` are recomputed only on samples, since they need a whole group's text.
+- sampled lineage: the latest filing of each form (10-K, 10-Q, 8-K) is rebuilt from Bronze with the stage code (documents, entities, and sections, blocks, tables, cells of every narrative document) and compared with Silver; `section_text_sha256`, `table_content_sha256`, block text vs joined cells, and `network_hash` are recomputed only on samples, since they need a whole group's text.
 
 Result on `data/` (2026-10-07, SQLite scratch before the DuckDB switch): 263 PASS, 2 WARN (149 `public_document_count`, 1,154 unresolved links), 0 FAIL, 1 SKIP (`source_hashes` without `--verify-source-hashes`); ~80 s, peak RSS ~0.7 GB, ~1.1 GB scratch on disk.
 

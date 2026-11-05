@@ -27,6 +27,7 @@ from src.data_pipeline.storage.iceberg import (
     table_rules_version,
 )
 from src.data_pipeline.storage.sec_filings.xbrl_facts import XBRL_FACTS_SPEC
+from tests.conftest import PRESS_RELEASE, SLIDES
 
 pytestmark = pytest.mark.integration
 
@@ -45,31 +46,31 @@ NEW_ID = "sec:0000320193-26-000001"
 FIXTURE_ROWS: dict[str, tuple[int, str]] = {
     "sec_filings.filings": (
         1,
-        "e6813720bc28cd533771b482ad575b9041d6a28420628b7ef8d2dde6db7b8713",
+        "0aaa52055e8c488ddd3d9c4b37eae9258ba0e11f9ebd253adc656d7050dd1c4b",
     ),
     "sec_filings.documents": (
         1,
-        "c1bf5be218e0a0544c356305ef84fe2cf88df6bfa85bd1a8679fd59afda17a65",
+        "acb0c88928e6869706e7af299a98071ee82b13d887f7c2bc494ff1eda6c83b8b",
     ),
     "sec_filings.filing_entities": (
         1,
-        "a9f9a52ad139036ed4e1f65bf6e92d717bbbd6bd711f10f9e94b966ff81a28b9",
+        "7a7d386b5f1bb3f39a12d4ba4590ccedd0e2a41a0f205ccd56dd3e58051608d4",
     ),
     "sec_filings.sections": (
         1,
-        "8fbb83b22060035d7370aef5d8909fb372be9c1baba03ea2dba5dc3023a03f27",
+        "e53dfa41277e2f7d29836cb002cde7459e71262720e89fa29502caf7a531f7d5",
     ),
     "sec_filings.content_blocks": (
         1,
-        "66688c5a553c5f4288e6c6423fe2b361fbe2214355063681ac2b6cd4cf062100",
+        "73b19b3b1b32d21c9905f1b10b54aa6a96a31e10b48cc08e30c66d01ef920dc5",
     ),
     "sec_filings.document_tables": (
         1,
-        "1701e01fb49964b4885903cc1d9230feb799786496d8e504f16fbbb10c282a4f",
+        "5be7d16c45da8e740308ea3b6c25c39030be679095f799da93c75e327e002c46",
     ),
     "sec_filings.document_table_cells": (
         1,
-        "f2015e1ac75a3ba801aa9fcd3228f5cd425792c01a47be2fc690c7370a49f7e1",
+        "46606c5da07733d89e9b21425b60dcfba6e2490933057da551e465f2edde6237",
     ),
     "sec_filings.document_links": (
         1,
@@ -124,7 +125,14 @@ FIXTURE_ROWS: dict[str, tuple[int, str]] = {
 
 def _write(data_dir: Path, write_sec_filing, filings=FILINGS) -> None:
     for cik, form, accession, filed in filings:
-        write_sec_filing(data_dir, cik=cik, form=form, accession=accession, filed=filed)
+        write_sec_filing(
+            data_dir,
+            cik=cik,
+            form=form,
+            accession=accession,
+            filed=filed,
+            extra_documents=(PRESS_RELEASE, SLIDES) if form == "8-K" else (),
+        )
 
 
 @pytest.fixture
@@ -314,7 +322,8 @@ def test_exhibit_and_xbrl_queries_follow_the_model_keys(silver: Path) -> None:
     )
 
     assert exhibit_index == [("99.1", "Press release", None)]
-    assert attachments == [(3,)]
+    # One EX-31.1 per filing, plus the 8-K's EX-99.1 and EX-99.2.
+    assert attachments == [(5,)]
     assert fact == [
         ("EarningsPerShare", "2.5", "duration", date(2024, 12, 31), "divide", "ProductAxis", "WidgetsMember"),
         ("EarningsPerShare", "2.5", "duration", date(2024, 12, 31), "divide", "RegionAxis", "North"),
@@ -345,6 +354,13 @@ def test_rows_trace_back_to_their_bronze_files(silver: Path) -> None:
         "where f.instance_id = ?",
         TEN_K_INSTANCE,
     )
+    exhibit = _query(
+        silver,
+        "select d.filename, d.document_type, s.section_kind, b.block_type, b.text "
+        "from content_blocks b join documents d on d.document_id = b.document_id "
+        "join sections s on s.section_id = b.section_id "
+        "where d.role = 'exhibit' order by b.block_ordinal",
+    )
     relationship_files = _query(
         silver,
         "select distinct d.filename, d.role from xbrl_relationships r "
@@ -366,6 +382,15 @@ def test_rows_trace_back_to_their_bronze_files(silver: Path) -> None:
         )
     ]
     assert cell == [("primary.htm", True)]
+    # EX-99.1 text is one root section: lines that would start sections in a
+    # primary document stay paragraphs. EX-99.2 (images only) has no rows.
+    assert exhibit == [
+        ("ex99-1.htm", "EX-99.1", "document", "paragraph", "TABLE OF CONTENTS"),
+        ("ex99-1.htm", "EX-99.1", "document", "paragraph", "Example Corp reports record quarterly revenue."),
+        ("ex99-1.htm", "EX-99.1", "document", "paragraph", "Item 2.02"),
+        ("ex99-1.htm", "EX-99.1", "document", "table", "Revenue\n$1,250\nNet income\n$250"),
+        ("ex99-1.htm", "EX-99.1", "document", "paragraph", "\u201cWe delivered strong results,\u201d said the CEO."),
+    ]  # fmt: skip
     assert fact == [("primary.htm", "$1,000")]
     assert relationship_files == [("ex-2024.xsd", "xbrl_schema")]
 
@@ -682,9 +707,12 @@ def test_rows_change_only_with_the_rules_version(silver: Path) -> None:
     }
 
     # A different digest means the fixture Bronze now gives different rows.
-    # If the code changed them, bump that table's rules_version (stored rows
-    # then need a controlled rebuild, AGENTS.md) and record both here; if
-    # only the fixtures changed, record the new digest.
+    # If the code builds rows of an already built group differently, bump
+    # that table's rules_version (stored rows then need a controlled rebuild,
+    # AGENTS.md) and record both here. If it only adds groups for parents it
+    # did not cover (old rows a subset of the new ones), or only the fixtures
+    # changed, record the new digest: the next run adds those groups like a
+    # new filing's.
     assert built == FIXTURE_ROWS
 
 

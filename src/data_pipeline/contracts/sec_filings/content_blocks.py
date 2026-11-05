@@ -51,7 +51,7 @@ def sha256_text(text: str) -> str:
 
 
 class ContentBlockRecord(ContractModel):
-    """One ordered visible-text block of a primary HTML document.
+    """One ordered visible-text block of a narrative HTML document.
 
     Field order matches CONTENT_BLOCKS_ARROW_SCHEMA. `text` is normalized
     visible text; `text_length` counts Unicode characters. `source_xpath` and

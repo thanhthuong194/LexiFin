@@ -26,6 +26,7 @@ from src.data_pipeline.quality.sec_filings.silver_audit_report import (
     SilverAuditReport,
 )
 from src.data_pipeline.quality.sec_filings.silver_audit_sql import (
+    GROUP_RULES,
     ScratchDatabase,
     deriver,
     run_sql_checks,
@@ -206,6 +207,27 @@ def test_prerequisites_are_the_tables_of_every_unselected_ancestor() -> None:
     ]
     assert len(prerequisite_tables(SILVER_STAGES, audit)) == len(SILVER_TABLES)
     assert prerequisite_tables(SILVER_STAGES, SILVER_STAGES) == ()
+
+
+def test_every_ordinal_group_is_a_unique_key() -> None:
+    # complete_group reads MIN = 1 and MAX = N as "exactly 1..N", which holds
+    # only when no ordinal repeats within its group.
+    for rule in GROUP_RULES:
+        assert (rule.group, rule.ordinal) in AUDITED_TABLES[rule.table].unique
+
+
+def test_a_repeated_ordinal_fails_the_unique_key_not_the_group_range(
+    tmp_path: Path,
+) -> None:
+    tables = [
+        {"table_id": f"doc:block:{n}:table", "block_id": f"doc:block:{n}",
+         "document_id": "doc", "table_ordinal": ordinal}
+        for n, ordinal in enumerate([1, 2, 2, 4], start=1)
+    ]  # fmt: skip
+
+    checks = _audit(tmp_path, {TABLES: tables})
+
+    assert checks[f"{TABLES}:unique:document_id+table_ordinal"].sample_ids == ("doc|2",)
 
 
 def test_duplicate_primary_and_grain_keys_are_counted_with_samples(

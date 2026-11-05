@@ -40,6 +40,7 @@ _STANDALONE_HEADINGS: dict[str, tuple[SectionKind, str]] = {
     "TABLE OF CONTENTS": ("table_of_contents", "TABLE OF CONTENTS"),
 }
 _PERIODIC_FORMS = frozenset({"10-K", "10-Q"})
+_EXHIBIT_TYPE_PREFIX = "EX-"
 _CODE_LINE = re.compile(r"(?:PART\s+[IV]+|ITEM\s+\d)", re.IGNORECASE)
 
 
@@ -162,9 +163,13 @@ def detect_section_headings(
     Rule-based and form-aware: PART and integer ITEM codes (1, 1A) for 10-K and
     10-Q, decimal ITEM codes (2.02) for 8-K, plus SIGNATURES, EXHIBIT INDEX and
     TABLE OF CONTENTS. Navigation links, blocks listing several codes (a table
-    of contents) and repeated page headers do not start sections.
+    of contents) and repeated page headers do not start sections. Exhibits
+    ("EX-" types) have none: those headings belong to the form's own document,
+    so an exhibit is one root section.
     """
 
+    if form.upper().startswith(_EXHIBIT_TYPE_PREFIX):
+        return []
     candidates = []
     for index, block in enumerate(blocks):
         match = _match_heading(form, block)
@@ -267,13 +272,23 @@ def _duplicate_codes(spans: Sequence[_SectionSpan]) -> int:
     return len(keys) - len(set(keys))
 
 
+def is_textless_exhibit(document: DocumentRecord, blocks: Sequence[HtmlBlock]) -> bool:
+    """Whether a document is an exhibit with no visible text (e.g. slide images).
+
+    Such an exhibit has no narrative rows; a primary document without text is
+    an error (`build_document_narrative` raises).
+    """
+
+    return document.role == "exhibit" and not blocks
+
+
 def build_document_narrative(
     parent: DocumentRecord,
     blocks: Sequence[HtmlBlock],
     headings: Sequence[SectionHeading],
     processed_at: datetime,
 ) -> DocumentNarrative:
-    """Build the section and content-block records of one primary HTML document.
+    """Build the section and content-block records of one narrative HTML document.
 
     Every block is assigned to the deepest section whose range contains it;
     a section's range and text hash include the blocks of its descendants.

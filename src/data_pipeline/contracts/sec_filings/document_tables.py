@@ -37,7 +37,7 @@ def table_id_for(block_id: str) -> str:
 
 
 class DocumentTableRecord(ContractModel):
-    """One HTML `<table>` of a primary document; its parent is a `table` block.
+    """One HTML `<table>` of a narrative document; its parent is a `table` block.
 
     Field order matches DOCUMENT_TABLES_ARROW_SCHEMA. `table_ordinal` orders the
     document's table blocks by block ordinal. `row_count` and `cell_count`

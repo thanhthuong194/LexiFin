@@ -21,13 +21,35 @@ DOCUMENTS_SPEC = SilverTableSpec(
 )
 
 
-def read_primary_html_documents(table: Table) -> list[DocumentRecord]:
-    """Return the primary HTML documents of the current snapshot, validated."""
+# Exhibits whose text the narrative and tables stages read besides the primary
+# document: EX-99 (press releases, investor material) carries an 8-K's content.
+NARRATIVE_EXHIBIT_TYPE = "EX-99"
+# The same rule over a `documents` row aliased `d`, for the integrity audit.
+NARRATIVE_DOCUMENT_SQL = (
+    "(d.content_kind = 'html' AND (d.role = 'primary_document' OR "
+    f"(d.role = 'exhibit' AND upper(d.document_type) LIKE '{NARRATIVE_EXHIBIT_TYPE}%')))"
+)
+
+
+def is_narrative_document(role: str, content_kind: str, document_type: str) -> bool:
+    """Whether a document's HTML text belongs in sections and content blocks."""
+
+    return content_kind == "html" and (
+        role == "primary_document"
+        or (
+            role == "exhibit"
+            and document_type.upper().startswith(NARRATIVE_EXHIBIT_TYPE)
+        )
+    )
+
+
+def read_narrative_documents(table: Table) -> list[DocumentRecord]:
+    """Return the narrative documents of the current snapshot, validated."""
 
     return [
         DocumentRecord.model_validate(row)
         for row in iter_rows(table)
-        if (row["role"], row["content_kind"]) == ("primary_document", "html")
+        if is_narrative_document(row["role"], row["content_kind"], row["document_type"])
     ]
 
 
