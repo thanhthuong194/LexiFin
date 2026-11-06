@@ -325,6 +325,143 @@ def test_eight_k_detects_decimal_items_signature_and_exhibit_index() -> None:
     assert _codes("<div>Item 2.02 Results of Operations.</div>") == []
 
 
+def _tree(body: str, form: str) -> list[tuple[str | None, str | None, int, str]]:
+    """(parent code, code, start block, title) of each detected section."""
+
+    sections = _narrative(body, form).sections
+    codes = {s.section_id: s.section_code for s in sections}
+    return [
+        (
+            codes[s.parent_section_id or ""],
+            s.section_code,
+            s.start_block_ordinal,
+            s.title,
+        )
+        for s in sections[1:]
+    ]
+
+
+def test_eight_k_layout_table_opens_its_item() -> None:
+    body = (
+        "<div>FORM 8-K</div><table><tr><td>Item 2.02.</td></tr>"
+        "<tr><td>Results of Operations and Financial Condition.</td></tr>"
+        "<tr><td>On May 1, 2024 the Company announced its financial results for the quarter ended March 31, 2024, as described below.</td></tr>"
+        "<tr><td>Item 9.01.</td></tr><tr><td>Financial Statements and Exhibits.</td></tr>"
+        "</table><div>SIGNATURE</div>"
+    )
+
+    assert [code for _, code, _, _ in _tree(body, "8-K")] == ["ITEM 2.02", "SIGNATURES"]
+    # A table that only lists the items is not a heading.
+    item_list = (
+        "<table><tr><td>Item 7.01.</td><td>Regulation FD Disclosure</td></tr>"
+        "<tr><td>Item 9.01.</td><td>Financial Statements and Exhibits</td></tr>"
+        "<tr><td>Signatures</td></tr><tr><td>EXHIBIT 99.1</td><td>Investor presentation</td></tr>"
+        "</table>"
+    )
+    assert _codes(item_list, "8-K") == []
+
+
+def test_linked_headings_count_when_a_document_has_no_other_headings() -> None:
+    body = (
+        '<div><a href="#toc">PART I. FINANCIAL INFORMATION</a></div>'
+        '<div><a href="#toc">ITEM 1.FINANCIAL STATEMENTS</a></div><div>Balance.</div>'
+        '<div><a href="#toc">PART II. OTHER INFORMATION</a></div>'
+        '<div><a href="#toc">ITEM 1.LEGAL PROCEEDINGS</a></div><div>None.</div>'
+    )
+
+    assert [(p, c) for p, c, _, _ in _tree(body, "10-Q")] == [
+        (None, "PART I"),
+        ("PART I", "ITEM 1"),
+        (None, "PART II"),
+        ("PART II", "ITEM 1"),
+    ]
+    # With plain headings present, linked lines stay navigation.
+    assert _codes(f"<div>PART I</div>{body}<div>Item 2. MD&amp;A</div>", "10-Q") == [
+        "PART I",
+        "ITEM 2",
+    ]
+
+
+def test_ten_q_restarting_items_infer_part_two() -> None:
+    body = (
+        "<div>PART I - FINANCIAL INFORMATION</div><div>ITEM 1. FINANCIAL STATEMENTS</div>"
+        "<div>Balance.</div><div>ITEM 4. CONTROLS AND PROCEDURES</div><div>Effective.</div>"
+        "<table><tr><td>DuPont de Nemours Inc. PART II - OTHER INFORMATION</td></tr></table>"
+        "<div>ITEM 1. LEGAL PROCEEDINGS</div><div>Claims.</div>"
+        "<div>ITEM 1A. RISK FACTORS</div><div>Risks.</div>"
+    )
+
+    narrative = _narrative(body, "10-Q")
+
+    assert _tree(body, "10-Q") == [
+        (None, "PART I", 1, "PART I - FINANCIAL INFORMATION"),
+        ("PART I", "ITEM 1", 2, "ITEM 1. FINANCIAL STATEMENTS"),
+        ("PART I", "ITEM 4", 4, "ITEM 4. CONTROLS AND PROCEDURES"),
+        (None, "PART II", 7, "PART II"),
+        ("PART II", "ITEM 1", 7, "ITEM 1. LEGAL PROCEEDINGS"),
+        ("PART II", "ITEM 1A", 9, "ITEM 1A. RISK FACTORS"),
+    ]
+    assert narrative.duplicate_section_codes == 0
+    assert (
+        narrative_problem(_parent("10-Q"), narrative.sections, narrative.blocks) is None
+    )
+    # The inferred PART II owns no block of its own: its first item starts with it.
+    part_two = narrative.sections[4]
+    assert part_two.section_id not in {b.section_id for b in narrative.blocks}
+    # Only a child may share the previous section's start.
+    sibling = narrative.sections[6].model_copy(update={"start_block_ordinal": 7})
+    assert sections_problem(_parent("10-Q"), [*narrative.sections[:6], sibling]) == (
+        "detected sections do not start in strictly increasing block order"
+    )
+    # Item numbers that only rise never open a PART.
+    assert _codes("<div>ITEM 2. MD&amp;A</div><div>ITEM 4. CONTROLS</div>", "10-Q") == [
+        "ITEM 2",
+        "ITEM 4",
+    ]
+
+
+def test_ten_k_sections_skip_a_toc_written_as_heading_lines() -> None:
+    toc = "".join(
+        f"<div>{line}</div>"
+        for line in ("PART I", "Item 1.", "Item 7.", "PART II", "Item 8.")
+    )
+    body_text = "".join(f"<p>Paragraph {n}.</p>" for n in range(60))
+    body = (
+        f"<div>Annual report</div>{toc}<div>PART I</div><div>Item 1.</div>{body_text}"
+        f"<div>Item 7.</div>{body_text}<div>PART II</div><div>Item 8.</div>{body_text}"
+    )
+
+    assert [(p, c, start) for p, c, start, _ in _tree(body, "10-K")] == [
+        (None, "PART I", 7),
+        ("PART I", "ITEM 1", 8),
+        ("PART I", "ITEM 7", 69),
+        (None, "PART II", 130),
+        ("PART II", "ITEM 8", 131),
+    ]
+
+
+def test_parts_of_a_cross_reference_index_are_dropped() -> None:
+    body = (
+        "<div>Part I. Financial Information</div><div>Part II. Other Information</div>"
+        "<div>Item 2. Management's Discussion and Analysis</div>"
+        + "<p>Results.</p>"
+        * 20
+        + "<div>Item 4. Controls and Procedures</div><p>Effective.</p>"
+        "<div>Part I. Financial Information</div><div>Item 1. Financial Statements</div>"
+        "<p>Balance.</p><div>Part II. Other Information</div>"
+        "<div>Item 1. Legal Proceedings</div><p>None.</p>"
+    )
+
+    assert [(p, c, start) for p, c, start, _ in _tree(body, "10-Q")] == [
+        (None, "ITEM 2", 3),
+        (None, "ITEM 4", 24),
+        (None, "PART I", 26),
+        ("PART I", "ITEM 1", 27),
+        (None, "PART II", 29),
+        ("PART II", "ITEM 1", 30),
+    ]
+
+
 @pytest.mark.parametrize("exhibit_type", ["EX-99.1", "EX-99.01", "ex-99"])
 def test_exhibits_are_one_root_section_whatever_their_headings(
     exhibit_type: str,

@@ -68,7 +68,8 @@ def sections_problem(
     """Return why a document's sections are not one complete hierarchy, or None.
 
     Checks lineage and source hash, declared count against ordinals 1..N,
-    strictly increasing starts of detected sections, and that every non-root
+    strictly increasing starts of detected sections (a section may share its
+    parent's start, as an inferred 10-Q PART II does), and that every non-root
     section has a shallower parent in the same document whose range contains
     its own. Root shape and ID derivation are enforced by SectionRecord.
     """
@@ -91,8 +92,15 @@ def sections_problem(
 def _hierarchy_problem(ordered: Sequence[SectionRecord]) -> str | None:
     """Check start order, parent levels and range nesting of ordered sections."""
 
-    starts = [section.start_block_ordinal for section in ordered[1:]]
-    if any(earlier >= later for earlier, later in pairwise(starts)):
+    # Only an inferred 10-Q PART II shares its start block, with its first item.
+    if any(
+        earlier.start_block_ordinal > later.start_block_ordinal
+        or (
+            earlier.start_block_ordinal == later.start_block_ordinal
+            and later.parent_section_id != earlier.section_id
+        )
+        for earlier, later in pairwise(ordered[1:])
+    ):
         return "detected sections do not start in strictly increasing block order"
     by_id = {section.section_id: section for section in ordered}
     for section in ordered[1:]:

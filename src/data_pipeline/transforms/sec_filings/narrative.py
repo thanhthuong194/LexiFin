@@ -22,6 +22,7 @@ from src.data_pipeline.transforms.sec_filings.html_dom import normalize_text
 # A regulatory heading is a short standalone block: the code, optionally
 # followed by a separator and a title that does not continue a sentence.
 _MAX_HEADING_LENGTH = 300
+_MIN_RUNNING_TEXT_LENGTH = 100
 # A newline separates the cells of a table block ("Item 5.02\nDeparture ...").
 _TITLE_SEPARATORS = " \n.:-\u2013\u2014"
 _PART = re.compile(r"PART\s+(IV|I{1,3})(?![A-Z0-9])(.*)", re.IGNORECASE | re.DOTALL)
@@ -46,11 +47,16 @@ _CODE_LINE = re.compile(r"(?:PART\s+[IV]+|ITEM\s+\d)", re.IGNORECASE)
 
 @dataclass(frozen=True)
 class SectionHeading:
-    """A detected section heading: the 0-based index of its block, kind and code."""
+    """A detected section heading: the 0-based index of its block, kind and code.
+
+    `inferred` marks a 10-Q PART II that has no heading of its own: it starts
+    at the block of its first item, and its title is its code.
+    """
 
     block_index: int
     kind: SectionKind
     code: str
+    inferred: bool = False
 
 
 @dataclass(frozen=True)
@@ -81,14 +87,40 @@ def _title_after_code(rest: str) -> str | None:
     return title
 
 
-def _match_heading(form: str, block: HtmlBlock) -> tuple[SectionKind, str, bool] | None:
-    """Return (kind, normalized code, has title) if the block reads as a heading."""
+def _heading_text(form: str, block: HtmlBlock, *, allow_links: bool) -> str | None:
+    """The text of a block that may be a heading, or None.
+
+    A block that is mostly link text is TOC navigation, unless `allow_links`
+    (some filers make every heading a link back to the TOC). Longer text is
+    running text, and several code lines are a table of contents.
+    """
 
     text = block.text
-    if len(text) > _MAX_HEADING_LENGTH or 2 * block.link_text_length >= len(text):
-        return None  # running text, or navigation such as TOC links
-    if sum(_CODE_LINE.match(line) is not None for line in text.split("\n")) > 1:
-        return None  # a table listing several codes is a table of contents
+    if not allow_links and 2 * block.link_text_length >= len(text):
+        return None
+    if form not in _PERIODIC_FORMS and block.block_type == "table":
+        # 8-K layout tables can hold a whole item: its code and title open it,
+        # unless the table lists several codes without running text (a TOC).
+        lines = text.split("\n")
+        codes = sum(_CODE_LINE.match(line) is not None for line in lines)
+        if codes > 1 and max(map(len, lines)) < _MIN_RUNNING_TEXT_LENGTH:
+            return None
+        text = "\n".join(lines[:2])
+    if len(text) > _MAX_HEADING_LENGTH or (
+        sum(_CODE_LINE.match(line) is not None for line in text.split("\n")) > 1
+    ):
+        return None
+    return text
+
+
+def _match_heading(
+    form: str, block: HtmlBlock, *, allow_links: bool
+) -> tuple[SectionKind, str, bool] | None:
+    """Return (kind, normalized code, has title) if the block reads as a heading."""
+
+    text = _heading_text(form, block, allow_links=allow_links)
+    if text is None:
+        return None
     standalone = _STANDALONE_HEADINGS.get(text.upper().rstrip(".:"))
     if standalone is not None:
         return (*standalone, True)
@@ -107,13 +139,92 @@ def _match_heading(form: str, block: HtmlBlock) -> tuple[SectionKind, str, bool]
     return None
 
 
+_ROMAN = {"I": 1, "II": 2, "III": 3, "IV": 4}
+# A table of contents written as heading lines has at least this many entries,
+# at most this many blocks apart on average (page numbers, descriptions).
+_MIN_TOC_ENTRIES = 3
+_MAX_BLOCKS_PER_TOC_ENTRY = 4
+
+
+def _structural(candidate: _Candidate) -> bool:
+    return candidate.kind in ("part", "item")
+
+
+def _drop_toc_entries(candidates: Sequence[_Candidate]) -> list[_Candidate]:
+    """Drop PART/ITEM lines of a table of contents that precedes the body.
+
+    Such a TOC lists the codes once, close together, then the body repeats
+    them: the first code reappears after the listed entries, and so does the
+    second, which tells a TOC from a running page header.
+    """
+
+    structural = [c for c in candidates if _structural(c)]
+    if len(structural) < _MIN_TOC_ENTRIES:
+        return list(candidates)
+    first, second = structural[0], structural[1]
+    body = next(
+        (c for c in structural[2:] if (c.kind, c.code) == (first.kind, first.code)),
+        None,
+    )
+    entries = (
+        0 if body is None else sum(c.block_index < body.block_index for c in structural)
+    )
+    if (
+        body is None
+        or entries < _MIN_TOC_ENTRIES
+        or body.block_index - first.block_index > _MAX_BLOCKS_PER_TOC_ENTRY * entries
+        or not any(
+            (c.kind, c.code) == (second.kind, second.code)
+            for c in structural
+            if c.block_index > body.block_index
+        )
+    ):
+        return list(candidates)
+    return [
+        c
+        for c in candidates
+        if not (
+            _structural(c) and first.block_index <= c.block_index < body.block_index
+        )
+    ]
+
+
+def _part_number(candidate: _Candidate) -> int:
+    return _ROMAN[candidate.code.removeprefix("PART ")]
+
+
+def _drop_index_parts(candidates: Sequence[_Candidate]) -> list[_Candidate]:
+    """Drop the earlier PART headings when a PART lower than one already seen
+    follows.
+
+    PARTs run I to IV in the body, so a PART I after a PART II restarts the
+    sequence: the earlier PARTs from that number up belong to a
+    cross-reference index. The items under them stay.
+    """
+
+    kept: list[_Candidate] = []
+    for candidate in candidates:
+        if candidate.kind == "part":
+            number = _part_number(candidate)
+            parts = [_part_number(c) for c in kept if c.kind == "part"]
+            if parts and number < max(parts):
+                kept = [
+                    c
+                    for c in kept
+                    if not (c.kind == "part" and _part_number(c) >= number)
+                ]
+        kept.append(candidate)
+    return kept
+
+
 def _select_headings(candidates: Sequence[_Candidate]) -> list[SectionHeading]:
     """Drop repeated running headers and code-only duplicates of titled headings.
 
     A code-only PART/ITEM (e.g. a page header "Item 1") is dropped when the
     same code, in the same PART, also appears with a title; a heading that
-    repeats the section already open is a page header. Only the first table
-    of contents before the body counts.
+    repeats the section already open is a page header, and so is a PART that
+    already started. SIGNATURES and EXHIBIT INDEX count once, and only the
+    first table of contents before the body counts.
     """
 
     part: str | None = None
@@ -129,15 +240,19 @@ def _select_headings(candidates: Sequence[_Candidate]) -> list[SectionHeading]:
     headings: list[SectionHeading] = []
     open_part: tuple[str | None, str] | None = None
     open_item: tuple[str | None, str] | None = None
+    started_parts: set[str] = set()
     seen_toc = body_started = False
     for candidate, key in zip(candidates, keys, strict=True):
         if candidate.kind in ("part", "item"):
-            if key in (open_part, open_item) or (
-                not candidate.titled and key in titled
+            if (
+                key in (open_part, open_item)
+                or (not candidate.titled and key in titled)
+                or (candidate.kind == "part" and candidate.code in started_parts)
             ):
                 continue
             if candidate.kind == "part":
                 open_part, open_item = key, None
+                started_parts.add(candidate.code)
             else:
                 open_item = key
             body_started = True
@@ -146,13 +261,50 @@ def _select_headings(candidates: Sequence[_Candidate]) -> list[SectionHeading]:
                 continue
             seen_toc = True
         else:
-            if headings and headings[-1].kind == candidate.kind:
-                continue
+            if any(heading.kind == candidate.kind for heading in headings):
+                continue  # SIGNATURES and EXHIBIT INDEX occur once
             open_part = open_item = None
         headings.append(
             SectionHeading(candidate.block_index, candidate.kind, candidate.code)
         )
     return headings
+
+
+def _item_order(code: str) -> tuple[int, str]:
+    number = code.removeprefix("ITEM ")
+    return int(number.rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ")), number[-1:].strip(
+        "0123456789"
+    )
+
+
+def _infer_ten_q_part_two(headings: Sequence[SectionHeading]) -> list[SectionHeading]:
+    """Open PART II where 10-Q item numbers restart without a detected PART II.
+
+    PART I holds items 1-4 and PART II items 1-6, so an item that does not
+    follow the previous one outside PART II starts PART II (its heading is
+    missing or unrecognized, e.g. "DuPont de Nemours Inc. PART II - ...").
+    """
+
+    result: list[SectionHeading] = []
+    part: str | None = None
+    last: tuple[int, str] | None = None
+    for heading in headings:
+        if heading.kind == "part":
+            part, last = heading.code, None
+        elif heading.kind == "item":
+            order = _item_order(heading.code)
+            if last is not None and order <= last and part != "PART II":
+                result.append(
+                    SectionHeading(
+                        heading.block_index, "part", "PART II", inferred=True
+                    )
+                )
+                part = "PART II"
+            last = order
+        else:
+            part, last = None, None
+        result.append(heading)
+    return result
 
 
 def detect_section_headings(
@@ -163,20 +315,31 @@ def detect_section_headings(
     Rule-based and form-aware: PART and integer ITEM codes (1, 1A) for 10-K and
     10-Q, decimal ITEM codes (2.02) for 8-K, plus SIGNATURES, EXHIBIT INDEX and
     TABLE OF CONTENTS. Navigation links, blocks listing several codes (a table
-    of contents) and repeated page headers do not start sections. Exhibits
-    ("EX-" types) have none: those headings belong to the form's own document,
-    so an exhibit is one root section.
+    of contents), TOC lines before the body, index PARTs and repeated page
+    headers do not start sections. Headings that are links count only when a
+    document has no other PART/ITEM heading. A 10-Q whose item numbers restart
+    gets an inferred PART II. Exhibits ("EX-" types) have none: those headings
+    belong to the form's own document, so an exhibit is one root section.
     """
 
     if form.upper().startswith(_EXHIBIT_TYPE_PREFIX):
         return []
-    candidates = []
-    for index, block in enumerate(blocks):
-        match = _match_heading(form, block)
-        if match is not None:
-            kind, code, titled = match
-            candidates.append(_Candidate(index, kind, code, titled))
-    return _select_headings(candidates)
+
+    def candidates(*, allow_links: bool) -> list[_Candidate]:
+        found = []
+        for index, block in enumerate(blocks):
+            match = _match_heading(form, block, allow_links=allow_links)
+            if match is not None:
+                kind, code, titled = match
+                found.append(_Candidate(index, kind, code, titled))
+        return found
+
+    found = candidates(allow_links=False)
+    if not any(_structural(c) for c in found):
+        found = candidates(allow_links=True)
+    found = _drop_index_parts(_drop_toc_entries(found))
+    headings = _select_headings(found)
+    return _infer_ten_q_part_two(headings) if form == "10-Q" else headings
 
 
 @dataclass(frozen=True)
@@ -222,7 +385,7 @@ def _section_spans(
                 heading.code,
                 # A table heading's text joins its cells with "\n"; titles are
                 # normalized observed text like every other heading.
-                normalize_text(block.text),
+                heading.code if heading.inferred else normalize_text(block.text),
                 level,
                 parent,
                 heading.block_index + 1,

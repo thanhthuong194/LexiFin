@@ -45,7 +45,7 @@ Checked on real data: no orphans, every field copied from a parent matches it, e
 | `filings` → `documents` | 1 — 1..N | 6–90 documents per filing |
 | `filings` → `filing_entities` | 1 — 1..N | `data/`: exactly 1 entity (`filer`) per filing; multi-registrant 8-Ks have more |
 | `documents` → `sections` / `content_blocks` | 1 — 0..N | only narrative documents (primary HTML, EX-99 HTML exhibits) have narrative; each parsed document has exactly 1 root; an exhibit has only its root; an exhibit without visible text has no rows |
-| `sections.parent_section_id` → `sections` | 0..1 — 0..N | root has null parent; PART → ITEM; parent is in the same document, level = parent level + 1 (no cycles); parent range contains child range |
+| `sections.parent_section_id` → `sections` | 0..1 — 0..N | root has null parent; PART → ITEM; parent is in the same document, level = parent level + 1 (no cycles); parent range contains child range; only a child may start at its parent's block (an inferred 10-Q PART II and its first item) |
 | `sections` → `content_blocks` | 1 — 0..N | each block belongs to the deepest section containing it |
 | `content_blocks` → `document_tables` | 1 — 0..1 | only `table` blocks, each with exactly 1 table |
 | `document_tables` → `document_table_cells` | 1 — 1..N | no self-reference for nested tables (a nested table is its own block) |

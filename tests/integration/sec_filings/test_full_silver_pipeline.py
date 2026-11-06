@@ -57,11 +57,11 @@ FIXTURE_ROWS: dict[str, tuple[int, str]] = {
         "7a7d386b5f1bb3f39a12d4ba4590ccedd0e2a41a0f205ccd56dd3e58051608d4",
     ),
     "sec_filings.sections": (
-        1,
+        2,
         "e53dfa41277e2f7d29836cb002cde7459e71262720e89fa29502caf7a531f7d5",
     ),
     "sec_filings.content_blocks": (
-        1,
+        2,
         "73b19b3b1b32d21c9905f1b10b54aa6a96a31e10b48cc08e30c66d01ef920dc5",
     ),
     "sec_filings.document_tables": (
@@ -77,7 +77,7 @@ FIXTURE_ROWS: dict[str, tuple[int, str]] = {
         "ef6cdcef9a92e9b7e06423e342dce7e09f09de1cef8fec07ee918739599130e9",
     ),
     "sec_filings.exhibits": (
-        1,
+        2,
         "327941427a100c0e81406ee02551be81a62e0fba94740de32ef338c29f2794df",
     ),
     "sec_filings.xbrl_instances": (
@@ -421,15 +421,15 @@ def test_new_filing_appends_only_its_own_groups(silver: Path, write_sec_filing) 
 def test_a_table_built_with_other_rules_blocks_runs_until_rebuilt(
     silver: Path, write_sec_filing
 ) -> None:
-    sections, blocks = "sec_filings.sections", "sec_filings.content_blocks"
+    links = "sec_filings.document_links"
     with open_silver_catalog(silver) as catalog:
-        table = catalog.load_table(blocks)
+        table = catalog.load_table(links)
         assert table_rules_version(table) == 1
         # Tables created before the property existed hold rows of version 1.
         with table.transaction() as change:
             change.remove_properties(RULES_VERSION_PROPERTY)
-        assert table_rules_version(catalog.load_table(blocks)) == 1
-        with catalog.load_table(blocks).transaction() as change:
+        assert table_rules_version(catalog.load_table(links)) == 1
+        with catalog.load_table(links).transaction() as change:
             change.set_properties({RULES_VERSION_PROPERTY: "2"})
     _write(silver, write_sec_filing, [NEW_FILING])
     snapshots = _snapshots(silver)
@@ -438,7 +438,7 @@ def test_a_table_built_with_other_rules_blocks_runs_until_rebuilt(
 
     assert blocked.table_problems == (
         (
-            f"{blocks} rows were built with rules version 2, the code builds "
+            f"{links} rows were built with rules version 2, the code builds "
             "version 1: rebuild the table under control"
         ),
     )
@@ -448,12 +448,11 @@ def test_a_table_built_with_other_rules_blocks_runs_until_rebuilt(
     assert run_sec_filings_silver(silver, to_stage="filing_entities").completed
     report = audit_silver(silver)
     assert [(c.check_name, c.table) for c in report.checks if c.status == "FAIL"] == [
-        ("table_definition", blocks)
+        ("table_definition", links)
     ]
     # The controlled rebuild: drop the stage's tables, then build again.
     with open_silver_catalog(silver) as catalog:
-        for identifier in (sections, blocks):
-            catalog.purge_table(identifier)
+        catalog.purge_table(links)
     assert run_sec_filings_silver(silver).completed
 
 

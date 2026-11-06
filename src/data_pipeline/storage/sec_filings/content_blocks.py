@@ -14,8 +14,14 @@ from src.data_pipeline.storage.sec_filings.filings import FILING_YEAR_PARTITION
 CONTENT_BLOCKS_TABLE = "sec_filings.content_blocks"
 
 
+# Version 2 (2026-11-06): section headings that are links, 10-Q PART II
+# inferred from restarting items, TOC heading lines and index PARTs dropped,
+# 8-K items opened by layout tables.
 CONTENT_BLOCKS_SPEC = SilverTableSpec(
-    CONTENT_BLOCKS_TABLE, CONTENT_BLOCKS_ARROW_SCHEMA, FILING_YEAR_PARTITION
+    CONTENT_BLOCKS_TABLE,
+    CONTENT_BLOCKS_ARROW_SCHEMA,
+    FILING_YEAR_PARTITION,
+    rules_version=2,
 )
 
 

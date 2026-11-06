@@ -9,6 +9,8 @@ from src.data_pipeline.storage.sec_filings.filings import FILING_YEAR_PARTITION
 EXHIBITS_TABLE = "sec_filings.exhibits"
 
 
+# Version 2 (2026-11-06): the Exhibit Index search areas come from version-2
+# sections.
 EXHIBITS_SPEC = SilverTableSpec(
-    EXHIBITS_TABLE, EXHIBITS_ARROW_SCHEMA, FILING_YEAR_PARTITION
+    EXHIBITS_TABLE, EXHIBITS_ARROW_SCHEMA, FILING_YEAR_PARTITION, rules_version=2
 )

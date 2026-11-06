@@ -311,6 +311,32 @@ def test_section_parents_must_exist_in_the_same_document(tmp_path: Path) -> None
     assert (orphan.status, orphan.sample_ids) == ("FAIL", ("b:section:0002",))
 
 
+def test_only_a_child_may_share_the_previous_section_start(tmp_path: Path) -> None:
+    def section(ordinal: int, start: int, parent: int | None) -> dict[str, Any]:
+        return {
+            "section_id": f"d:section:{ordinal:04d}",
+            "document_id": "d",
+            "section_ordinal": ordinal,
+            "start_block_ordinal": start,
+            "parent_section_id": None if parent is None else f"d:section:{parent:04d}",
+        }
+
+    # Root, PART I at 1, its ITEM 1 at 2, an inferred PART II and its first
+    # item both at 5, then a sibling item that wrongly starts at 5 as well.
+    sections = [
+        section(1, 1, None),
+        section(2, 1, 1),
+        section(3, 2, 2),
+        section(4, 5, 1),
+        section(5, 5, 4),
+        section(6, 5, 4),
+    ]
+
+    check = _audit(tmp_path, {SECTIONS: sections})[f"{SECTIONS}:increasing_starts"]
+
+    assert (check.status, check.sample_ids) == ("FAIL", ("d:section:0006",))
+
+
 def test_failures_keep_a_bounded_sample_of_identifiers() -> None:
     report = _report()
     with report.check("complete_group", TABLES, "groups are complete") as run:
