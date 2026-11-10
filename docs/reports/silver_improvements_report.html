@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Silver và RAG</title>
+<meta name="description" content="Cải thiện Silver sau báo cáo scale 27/10 và kế hoạch RAG với kết quả dự kiến ở 500 công ty.">
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f6f5f2;
+  --surface-1: #fcfcfb;
+  --surface-2: #f0efec;
+  --border: #e2e0da;
+  --grid: #e8e6e1;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #77756f;
+  --accent: #2a78d6;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-old: #a9a79f;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --code-bg: #f0efec;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211;
+    --surface-1: #1a1a19;
+    --surface-2: #232321;
+    --border: #34342f;
+    --grid: #2c2c29;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #96958c;
+    --accent: #3987e5;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-old: #6c6b65;
+    --code-bg: #232321;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211;
+  --surface-1: #1a1a19;
+  --surface-2: #232321;
+  --border: #34342f;
+  --grid: #2c2c29;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #96958c;
+  --accent: #3987e5;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-old: #6c6b65;
+  --code-bg: #232321;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text-primary);
+  font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 1040px; margin: 0 auto; padding: 32px 16px 80px; }
+h1 { font-size: 28px; line-height: 1.25; margin: 0 0 8px; letter-spacing: -0.01em; }
+h2 { font-size: 21px; margin: 2px 0 6px; letter-spacing: -0.005em; }
+main > section { margin-top: 56px; }
+h3 { font-size: 16px; margin: 28px 0 8px; }
+p { margin: 8px 0; color: var(--text-secondary); }
+p strong, li strong { color: var(--text-primary); }
+ul, ol { color: var(--text-secondary); padding-left: 20px; margin: 8px 0; }
+li { margin: 4px 0; }
+code { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; color: var(--text-primary); overflow-wrap: anywhere; }
+.lede { font-size: 16px; max-width: 760px; }
+.meta { color: var(--text-muted); font-size: 13px; }
+.qnum { display: inline-block; font-size: 12px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: .06em; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 20px 0 0; }
+nav.toc a { font-size: 13px; color: var(--text-secondary); text-decoration: none; border: 1px solid var(--border); background: var(--surface-1); padding: 4px 10px; border-radius: 999px; }
+nav.toc a:hover { color: var(--text-primary); border-color: var(--text-muted); }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin: 16px 0; }
+.card h3 { margin-top: 0; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 24px 0 8px; }
+.kpi { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.kpi .v { font-size: 26px; font-weight: 650; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.kpi .l { font-size: 12.5px; color: var(--text-secondary); margin-top: 4px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+.tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--text-secondary); font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+td.n, th.n { text-align: right; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+details { margin-top: 10px; }
+summary { cursor: pointer; color: var(--text-muted); font-size: 13px; }
+.chart { width: 100%; position: relative; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart-title { font-weight: 600; font-size: 14.5px; margin: 0; color: var(--text-primary); }
+.chart-sub { font-size: 12.5px; color: var(--text-muted); margin: 2px 0 10px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--text-secondary); margin: 0 0 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.45; box-shadow: 0 4px 16px rgba(0,0,0,.12); opacity: 0; transition: opacity .08s; max-width: 280px; }
+.tip b { font-weight: 600; }
+.tip .row { display: flex; align-items: center; gap: 6px; }
+.tip .row i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.axis text { fill: var(--text-muted); font-size: 11.5px; }
+.lbl { fill: var(--text-secondary); font-size: 11.5px; }
+.vlbl { fill: var(--text-primary); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+/* flow */
+.flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+@media (max-width: 760px) { .flow { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 420px) { .flow { grid-template-columns: 1fr; } }
+.lane { background: var(--surface-2); border-radius: 8px; padding: 10px; }
+.lane h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+.step { background: var(--surface-1); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 6px 8px; margin: 6px 0; font-size: 12.5px; color: var(--text-secondary); }
+.step b { display: block; color: var(--text-primary); font-size: 13px; }
+.src { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; font-size: 13px; color: var(--text-secondary); }
+.src .pill { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+.arrow { color: var(--text-muted); }
+.ba { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: stretch; margin: 12px 0; }
+@media (max-width: 680px) { .ba { grid-template-columns: 1fr; } .ba .arrow { text-align: center; transform: rotate(90deg); } }
+.ba .arrow { align-self: center; font-size: 20px; }
+pre { margin: 0; background: var(--code-bg); border-radius: 6px; padding: 10px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
+.cap { font-size: 12px; color: var(--text-muted); margin: 0 0 4px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.badge { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; color: var(--text-primary); }
+.badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+.b-crit { --c: var(--critical); } .b-ser { --c: var(--serious); } .b-warn { --c: var(--warning); } .b-good { --c: var(--good); }
+.callout { border-left: 3px solid var(--accent); background: var(--surface-1); padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 14px 0; color: var(--text-secondary); }
+.score { display: inline-flex; gap: 3px; vertical-align: middle; }
+.score i { width: 12px; height: 8px; border-radius: 2px; background: var(--grid); display: inline-block; }
+.score i.on { background: var(--accent); }
+.scale-steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+@media (max-width: 860px) { .scale-steps { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 480px) { .scale-steps { grid-template-columns: 1fr; } }
+.lvl { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+.lvl .h { font-weight: 650; font-size: 15px; }
+.lvl .s { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+.lvl ul { padding-left: 16px; font-size: 12.5px; margin: 0; }
+footer { margin-top: 56px; color: var(--text-muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>Silver: cải thiện sau báo cáo scale, và RAG</h1>
+  <div class="kpis">
+    <div class="kpi"><div class="v">18,4 → 4,8 h</div><div class="l">Integrity audit 500 công ty</div></div>
+    <div class="kpi"><div class="v">0 FAIL</div><div class="l">268 check trên 323 triệu row</div></div>
+    <div class="kpi"><div class="v">+25.188</div><div class="l">thông cáo 8-K (EX-99) vào Silver</div></div>
+    <div class="kpi"><div class="v">51 → 0</div><div class="l">văn bản không nhận được section</div></div>
+  </div>
+  <nav class="toc">
+    <a href="#a1">A1 · Audit</a><a href="#a2">A2 · Thời gian & RAM</a><a href="#a3">A3 · Chất lượng dữ liệu</a><a href="#b1">B1 · Kiến trúc RAG</a><a href="#b2">B2 · Thông số</a><a href="#b3">B3 · Kết quả</a>
+  </nav>
+</header>
+
+<section id="a1">
+  <span class="qnum">A1</span>
+  <h2>Audit 500 công ty</h2>
+  <p>Audit chuyển từ SQLite sang DuckDB qua hết test và Silver 5 công ty, nhưng lần đầu chạy trên 500 công ty thì chết ở check 192. Nguyên nhân: <code>COUNT(DISTINCT)</code> theo nhóm không tràn ra đĩa được, trên bảng 115 triệu ô thì hết 4 GB RAM. Sửa bằng <code>MIN = 1, MAX = N</code> (các check unique riêng đã bảo đảm không trùng).</p>
+  <div class="card">
+    <p class="chart-title">Số check hoàn thành theo thời gian</p>
+    <div class="legend" id="lg-audit"></div>
+    <div class="chart" id="c-audit"></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th></th><th class="n">Thời gian</th><th class="n">Row</th><th class="n">Scratch</th><th>Kết quả</th></tr></thead>
+        <tbody>
+          <tr><td>SQLite</td><td class="n">18,4 h</td><td class="n">269 tr</td><td class="n">145 GB</td><td>0 FAIL</td></tr>
+          <tr><td>DuckDB, trước khi sửa</td><td class="n">2,6 h</td><td class="n">269 tr</td><td class="n">15 GB</td><td>OOM ở check 192/266</td></tr>
+          <tr><td>DuckDB, sau khi sửa</td><td class="n">4,8 h</td><td class="n">323 tr</td><td class="n">23 GB</td><td>0 FAIL</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="a2">
+  <span class="qnum">A2</span>
+  <h2>Thời gian và RAM của một lần chạy bổ sung</h2>
+  <p>Lần chạy thêm EX-99 vào Silver 500 công ty: 11,3 giờ, 0 lỗi, RAM đỉnh ~7,5 GB (trần 12 GB). Chỉ 2,5 giờ là việc mới; phần còn lại là kiểm lại dữ liệu cũ và audit toàn bộ. CPU trung bình 0,56/12 lõi: nút thắt là ổ USB HDD, không phải tính toán.</p>
+  <div class="card">
+    <p class="chart-title">11,3 giờ đi đâu</p>
+    <div class="legend" id="lg-run"></div>
+    <div class="chart" id="c-run"></div>
+  </div>
+  <p><strong>Tối ưu tiếp theo</strong> (theo thời gian đo được): audit incremental chỉ kiểm phần mới (−4,8 h), đánh dấu parent không có con để khỏi parse lại (−2 h), song song hoá tables/links (CPU đang rảnh), Bronze trên SSD.</p>
+</section>
+
+<section id="a3">
+  <span class="qnum">A3</span>
+  <h2>Chất lượng dữ liệu</h2>
+  <ul>
+    <li><strong>EX-99:</strong> +25.188 thông cáo 8-K, 2,05 triệu block, 345 nghìn bảng, 51,6 triệu ô; row cũ không đổi.</li>
+    <li><strong>Nhận diện section</strong> (cần cho chunk RAG): sửa 4 mẫu lỗi thật (tiêu đề là link, 10-Q thiếu PART II, mục lục viết như tiêu đề, 8-K đặt Item trong bảng). Trên 508 văn bản: root-only 51 → 0, mã lặp 153 → 15, 304 văn bản đối chứng không hỏng.</li>
+    <li><strong>Kiểm soát:</strong> <code>rules_version</code> cho từng bảng, golden test 19 bảng, 491 test, coverage 95%. Silver 500 công ty đang được dựng lại theo quy tắc section mới.</li>
+  </ul>
+</section>
+
+<section id="b1">
+  <span class="qnum">B1</span>
+  <h2>Kiến trúc RAG</h2>
+  <div class="card">
+    <div class="flow">
+      <div class="lane"><h4>Silver</h4>
+        <div class="step"><b>sections · content_blocks</b>cây PART → ITEM, đoạn văn</div>
+        <div class="step"><b>tables · cells · xbrl_facts</b>bảng, concept của ô</div>
+      </div>
+      <div class="lane"><h4>Gold</h4>
+        <div class="step"><b>gold.rag_chunks</b>chunk + metadata + lineage, audit và version như Silver</div>
+      </div>
+      <div class="lane"><h4>Index</h4>
+        <div class="step"><b>Qwen3-Embedding-0.6B</b>embed batch trên Kaggle/Colab</div>
+        <div class="step"><b>Qdrant</b>dense + BM25</div>
+      </div>
+      <div class="lane"><h4>Truy vấn</h4>
+        <div class="step"><b>Hybrid → rerank</b>Qwen3-Reranker-0.6B</div>
+        <div class="step"><b>Gemini</b>trả lời có trích dẫn</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="b2">
+  <span class="qnum">B2</span>
+  <h2>Thông số kỹ thuật</h2>
+  <div class="card tablewrap">
+    <table>
+      <thead><tr><th>Thành phần</th><th>Lựa chọn</th><th>Lý do</th></tr></thead>
+      <tbody>
+        <tr><td>Chunk văn bản</td><td>theo section, 400–512 token, không overlap</td><td>không cắt ngang ITEM; ranh giới block đã là ranh giới ý</td></tr>
+        <tr><td>Chunk bảng</td><td>1 bảng / chunk, tách &gt; 800 token, lặp hàng tiêu đề</td><td>số liệu chỉ có nghĩa cùng tiêu đề hàng/cột</td></tr>
+        <tr><td>Ngữ cảnh đầu chunk</td><td><code>công ty · form · kỳ · section</code></td><td>500 công ty có văn bản giống nhau; thiếu thì truy hồi nhầm công ty</td></tr>
+        <tr><td>Metadata lọc</td><td>cik, form, năm tài chính, item, loại văn bản</td><td>“Apple, 10-K 2024” lọc trước khi tìm vector</td></tr>
+        <tr><td>Embedding</td><td>Qwen3-Embedding-0.6B, 1024 chiều, tối đa 32k token</td><td>chạy được trên GPU miễn phí và CPU khi truy vấn</td></tr>
+        <tr><td>Index</td><td>Qdrant HNSW (m = 16), vector int8 trong RAM, bản gốc trên đĩa</td><td>vừa RAM 15 GB của homepc</td></tr>
+        <tr><td>Truy hồi</td><td>dense top-50 + BM25 top-50 → RRF → rerank → top-8</td><td>BM25 bắt tên riêng, mã concept; dense bắt diễn đạt khác</td></tr>
+        <tr><td>Sinh câu trả lời</td><td>Gemini, ngữ cảnh 8 chunk (~4k token), bắt buộc trích dẫn</td><td>trả lời kiểm chứng được</td></tr>
+        <tr><td>Baseline so sánh</td><td>chunk cố định 512 token, chỉ dense</td><td>chứng minh lợi ích của chunk theo cấu trúc và hybrid</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="b3">
+  <span class="qnum">B3</span>
+  <h2>Kết quả ở 500 công ty</h2>
+  <div class="kpis">
+    <div class="kpi"><div class="v">~2,5 tr</div><div class="l">chunk (1,4 tr văn bản + 1,1 tr bảng)</div></div>
+    <div class="kpi"><div class="v">~0,85 tỉ</div><div class="l">token cần embed</div></div>
+    <div class="kpi"><div class="v">4d</div><div class="l">GPU GTX1650</div></div>
+    <div class="kpi"><div class="v">~2,6 GB</div><div class="l">RAM vector Qdrant (int8)</div></div>
+  </div>
+  <div class="card">
+    <p class="chart-title">Recall@10</p>
+    <div class="chart" id="c-recall"></div>
+  </div>
+  <div class="card tablewrap">
+    <table>
+      <thead><tr><th>Nhóm</th><th>Chỉ số</th><th class="n">Kết quả</th><th>Cách đo</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="2">Truy hồi</td><td>Recall@10 (hybrid + rerank)</td><td class="n">≥ 0,85</td><td rowspan="2">~300 câu hỏi; 150 câu số liệu có nhãn tự động từ <code>xbrl_facts</code> → ô bảng → chunk</td></tr>
+        <tr><td>MRR@10</td><td class="n">≥ 0,70</td></tr>
+        <tr><td rowspan="2">Trả lời</td><td>Đúng (số liệu / ý chính)</td><td class="n">≥ 80%</td><td rowspan="2">so với đáp án XBRL; LLM-judge + duyệt tay mẫu</td></tr>
+        <tr><td>Faithfulness (không bịa, trích dẫn đúng)</td><td class="n">≥ 90%</td></tr>
+        <tr><td rowspan="3">Hệ thống</td><td>Độ trễ truy hồi p95 (không tính LLM)</td><td class="n">&lt; 3 s</td><td>embed câu hỏi + Qdrant + rerank 50 chunk</td></tr>
+        <tr><td>Độ trễ trả lời đầy đủ p95</td><td class="n">&lt; 10 s</td><td>cộng Gemini ~4k token vào</td></tr>
+        <tr><td>Dựng index Qdrant</td><td class="n">~1 h</td><td>upsert 2,5 tr vector + BM25</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</main>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script>
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmt = (v, d = 0) => v.toLocaleString('vi-VN', { maximumFractionDigits: d, minimumFractionDigits: 0 });
+const NS = 'http://www.w3.org/2000/svg';
+const el = (tag, attrs = {}, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+const tip = document.getElementById('tip');
+function showTip(evt, html) { tip.innerHTML = html; tip.style.opacity = 1; moveTip(evt); }
+function moveTip(evt) { const w = tip.offsetWidth, h = tip.offsetHeight; let x = evt.clientX + 14, y = evt.clientY + 14; if (x + w > innerWidth - 8) x = evt.clientX - w - 14; if (y + h > innerHeight - 8) y = evt.clientY - h - 14; tip.style.left = x + 'px'; tip.style.top = y + 'px'; }
+function hideTip() { tip.style.opacity = 0; }
+function niceMax(v) { const p = Math.pow(10, Math.floor(Math.log10(v))); const m = v / p; return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p; }
+function ticks(max, n = 4) { const s = max / n; return Array.from({ length: n + 1 }, (_, i) => i * s); }
+function legend(id, items) { const box = document.getElementById(id); box.innerHTML = items.map(([n, c]) => `<span><i style="background:var(${c})"></i>${n}</span>`).join(''); }
+function rbar(x, y, w, h, r) { r = Math.min(r, w, h / 2); if (w <= 0) return ''; return `M${x},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h - r}Q${x + w},${y + h} ${x + w - r},${y + h}H${x}Z`; }
+function rcol(x, y, w, h, r) { r = Math.min(r, h, w / 2); if (h <= 0) return ''; return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`; }
+
+/* Horizontal bars; series = [{name, color, values}] grouped per category */
+function hbars(id, cats, series, o = {}) {
+  const box = document.getElementById(id); box.innerHTML = '';
+  const W = box.clientWidth || 600, labelW = o.labelW || Math.min(150, W * 0.36), barH = o.barH || 12, gap = 2, groupGap = o.groupGap || 10;
+  const gh = series.length * barH + (series.length - 1) * gap;
+  const H = cats.length * (gh + groupGap) + 24;
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': o.aria || '' }, box);
+  const max = niceMax(o.max || Math.max(...series.flatMap(s => s.values)));
+  const plotW = W - labelW - 46, x = v => labelW + (v / max) * plotW;
+  const g = el('g', { class: 'axis' }, svg);
+  ticks(max, W < 420 ? 2 : 4).forEach(t => { el('line', { x1: x(t), x2: x(t), y1: 0, y2: H - 20, stroke: css('--grid') }, g); const tx = el('text', { x: x(t), y: H - 6, 'text-anchor': 'middle' }, g); tx.textContent = o.tick ? o.tick(t) : fmt(t); });
+  cats.forEach((c, i) => {
+    const y0 = i * (gh + groupGap) + groupGap / 2;
+    const t = el('text', { x: labelW - 8, y: y0 + gh / 2 + 4, 'text-anchor': 'end', class: 'lbl' }, svg); t.textContent = c;
+    series.forEach((s, j) => {
+      const v = s.values[i], y = y0 + j * (barH + gap);
+      const p = el('path', { d: rbar(labelW, y, Math.max(1.5, x(v) - labelW), barH, 4), fill: css(s.color) }, svg);
+      if (o.valueLabels !== false) { const vt = el('text', { x: x(v) + 5, y: y + barH / 2 + 4, class: 'vlbl' }, svg); vt.textContent = o.vfmt ? o.vfmt(v) : fmt(v); }
+      const hit = el('rect', { x: labelW, y: y - gap / 2, width: plotW + 40, height: barH + gap, fill: 'transparent' }, svg);
+      const html = `<b>${c}</b>` + series.map(ss => `<div class="row"><i style="background:${css(ss.color)}"></i>${ss.name ? ss.name + ': ' : ''}${o.vfmt ? o.vfmt(ss.values[i]) : fmt(ss.values[i])}</div>`).join('') + (o.extra ? o.extra(i) : '');
+      hit.addEventListener('pointerenter', e => { p.style.opacity = .8; showTip(e, html); });
+      hit.addEventListener('pointermove', moveTip);
+      hit.addEventListener('pointerleave', () => { p.style.opacity = 1; hideTip(); });
+    });
+  });
+}
+
+/* Line chart over numeric x, crosshair + tooltip */
+function lines(id, xs, series, o = {}) {
+  const box = document.getElementById(id); box.innerHTML = '';
+  const W = box.clientWidth || 600, H = o.H || 220, m = { l: 44, r: 16, t: 10, b: 30 };
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': o.aria || '' }, box);
+  const xmax = o.xmax || Math.max(...xs), ymax = niceMax(o.ymax || Math.max(...series.flatMap(s => s.values.filter(v => v != null))));
+  const X = v => m.l + (v / xmax) * (W - m.l - m.r), Y = v => H - m.b - (v / ymax) * (H - m.t - m.b);
+  const g = el('g', { class: 'axis' }, svg);
+  ticks(ymax, 4).forEach(t => { el('line', { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: css('--grid') }, g); const tx = el('text', { x: m.l - 6, y: Y(t) + 4, 'text-anchor': 'end' }, g); tx.textContent = o.ytick ? o.ytick(t) : fmt(t, 1); });
+  (o.xticks || xs).forEach(t => { const tx = el('text', { x: X(t), y: H - 10, 'text-anchor': 'middle' }, g); tx.textContent = o.xtick ? o.xtick(t) : fmt(t); });
+  if (o.limit) { el('line', { x1: m.l, x2: W - m.r, y1: Y(o.limit.v), y2: Y(o.limit.v), stroke: css('--critical'), 'stroke-dasharray': '4 4', 'stroke-width': 1.5 }, svg); const lt = el('text', { x: W - m.r, y: Y(o.limit.v) - 5, 'text-anchor': 'end', class: 'lbl' }, svg); lt.textContent = o.limit.label; }
+  series.forEach(s => {
+    const pts = xs.map((x, i) => [x, s.values[i]]).filter(p => p[1] != null);
+    el('path', { d: pts.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ',' + Y(p[1])).join(''), fill: 'none', stroke: css(s.color), 'stroke-width': 2, 'stroke-dasharray': s.dash || '', 'stroke-linejoin': 'round' }, svg);
+    if (!s.dash) pts.forEach(p => el('circle', { cx: X(p[0]), cy: Y(p[1]), r: 4.5, fill: css(s.color), stroke: css('--surface-1'), 'stroke-width': 2 }, svg));
+    if (s.endLabel) { const lp = pts[pts.length - 1]; const t = el('text', { x: X(lp[0]) - 6, y: Y(lp[1]) - 9, 'text-anchor': 'end', class: 'vlbl' }, svg); t.textContent = s.endLabel; }
+  });
+  const cross = el('line', { y1: m.t, y2: H - m.b, stroke: css('--text-muted'), 'stroke-width': 1, opacity: 0 }, svg);
+  const hit = el('rect', { x: m.l, y: 0, width: W - m.l - m.r, height: H - m.b, fill: 'transparent' }, svg);
+  hit.addEventListener('pointermove', e => {
+    const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) * (W / r.width);
+    let i = 0; xs.forEach((x, k) => { if (Math.abs(X(x) - px) < Math.abs(X(xs[i]) - px)) i = k; });
+    cross.setAttribute('x1', X(xs[i])); cross.setAttribute('x2', X(xs[i])); cross.setAttribute('opacity', .5);
+    showTip(e, `<b>${o.xname ? o.xname(i) : fmt(xs[i])}</b>` + series.filter(s => s.values[i] != null).map(s => `<div class="row"><i style="background:${css(s.color)}"></i>${s.name}: ${o.vfmt ? o.vfmt(s.values[i]) : fmt(s.values[i], 1)}</div>`).join(''));
+  });
+  hit.addEventListener('pointerleave', () => { cross.setAttribute('opacity', 0); hideTip(); });
+}
+
+/* Vertical stacked columns */
+function stackcols(id, cats, series, o = {}) {
+  const box = document.getElementById(id); box.innerHTML = '';
+  const W = box.clientWidth || 600, H = o.H || 220, m = { l: 40, r: 10, t: 10, b: 30 };
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': o.aria || '' }, box);
+  const totals = cats.map((_, i) => series.reduce((a, s) => a + s.values[i], 0));
+  const ymax = niceMax(Math.max(...totals)), Y = v => (v / ymax) * (H - m.t - m.b);
+  const g = el('g', { class: 'axis' }, svg);
+  ticks(ymax, 4).forEach(t => { const y = H - m.b - Y(t); el('line', { x1: m.l, x2: W - m.r, y1: y, y2: y, stroke: css('--grid') }, g); const tx = el('text', { x: m.l - 6, y: y + 4, 'text-anchor': 'end' }, g); tx.textContent = fmt(t); });
+  const slot = (W - m.l - m.r) / cats.length, bw = Math.min(56, slot * 0.55);
+  cats.forEach((c, i) => {
+    const x = m.l + slot * i + (slot - bw) / 2; let acc = 0;
+    const tx = el('text', { x: x + bw / 2, y: H - 10, 'text-anchor': 'middle', class: 'lbl' }, svg); tx.textContent = c;
+    const marks = [];
+    series.forEach((s, j) => {
+      const h = Y(s.values[i]), y = H - m.b - Y(acc) - h; acc += s.values[i];
+      const top = j === series.length - 1;
+      marks.push(el('path', { d: top ? rcol(x, y, bw, Math.max(0, h - 2), 4) : `M${x},${y + 2}h${bw}v${Math.max(0, h - 2)}h${-bw}Z`, fill: css(s.color) }, svg));
+    });
+    const tt = el('text', { x: x + bw / 2, y: H - m.b - Y(totals[i]) - 6, 'text-anchor': 'middle', class: 'vlbl' }, svg); tt.textContent = o.vfmt ? o.vfmt(totals[i]) : fmt(totals[i], 1);
+    const hit = el('rect', { x: m.l + slot * i, y: 0, width: slot, height: H - m.b, fill: 'transparent' }, svg);
+    hit.addEventListener('pointerenter', e => { marks.forEach(p => p.style.opacity = .8); showTip(e, `<b>${c}</b>` + series.map(s => `<div class="row"><i style="background:${css(s.color)}"></i>${s.name}: ${o.vfmt ? o.vfmt(s.values[i]) : fmt(s.values[i], 1)}</div>`).join('')); });
+    hit.addEventListener('pointermove', moveTip);
+    hit.addEventListener('pointerleave', () => { marks.forEach(p => p.style.opacity = 1); hideTip(); });
+  });
+}
+
+/* Line chart where each series has its own x values */
+function xyLines(id, series, o = {}) {
+  const box = document.getElementById(id); box.innerHTML = '';
+  const W = box.clientWidth || 600, H = o.H || 240, m = { l: 44, r: 16, t: 14, b: 30 };
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': o.aria || '' }, box);
+  const X = v => m.l + (v / o.xmax) * (W - m.l - m.r), Y = v => H - m.b - (v / o.ymax) * (H - m.t - m.b);
+  const g = el('g', { class: 'axis' }, svg);
+  ticks(o.ymax, 4).forEach(t => { el('line', { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: css('--grid') }, g); const tx = el('text', { x: m.l - 6, y: Y(t) + 4, 'text-anchor': 'end' }, g); tx.textContent = fmt(t); });
+  o.xticks.forEach(t => { const tx = el('text', { x: X(t), y: H - 10, 'text-anchor': 'middle' }, g); tx.textContent = o.xtick(t); });
+  if (o.limit) { el('line', { x1: m.l, x2: W - m.r, y1: Y(o.limit.v), y2: Y(o.limit.v), stroke: css('--text-muted'), 'stroke-dasharray': '4 4' }, svg); const lt = el('text', { x: m.l + 4, y: Y(o.limit.v) - 5, class: 'lbl' }, svg); lt.textContent = o.limit.label; }
+  const all = [];
+  series.forEach(s => {
+    el('path', { d: s.pts.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ',' + Y(p[1])).join(''), fill: 'none', stroke: css(s.color), 'stroke-width': 2, 'stroke-linejoin': 'round' }, svg);
+    const lp = s.pts[s.pts.length - 1];
+    if (s.end === 'fail') {
+      const cx = X(lp[0]), cy = Y(lp[1]), r = 6;
+      el('path', { d: `M${cx - r},${cy - r}L${cx + r},${cy + r}M${cx + r},${cy - r}L${cx - r},${cy + r}`, stroke: css('--critical'), 'stroke-width': 2.5 }, svg);
+    } else el('circle', { cx: X(lp[0]), cy: Y(lp[1]), r: 4.5, fill: css(s.color), stroke: css('--surface-1'), 'stroke-width': 2 }, svg);
+    const t = el('text', { x: X(lp[0]) + (s.labelDx || 8), y: Y(lp[1]) + (s.labelDy || 4), class: 'vlbl', 'text-anchor': s.anchor || 'start' }, svg); t.textContent = s.label;
+    s.pts.forEach(p => all.push([p, s]));
+  });
+  const dot = el('circle', { r: 4, fill: 'none', stroke: css('--text-primary'), 'stroke-width': 1.5, opacity: 0 }, svg);
+  const hit = el('rect', { x: m.l, y: 0, width: W - m.l - m.r, height: H - m.b, fill: 'transparent' }, svg);
+  hit.addEventListener('pointermove', e => {
+    const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) * (W / r.width), py = (e.clientY - r.top) * (H / r.height);
+    let best = all[0], bd = Infinity;
+    all.forEach(a => { const d = Math.hypot(X(a[0][0]) - px, Y(a[0][1]) - py); if (d < bd) { bd = d; best = a; } });
+    dot.setAttribute('cx', X(best[0][0])); dot.setAttribute('cy', Y(best[0][1])); dot.setAttribute('opacity', 1);
+    showTip(e, `<b>${best[1].name}</b><div class="row"><i style="background:${css(best[1].color)}"></i>${o.vfmt(best[0])}</div>`);
+  });
+  hit.addEventListener('pointerleave', () => { dot.setAttribute('opacity', 0); hideTip(); });
+}
+
+/* ---------- data ---------- */
+const audit03 = [[0, 0], [0.001, 17], [0.004, 25], [0.016, 33], [0.026, 41], [0.036, 57], [0.058, 65], [0.073, 81], [0.282, 89], [0.498, 97], [0.616, 105], [0.815, 113], [0.866, 129], [1.019, 137], [1.036, 145], [1.343, 153], [1.405, 169], [1.458, 177], [1.964, 185], [2.581, 192]];
+const audit05 = [[0, 0], [0.003, 17], [0.01, 25], [0.026, 33], [0.034, 57], [0.078, 81], [0.364, 89], [0.659, 97], [0.814, 105], [1.527, 113], [1.58, 129], [1.778, 137], [1.804, 145], [2.406, 153], [2.491, 169], [2.591, 177], [3.504, 185], [4.18, 193], [4.214, 225], [4.24, 233], [4.328, 241], [4.81, 249], [4.818, 268]];
+/* run 1b752eaa, 2026-11-05: seconds per stage; kind n = new rows, v = re-verify only, i = integrity */
+const run = [['integrity', 17344, 'i'], ['document_tables', 6588, 'n'], ['document_links', 3334, 'v'], ['filings', 3116, 'v'], ['xbrl_enrichment', 3111, 'v'], ['narrative', 2472, 'n'], ['exhibit_index', 2465, 'v'], ['filing_entities', 1451, 'v'], ['xbrl_facts', 396, 'v'], ['xbrl_linkbases', 222, 'v'], ['xbrl_core', 38, 'v'], ['documents', 7, 'v']];
+const kindColor = { n: '--series-1', v: '--series-2', i: '--critical' };
+const kindName = { n: 'Việc mới', v: 'Kiểm lại, không thêm row', i: 'Integrity audit' };
+
+function render() {
+  legend('lg-audit', [['trước khi sửa', '--series-2'], ['ssau khi sửa', '--series-1']]);
+  xyLines('c-audit', [
+    { name: '03/11, trước khi sửa', color: '--series-2', pts: audit03, end: 'fail', label: 'OOM · check 192', labelDx: -10, labelDy: -10, anchor: 'end' },
+    { name: '05/11, sau khi sửa', color: '--series-1', pts: audit05, label: '268', labelDx: -8, labelDy: -10, anchor: 'end' },
+  ], { aria: 'Số check audit hoàn thành theo giờ', xmax: 5, ymax: 300, xticks: [0, 1, 2, 3, 4, 5], xtick: t => t + ' h', limit: { v: 268, label: '' }, vfmt: p => `${fmt(p[1])} check sau ${fmt(p[0], 2)} giờ` });
+  legend('lg-run', Object.keys(kindName).map(k => [kindName[k], kindColor[k]]));
+  hbarsKind('c-run', run.filter(r => r[1] >= 600));
+  hbars('c-recall', ['Baseline: cắt cố định, dense', 'BM25', 'Dense', 'Hybrid', 'Hybrid + rerank'], [{ name: 'Recall@10', color: '--series-1', values: [0.55, 0.55, 0.65, 0.75, 0.85] }], { aria: 'Recall@10 kỳ vọng', barH: 14, labelW: 170, max: 1, tick: t => fmt(t, 2), vfmt: v => fmt(v, 2) });
+  colorBars('c-recall', ['--series-old', '--series-1', '--series-1', '--series-1', '--series-1']);
+}
+
+/* One bar per stage, colored by kind */
+function hbarsKind(id, rows) {
+  hbars(id, rows.map(r => r[0]), [{ name: 'Phút', color: '--series-1', values: rows.map(r => r[1] / 60) }], { aria: 'Phút theo stage', barH: 13, groupGap: 8, labelW: 120, vfmt: v => fmt(v) + ' ph', extra: i => `<div class="row">${kindName[rows[i][2]]}</div>` });
+  colorBars(id, rows.map(r => kindColor[r[2]]));
+}
+function colorBars(id, colors) {
+  document.querySelectorAll(`#${id} svg path`).forEach((p, i) => { if (colors[i]) p.setAttribute('fill', css(colors[i])); });
+}
+render();
+let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(render, 120); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
+new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+</script>
+</body>
+</html>

@@ -21,7 +21,7 @@ CONTENT_BLOCKS_SPEC = SilverTableSpec(
     CONTENT_BLOCKS_TABLE,
     CONTENT_BLOCKS_ARROW_SCHEMA,
     FILING_YEAR_PARTITION,
-    rules_version=2,
+    rules_version=3,
 )
 
 

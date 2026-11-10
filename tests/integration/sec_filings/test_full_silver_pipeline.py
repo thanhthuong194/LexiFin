@@ -57,11 +57,11 @@ FIXTURE_ROWS: dict[str, tuple[int, str]] = {
         "7a7d386b5f1bb3f39a12d4ba4590ccedd0e2a41a0f205ccd56dd3e58051608d4",
     ),
     "sec_filings.sections": (
-        2,
+        3,
         "e53dfa41277e2f7d29836cb002cde7459e71262720e89fa29502caf7a531f7d5",
     ),
     "sec_filings.content_blocks": (
-        2,
+        3,
         "73b19b3b1b32d21c9905f1b10b54aa6a96a31e10b48cc08e30c66d01ef920dc5",
     ),
     "sec_filings.document_tables": (
@@ -77,7 +77,7 @@ FIXTURE_ROWS: dict[str, tuple[int, str]] = {
         "ef6cdcef9a92e9b7e06423e342dce7e09f09de1cef8fec07ee918739599130e9",
     ),
     "sec_filings.exhibits": (
-        2,
+        3,
         "327941427a100c0e81406ee02551be81a62e0fba94740de32ef338c29f2794df",
     ),
     "sec_filings.xbrl_instances": (

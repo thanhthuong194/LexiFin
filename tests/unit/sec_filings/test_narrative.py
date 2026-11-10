@@ -420,6 +420,26 @@ def test_ten_q_restarting_items_infer_part_two() -> None:
     ]
 
 
+def test_ten_q_out_of_order_items_keep_their_part_two() -> None:
+    # Banks put MD&A before the statements; a document with a PART II heading
+    # infers none, so PART I keeps ITEM 2 then ITEM 1.
+    body = (
+        "<div>PART I. FINANCIAL INFORMATION</div><div>ITEM 2. MD&amp;A</div>"
+        "<div>Results.</div><div>ITEM 1. FINANCIAL STATEMENTS</div><div>Balance.</div>"
+        "<div>PART II. OTHER INFORMATION</div><div>ITEM 1. LEGAL PROCEEDINGS</div>"
+        "<div>Claims.</div>"
+    )
+
+    assert [(parent, code) for parent, code, _, _ in _tree(body, "10-Q")] == [
+        (None, "PART I"),
+        ("PART I", "ITEM 2"),
+        ("PART I", "ITEM 1"),
+        (None, "PART II"),
+        ("PART II", "ITEM 1"),
+    ]
+    assert _narrative(body, "10-Q").duplicate_section_codes == 0
+
+
 def test_ten_k_sections_skip_a_toc_written_as_heading_lines() -> None:
     toc = "".join(
         f"<div>{line}</div>"

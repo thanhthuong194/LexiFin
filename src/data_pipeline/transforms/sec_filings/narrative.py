@@ -278,13 +278,19 @@ def _item_order(code: str) -> tuple[int, str]:
 
 
 def _infer_ten_q_part_two(headings: Sequence[SectionHeading]) -> list[SectionHeading]:
-    """Open PART II where 10-Q item numbers restart without a detected PART II.
+    """Open PART II where 10-Q item numbers restart in a document without a
+    detected PART II.
 
     PART I holds items 1-4 and PART II items 1-6, so an item that does not
-    follow the previous one outside PART II starts PART II (its heading is
-    missing or unrecognized, e.g. "DuPont de Nemours Inc. PART II - ...").
+    follow the previous one starts PART II when its heading is missing or
+    unrecognized (e.g. "DuPont de Nemours Inc. PART II - ..."). A document
+    with a PART II heading keeps its items as they are: banks put MD&A
+    (ITEM 2) before the financial statements (ITEM 1), and text may cite
+    "Item 1A" of the 10-K.
     """
 
+    if any(h.kind == "part" and h.code == "PART II" for h in headings):
+        return list(headings)
     result: list[SectionHeading] = []
     part: str | None = None
     last: tuple[int, str] | None = None
@@ -317,8 +323,8 @@ def detect_section_headings(
     TABLE OF CONTENTS. Navigation links, blocks listing several codes (a table
     of contents), TOC lines before the body, index PARTs and repeated page
     headers do not start sections. Headings that are links count only when a
-    document has no other PART/ITEM heading. A 10-Q whose item numbers restart
-    gets an inferred PART II. Exhibits ("EX-" types) have none: those headings
+    document has no other PART/ITEM heading. A 10-Q without a PART II heading
+    whose item numbers restart gets an inferred PART II. Exhibits ("EX-" types) have none: those headings
     belong to the form's own document, so an exhibit is one root section.
     """
 

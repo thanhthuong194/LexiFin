@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LexiFin Silver Scale</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f6f5f2;
+  --surface-1: #fcfcfb;
+  --surface-2: #f0efec;
+  --border: #e2e0da;
+  --grid: #e8e6e1;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #77756f;
+  --accent: #2a78d6;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-old: #a9a79f;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --code-bg: #f0efec;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211;
+    --surface-1: #1a1a19;
+    --surface-2: #232321;
+    --border: #34342f;
+    --grid: #2c2c29;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #96958c;
+    --accent: #3987e5;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-old: #6c6b65;
+    --code-bg: #232321;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211;
+  --surface-1: #1a1a19;
+  --surface-2: #232321;
+  --border: #34342f;
+  --grid: #2c2c29;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #96958c;
+  --accent: #3987e5;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-old: #6c6b65;
+  --code-bg: #232321;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text-primary);
+  font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 1040px; margin: 0 auto; padding: 32px 16px 80px; }
+h1 { font-size: 28px; line-height: 1.25; margin: 0 0 8px; letter-spacing: -0.01em; }
+h2 { font-size: 21px; margin: 2px 0 6px; letter-spacing: -0.005em; }
+main > section { margin-top: 56px; }
+h3 { font-size: 16px; margin: 28px 0 8px; }
+p { margin: 8px 0; color: var(--text-secondary); }
+p strong, li strong { color: var(--text-primary); }
+ul, ol { color: var(--text-secondary); padding-left: 20px; margin: 8px 0; }
+li { margin: 4px 0; }
+code { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; color: var(--text-primary); overflow-wrap: anywhere; }
+.lede { font-size: 16px; max-width: 760px; }
+.meta { color: var(--text-muted); font-size: 13px; }
+.qnum { display: inline-block; font-size: 12px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: .06em; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 20px 0 0; }
+nav.toc a { font-size: 13px; color: var(--text-secondary); text-decoration: none; border: 1px solid var(--border); background: var(--surface-1); padding: 4px 10px; border-radius: 999px; }
+nav.toc a:hover { color: var(--text-primary); border-color: var(--text-muted); }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin: 16px 0; }
+.card h3 { margin-top: 0; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 24px 0 8px; }
+.kpi { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.kpi .v { font-size: 26px; font-weight: 650; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.kpi .l { font-size: 12.5px; color: var(--text-secondary); margin-top: 4px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+.tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--text-secondary); font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+td.n, th.n { text-align: right; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+details { margin-top: 10px; }
+summary { cursor: pointer; color: var(--text-muted); font-size: 13px; }
+.chart { width: 100%; position: relative; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart-title { font-weight: 600; font-size: 14.5px; margin: 0; color: var(--text-primary); }
+.chart-sub { font-size: 12.5px; color: var(--text-muted); margin: 2px 0 10px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--text-secondary); margin: 0 0 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.45; box-shadow: 0 4px 16px rgba(0,0,0,.12); opacity: 0; transition: opacity .08s; max-width: 280px; }
+.tip b { font-weight: 600; }
+.tip .row { display: flex; align-items: center; gap: 6px; }
+.tip .row i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.axis text { fill: var(--text-muted); font-size: 11.5px; }
+.lbl { fill: var(--text-secondary); font-size: 11.5px; }
+.vlbl { fill: var(--text-primary); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+/* flow */
+.flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+@media (max-width: 760px) { .flow { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 420px) { .flow { grid-template-columns: 1fr; } }
+.lane { background: var(--surface-2); border-radius: 8px; padding: 10px; }
+.lane h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+.step { background: var(--surface-1); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 6px 8px; margin: 6px 0; font-size: 12.5px; color: var(--text-secondary); }
+.step b { display: block; color: var(--text-primary); font-size: 13px; }
+.src { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; font-size: 13px; color: var(--text-secondary); }
+.src .pill { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+.arrow { color: var(--text-muted); }
+.ba { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: stretch; margin: 12px 0; }
+@media (max-width: 680px) { .ba { grid-template-columns: 1fr; } .ba .arrow { text-align: center; transform: rotate(90deg); } }
+.ba .arrow { align-self: center; font-size: 20px; }
+pre { margin: 0; background: var(--code-bg); border-radius: 6px; padding: 10px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
+.cap { font-size: 12px; color: var(--text-muted); margin: 0 0 4px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.badge { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; color: var(--text-primary); }
+.badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+.b-crit { --c: var(--critical); } .b-ser { --c: var(--serious); } .b-warn { --c: var(--warning); } .b-good { --c: var(--good); }
+.callout { border-left: 3px solid var(--accent); background: var(--surface-1); padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 14px 0; color: var(--text-secondary); }
+.score { display: inline-flex; gap: 3px; vertical-align: middle; }
+.score i { width: 12px; height: 8px; border-radius: 2px; background: var(--grid); display: inline-block; }
+.score i.on { background: var(--accent); }
+.scale-steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+@media (max-width: 860px) { .scale-steps { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 480px) { .scale-steps { grid-template-columns: 1fr; } }
+.lvl { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+.lvl .h { font-weight: 650; font-size: 15px; }
+.lvl .s { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+.lvl ul { padding-left: 16px; font-size: 12.5px; margin: 0; }
+footer { margin-top: 56px; color: var(--text-muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <span class="qnum">LexiFin · Bronze → Silver · SEC 10-K / 10-Q / 8-K</span>
+  <h1>Chuẩn hoá, lỗi, scale và tối ưu pipeline Silver</h1>
+  <p class="lede">Báo cáo trả lời 6 câu hỏi của thầy. Mọi số liệu đều đo trên máy dev (12 CPU, 15,5 GB RAM, ổ USB HDD exFAT ~34 MB/s). Phần scale 5 → 200 công ty chạy bằng code đã tối ưu (26–27/10/2026); mức 500 công ty là lần build bằng code cũ (21–26/10/2026).</p>
+  <div class="kpis">
+    <div class="kpi"><div class="v">500</div><div class="l">công ty (top IVV), 5 năm</div></div>
+    <div class="kpi"><div class="v">40.824</div><div class="l">filing, ~242 GB Bronze</div></div>
+    <div class="kpi"><div class="v">269 triệu</div><div class="l">row Silver, 19 bảng Iceberg</div></div>
+    <div class="kpi"><div class="v">0 FAIL</div><div class="l">266 check integrity ở mọi mức</div></div>
+    <div class="kpi"><div class="v">−37%</div><div class="l">thời gian build sau tối ưu (mẫu 2%)</div></div>
+  </div>
+  <nav class="toc" aria-label="Mục lục">
+    <a href="#q1">1 · Chuẩn hoá</a><a href="#q2">2 · Lỗi</a><a href="#q3">3 · Scale</a><a href="#q4">4 · Tối ưu</a><a href="#q5">5 · Tối ưu tiếp</a><a href="#q6">6 · Kỹ năng DE</a>
+  </nav>
+</header>
+
+<!-- ============ Q1 ============ -->
+<section id="q1">
+<span class="qnum">Câu 1</span>
+<h2>Từ file raw đến dữ liệu chuẩn hoá</h2>
+<p>Mỗi filing ở Bronze là một file <code>full-submission.txt</code> nguyên bản của SEC (header SGML + nhiều khối <code>&lt;DOCUMENT&gt;</code>: HTML, XBRL, ảnh, exhibit). Bronze không bao giờ bị sửa; Silver được dựng lại từ đó qua 12 stage, mỗi stage đọc bảng Silver cha chứ không quét lại raw.</p>
+
+<div class="card">
+  <div class="src"><span class="pill">SEC EDGAR</span><span class="arrow">→</span><span class="pill">Bronze: <code>full-submission.txt</code> + <code>filing_manifest.jsonl</code> (sha256, size)</span><span class="arrow">→</span><span class="pill">Silver: 19 bảng Iceberg</span></div>
+  <div class="flow">
+    <div class="lane"><h4>Filing & tài liệu</h4>
+      <div class="step"><b>filings</b>1 row / filing, khoá accession, checksum từ manifest</div>
+      <div class="step"><b>documents</b>1 row / khối &lt;DOCUMENT&gt;, verify hash</div>
+      <div class="step"><b>filing_entities</b>1 row / vai trò (FILER, ISSUER…)</div>
+    </div>
+    <div class="lane"><h4>Văn bản</h4>
+      <div class="step"><b>narrative</b>sections (PART → ITEM) + content_blocks</div>
+      <div class="step"><b>tables</b>document_tables + lưới cell</div>
+      <div class="step"><b>links · exhibits</b>mọi &lt;a href&gt;, Exhibit Index</div>
+    </div>
+    <div class="lane"><h4>XBRL (số liệu tài chính)</h4>
+      <div class="step"><b>xbrl_core</b>instance, context, unit</div>
+      <div class="step"><b>xbrl_facts</b>concept + fact (Arelle nạp DTS)</div>
+      <div class="step"><b>enrichment · linkbases</b>dimension, footnote, label, network, relationship</div>
+    </div>
+    <div class="lane"><h4>Kiểm định</h4>
+      <div class="step"><b>integrity</b>266 check: khoá, 32 FK, lineage, group 1..N, count khai báo, cây section, lưới cell, so lại với Bronze trên filing mẫu</div>
+    </div>
+  </div>
+</div>
+
+<h3>Ví dụ thật: Apple 10-K năm tài chính 2024 (<code>0000320193-24-000123</code>)</h3>
+<p>Một file raw 9,76 MB được tách thành <strong>~14.400 row</strong> có khoá, quan hệ cha–con và lineage về đúng byte offset trong file gốc.</p>
+<div class="grid2">
+  <div class="card">
+    <p class="chart-title">Số row Silver sinh ra từ 1 file raw</p>
+    <p class="chart-sub">Apple 10-K 2024, theo bảng (không gồm 2 bảng từ điển dùng chung: concepts, labels)</p>
+    <div class="chart" id="c-apple"></div>
+  </div>
+  <div class="card">
+    <p class="cap">Raw (trong <code>full-submission.txt</code>)</p>
+<pre>&lt;ix:nonFraction name="us-gaap:RevenueFromContract
+  WithCustomerExcludingAssessedTax"
+  contextRef="c-1" unitRef="usd" decimals="-6"
+  scale="6" format="ixt:num-dot-decimal"&gt;391,035&lt;/ix:nonFraction&gt;</pre>
+    <p class="cap" style="margin-top:12px">Silver (<code>xbrl_facts</code> ⋈ <code>xbrl_contexts</code>)</p>
+    <div class="tablewrap"><table>
+      <tr><th>concept</th><td><code>RevenueFromContract…AssessedTax</code></td></tr>
+      <tr><th>raw_value</th><td><code>"391,035"</code></td></tr>
+      <tr><th>numeric_value</th><td><strong>391 035 000 000</strong> (scale 6)</td></tr>
+      <tr><th>kỳ</th><td>2023-10-01 → 2024-09-28, CIK 0000320193</td></tr>
+      <tr><th>lineage</th><td>document_id + XPath tới thẻ gốc</td></tr>
+    </table></div>
+  </div>
+</div>
+
+<div class="tablewrap card">
+<table>
+  <tr><th>Raw</th><th>Vấn đề</th><th>Sau chuẩn hoá</th></tr>
+  <tr><td>Header <code>PUBLIC DOCUMENT COUNT: 103</code></td><td>SEC khai sai (thực tế 102 khối)</td><td>102 row <code>documents</code>; cảnh báo <code>public_document_count</code>, không fail</td></tr>
+  <tr><td>HTML phẳng của 10-K</td><td>Không có cấu trúc mục</td><td>30 section dạng cây: PART I → ITEM 1… (level 2), 717 block</td></tr>
+  <tr><td><code>&lt;table&gt;</code> với ~69% ô rỗng, colspan</td><td>Ô đệm, ô ẩn <code>display:none</code></td><td>63 bảng, 6.269 cell nhìn thấy được, có toạ độ hàng/cột</td></tr>
+  <tr><td>"93,736" (Net income, scale 6)</td><td>Text có dấu phẩy, đơn vị triệu</td><td><code>numeric_value = 93736000000</code>, giữ cả <code>raw_value</code></td></tr>
+  <tr><td>Cùng fact xuất hiện ở nhiều chỗ</td><td>Trùng giá trị</td><td>Giữ mọi occurrence, <code>fact_order</code> + XPath riêng (không dedupe có chủ đích)</td></tr>
+  <tr><td>Context <code>c-1</code>, prefix tuỳ filer</td><td>Prefix XML khác nhau giữa filing</td><td>XML canonical (C14N, prefix <code>ns0…</code>) → <code>context_hash</code> ổn định</td></tr>
+</table>
+</div>
+</section>
+
+<!-- ============ Q2 ============ -->
+<section id="q2">
+<span class="qnum">Câu 2</span>
+<h2>Lỗi gặp phải: lưu lại, tóm tắt, trực quan</h2>
+<p>Lỗi được lưu ở 3 nơi: log JSON có cấu trúc của từng run (<code>logs/*.jsonl</code>, mỗi lỗi có <code>event</code>, filing, stage), report integrity PASS/WARN/FAIL kèm tối đa 5 sample ID, và tài liệu <code>AGENTS.md</code> ghi lại nguyên nhân + cách xử lý. Có hai loại: <strong>lỗi dữ liệu</strong> (SEC/filer làm khác chuẩn) và <strong>lỗi hạ tầng</strong> (RAM, đĩa, mạng, điện).</p>
+
+<div class="grid2">
+  <div class="card">
+    <p class="chart-title">Sự kiện lỗi khi build 500 công ty</p>
+    <p class="chart-sub">Số event mức error trong log build (21–26/10), theo loại; 15 lần pipeline dừng rồi chạy lại</p>
+    <div class="chart" id="c-errors"></div>
+  </div>
+  <div class="card">
+    <p class="chart-title">Số cảnh báo tăng theo dữ liệu, tỉ lệ thì ổn định</p>
+    <p class="chart-sub">Row bị cảnh báo / 1 triệu row được kiểm. Loại cảnh báo mới (section lặp, document chỉ có root) chỉ xuất hiện từ 50 và 200 công ty</p>
+    <div class="legend" id="lg-warn"></div>
+    <div class="chart" id="c-warn"></div>
+  </div>
+</div>
+
+<h3>Danh mục lỗi dữ liệu thật và cách xử lý</h3>
+<div class="tablewrap card">
+<table>
+  <tr><th>Lỗi</th><th>Ví dụ / phạm vi</th><th>Mức</th><th>Xử lý</th></tr>
+  <tr><td>Header SEC có trường mới chưa có cột</td><td><code>LEGAL ENTITY IDENTIFIER</code> (22 filing), <code>ADDRESS IS A NON US LOCATION</code> (57)</td><td><span class="badge b-ser">80 event</span></td><td>Bỏ qua đúng 2 key đã biết, key lạ khác vẫn reject</td></tr>
+  <tr><td>Cờ <code>CONFIRMING COPY:</code> trước block đầu</td><td>Bị hiểu nhầm là entity role</td><td><span class="badge b-ser">reject</span></td><td>Coi là field của submission</td></tr>
+  <tr><td>Filing nộp chung, 2 folder Bronze</td><td>Exelon + Constellation (4 8-K)</td><td><span class="badge b-ser">reject</span></td><td>Giữ 1 bản khi checksum giống hệt</td></tr>
+  <tr><td>Tải lỗi, file rỗng</td><td><code>status="failed"</code> trong manifest</td><td><span class="badge b-ser">reject</span></td><td>Bỏ qua + warning <code>sec_filing_download_failed</code></td></tr>
+  <tr><td>SEC ngắt dòng cứng mỗi 65.536 byte</td><td>Allegion 10-K <code>0001579241-25-000008</code>: cắt giữa <code>&lt;td s⏎tyle</code></td><td><span class="badge b-crit">XML hỏng</span></td><td>Bỏ nguồn XBRL hỏng + warning, text/bảng vẫn giữ</td></tr>
+  <tr><td>Khai báo lại default namespace</td><td>Colgate <code>0000930413-21-001845</code></td><td><span class="badge b-ser">sai map</span></td><td>Giữ binding đầu tiên theo thứ tự tài liệu</td></tr>
+  <tr><td>Concept extension định nghĩa khác nhau</td><td>Fifth Third, Ford (2 phiên bản DTR)</td><td><span class="badge b-ser">conflict</span></td><td>Giữ bản đầu + warning; taxonomy chuẩn vẫn reject</td></tr>
+  <tr><td>Taxonomy chưa có trong cache offline</td><td>53 URI (năm taxonomy mới)</td><td><span class="badge b-ser">53 event</span></td><td>Tải bổ sung tự động rồi build lại (<code>TAXONOMY_RETRIES</code>)</td></tr>
+  <tr><td><code>PUBLIC DOCUMENT COUNT</code> sai</td><td>17.854 document (500 cty)</td><td><span class="badge b-warn">WARN</span></td><td>Chỉ cảnh báo: lỗi của SEC 2024-01 → 2026-03</td></tr>
+  <tr><td>Link trỏ tới hồ sơ cũ</td><td>270.771 / 46,9 triệu link</td><td><span class="badge b-warn">WARN</span></td><td>Đúng bản chất (exhibit dẫn chiếu), giữ <code>unresolved</code></td></tr>
+  <tr><td>Section code lặp, document chỉ có root</td><td>368 và 51 group</td><td><span class="badge b-warn">WARN</span></td><td>Filing trình bày bất thường; giữ và đánh dấu</td></tr>
+</table>
+</div>
+
+<h3>Lỗi hạ tầng</h3>
+<div class="tablewrap card">
+<table>
+  <tr><th>Vấn đề</th><th>Hậu quả</th><th>Xử lý</th></tr>
+  <tr><td>Kết nối tải taxonomy treo vô hạn (Cloudflare), SYN-SENT qua IPv6</td><td>Build đứng không báo lỗi</td><td>Timeout 60 s, mặc định offline + cache taxonomy</td></tr>
+  <tr><td>Script đọc mọi cột vào DuckDB chạy cùng test</td><td>Treo máy 2 lần (07/10)</td><td>Mọi lệnh chạy trong <code>systemd-run MemoryMax</code></td></tr>
+  <tr><td>PyIceberg đọc song song, giữ batch</td><td>RSS +700 MB theo số file</td><td><code>scan_batches</code>: từng file, 1 thread, trả RAM</td></tr>
+  <tr><td>Mùa 10-K dồn ~1 triệu cell vào một lô</td><td>RAM vọt ~5 KB/cell</td><td>Cắt lô theo số block <code>table</code></td></tr>
+  <tr><td>Ổ exFAT không có hard link, không journal</td><td>Copy mẫu thay vì link; mất điện phải <code>fsck</code></td><td>Code xử lý cả hai trường hợp; audit có resume</td></tr>
+  <tr><td>Mất điện giữa audit 18 giờ</td><td>Mất toàn bộ tiến độ</td><td>Audit lưu từng bước, chạy lại thì replay</td></tr>
+</table>
+</div>
+</section>
+
+<!-- ============ Q3 ============ -->
+<section id="q3">
+<span class="qnum">Câu 3</span>
+<h2>Scale 5 → 50 → 100 → 200 → 500 công ty</h2>
+<p>Mỗi mức là một Bronze riêng (top-N công ty, 5 năm), build từ đầu rồi chạy lại khi không có gì mới. Các mức 5–200 dùng code đã tối ưu, 3 XBRL worker, 4 audit worker, giới hạn RAM cứng 12 GB.</p>
+
+<div class="tablewrap card">
+<table>
+  <tr><th>Mức</th><th class="n">Filing</th><th class="n">Bronze</th><th class="n">Row Silver</th><th class="n">Build</th><th class="n">Filing/phút</th><th class="n">RAM tối đa</th><th class="n">Chạy lại</th><th class="n">Integrity</th><th>Kết quả</th></tr>
+  <tr><td>5</td><td class="n">343</td><td class="n">1,6 GB</td><td class="n">2,2 tr</td><td class="n">10 phút</td><td class="n">34,2</td><td class="n">2,6 GB</td><td class="n">57 s</td><td class="n">35 s</td><td><span class="badge b-good">0 FAIL · 2 WARN</span></td></tr>
+  <tr><td>50</td><td class="n">3.850</td><td class="n">23 GB</td><td class="n">28,2 tr</td><td class="n">2,7 giờ</td><td class="n">23,8</td><td class="n">6,3 GB</td><td class="n">9,8 phút</td><td class="n">4,6 phút</td><td><span class="badge b-good">0 FAIL · 3 WARN</span></td></tr>
+  <tr><td>100</td><td class="n">7.977</td><td class="n">47 GB</td><td class="n">57,3 tr</td><td class="n">5,8 giờ</td><td class="n">23,0</td><td class="n">7,4 GB</td><td class="n">29,7 phút</td><td class="n">13,4 phút</td><td><span class="badge b-good">0 FAIL · 3 WARN</span></td></tr>
+  <tr><td>200</td><td class="n">16.141</td><td class="n">96 GB</td><td class="n">113,3 tr</td><td class="n">12,3 giờ</td><td class="n">21,9</td><td class="n">6,5 GB</td><td class="n">1,2 giờ</td><td class="n">33 phút</td><td><span class="badge b-good">0 FAIL · 4 WARN</span></td></tr>
+  <tr><td>500 <span class="meta">(code cũ)</span></td><td class="n">40.824</td><td class="n">242 GB</td><td class="n">269,0 tr</td><td class="n">~41 giờ máy*</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">18,4 giờ</td><td><span class="badge b-good">0 FAIL · 4 WARN</span></td></tr>
+</table>
+<p class="meta">* Tổng thời gian các stage thành công + các lần chạy lại sau lỗi, không gồm integrity; wall-clock thực tế 6 ngày (21–26/10) vì 15 lần dừng để sửa lỗi dữ liệu, tải taxonomy, mất điện.</p>
+</div>
+
+<div class="grid2">
+  <div class="card">
+    <p class="chart-title">Thời gian build tăng nhanh hơn số filing</p>
+    <p class="chart-sub">Giờ build từ đầu theo số filing; đường nét đứt = tăng tuyến tính từ mức 5 công ty</p>
+    <div class="legend" id="lg-time"></div>
+    <div class="chart" id="c-time"></div>
+  </div>
+  <div class="card">
+    <p class="chart-title">Throughput giảm khi dữ liệu lớn</p>
+    <p class="chart-sub">Filing xử lý mỗi phút (build từ đầu)</p>
+    <div class="chart" id="c-thru"></div>
+  </div>
+  <div class="card">
+    <p class="chart-title">RAM tối đa: đỉnh ở XBRL facts</p>
+    <p class="chart-sub">GB, process lớn nhất; giới hạn cứng 12 GB</p>
+    <div class="chart" id="c-ram"></div>
+  </div>
+  <div class="card">
+    <p class="chart-title">“Không có gì mới” vẫn tốn thời gian</p>
+    <p class="chart-sub">Phút chạy lại khi không có filing mới: integrity vs các stage còn lại</p>
+    <div class="legend" id="lg-rerun"></div>
+    <div class="chart" id="c-rerun"></div>
+  </div>
+</div>
+
+<div class="card">
+  <p class="chart-title">Thời gian từng stage theo quy mô</p>
+  <p class="chart-sub">Giây trên 1.000 filing: thanh dài ra ở mức lớn = stage đó scale kém hơn tuyến tính</p>
+  <div class="legend" id="lg-stage"></div>
+  <div class="chart" id="c-stage"></div>
+</div>
+
+<h3>Vấn đề mới xuất hiện ở mỗi mức</h3>
+<div class="scale-steps">
+  <div class="lvl"><div class="h">5 công ty</div><div class="s">343 filing · 1,6 GB</div><ul><li>Tải taxonomy treo vô hạn</li><li>Online chậm 7 s/instance (W3C trả 403)</li><li>Bảng HTML: ô đệm, ô ẩn, colspan</li></ul></div>
+  <div class="lvl"><div class="h">50 công ty</div><div class="s">3.850 filing · 23 GB</div><ul><li>RAM tăng theo kích thước bảng → phải đọc theo batch, tóm tắt group, commit theo lô</li><li>PyIceberg reader giữ RAM</li><li>Build cũ dừng ở XBRL core</li></ul></div>
+  <div class="lvl"><div class="h">100 công ty</div><div class="s">7.977 filing · 47 GB</div><ul><li>Mùa 10-K dồn ~1 triệu cell/lô</li><li>XBRL chiếm 50% thời gian (Arelle) → worker song song</li><li>Đĩa USB thành nút cổ chai (CPU/wall 0,2–0,3)</li></ul></div>
+  <div class="lvl"><div class="h">200 công ty</div><div class="s">16.141 filing · 96 GB</div><ul><li>Documents/narrative chậm 2,4–2,7× khi data 2×</li><li>Chạy lại không có gì mới mất 1,2 giờ</li><li>Cảnh báo mới: document chỉ có root</li></ul></div>
+  <div class="lvl"><div class="h">500 công ty</div><div class="s">40.824 filing · 242 GB</div><ul><li>11 kiểu lỗi dữ liệu hiếm (xem câu 2)</li><li>Hash 226 GB mất 2,7 giờ</li><li>Integrity 18,4 giờ, file tạm 145 GB, mất điện giữa chừng</li></ul></div>
+</div>
+<div class="callout"><strong>Bài học:</strong> lỗi hiếm chỉ lộ ra khi dữ liệu đủ lớn (1/40.824 filing như Allegion), còn chi phí cố định nhỏ (hash lại, quét lại toàn bảng, ghi file tạm) thì nhân lên theo dữ liệu. Ở 5 công ty mọi thứ “chạy được”; ở 500 công ty chỉ những gì có giới hạn RAM, chạy tiếp được sau lỗi và đo được mới sống sót.</div>
+</section>
+
+<!-- ============ Q4 ============ -->
+<section id="q4">
+<span class="qnum">Câu 4</span>
+<h2>Tối ưu đã làm: đo trước, sửa đúng chỗ, đo lại</h2>
+<p>Bài toán doanh nghiệp: giảm thời gian và tài nguyên mà <strong>không đổi một row dữ liệu</strong>. Cách làm: profile từng stage (thời gian, CPU/wall, RAM), xác định ~95% thời gian XBRL là Arelle nạp lại cùng một DTS 3 lần, stage filings đọc lại 226 GB chỉ để tính hash đã có, integrity dùng SQLite + index trên 269 triệu row. Benchmark A/B trên cùng mẫu 2% (769 filing): cả hai bản ghi đúng <strong>4.716.499 row</strong>, integrity cùng kết quả.</p>
+
+<div class="kpis">
+  <div class="kpi"><div class="v">34,1 → 21,5</div><div class="l">phút build từ đầu (−37%)</div></div>
+  <div class="kpi"><div class="v">1,2 h → 36 ph</div><div class="l">CPU time (−50%)</div></div>
+  <div class="kpi"><div class="v">5,0 ph → 101 s</div><div class="l">chạy lại không có gì mới (3×)</div></div>
+  <div class="kpi"><div class="v">20,9 → 11,8</div><div class="l">phút cập nhật 405 filing mới</div></div>
+</div>
+
+<div class="card">
+  <p class="chart-title">Trước / sau tối ưu theo stage</p>
+  <p class="chart-sub">Giây, mẫu 2% của Bronze 500 công ty (769 filing), cùng máy, cùng 3 XBRL worker</p>
+  <div class="legend" id="lg-ab"></div>
+  <div class="chart" id="c-ab"></div>
+</div>
+
+<div class="tablewrap card">
+<table>
+  <tr><th>Tối ưu</th><th>Ý tưởng</th><th>Kết quả đo</th><th>Đánh đổi</th></tr>
+  <tr><td><strong>Cache kết quả Arelle</strong></td><td>Stage XBRL đầu nạp DTS rồi lưu kết quả (pickle + zstd, 7–400 KB/instance), 2 stage sau đọc lại; khoá gồm hash nguồn + phiên bản code</td><td>enrichment 376 → 102 s, linkbases 477 → 93 s</td><td>~6 GB đĩa tạm ở 500 công ty, xoá khi xong</td></tr>
+  <tr><td><strong>Tin checksum của manifest</strong></td><td>Dùng sha256 đã ghi lúc ingest khi kích thước khớp; stage documents vẫn đọc và verify từng byte</td><td>filings 113 → 13 s (500 cty: tiết kiệm ~2,7 giờ)</td><td>documents phải tự đọc đĩa: 50 → 115 s; tổng 2 stage 163 → 128 s</td></tr>
+  <tr><td><strong>Integrity: SQLite → DuckDB + song song</strong></td><td>Validate từng file Parquet trên 4 process; DuckDB đọc thẳng Parquet, hash join thay index, spill ra đĩa; lưu tiến độ để resume</td><td>138 → 61 s; check SQL 21,3 → 2,4 s (Silver 10 cty)</td><td>RAM integrity 0,8 → 1,7 GB</td></tr>
+</table>
+</div>
+<div class="callout">RAM tối đa của cả build <strong>không giảm</strong> (2,9 → 3,1 GB ở mẫu 2%): đỉnh nằm ở XBRL facts, nơi 3 worker Arelle cùng nạp taxonomy, và chưa tối ưu nào chạm tới đó. Thời gian giảm vì bớt việc lặp, không phải vì máy chạy nhanh hơn.</div>
+</section>
+
+<!-- ============ Q5 ============ -->
+<section id="q5">
+<span class="qnum">Câu 5</span>
+<h2>Tối ưu tiếp theo, xếp theo lợi ích / công sức</h2>
+<p>Ở 200 công ty, thời gian còn lại phân bổ: XBRL facts 28%, tables 13%, linkbases 11%, documents 9%. CPU dùng trung bình ~1,3/12 lõi, đĩa USB chậm. Đây là các bước tiếp theo, ước lượng từ profile đã đo (chưa làm):</p>
+<div class="tablewrap card">
+<table>
+  <tr><th>#</th><th>Việc</th><th>Vì sao</th><th>Ước lợi ích</th><th>Công sức</th></tr>
+  <tr><td>1</td><td>Dùng chung DTS taxonomy chuẩn trong worker Arelle sống lâu</td><td><code>load_dts</code> = 63% thời gian facts; us-gaap/dei được nạp lại cho mỗi instance</td><td>facts −40–60%</td><td>Trung bình</td></tr>
+  <tr><td>2</td><td>Song song hoá narrative / tables / links theo filing</td><td>CPU/wall 0,6–0,9: chỉ dùng 1 lõi trong 12</td><td>3 stage −50–70%</td><td>Trung bình</td></tr>
+  <tr><td>3</td><td>Bronze trên SSD/NVMe hoặc object storage gần máy</td><td>documents CPU/wall 0,25: chờ đĩa 34 MB/s</td><td>documents, filings, xbrl_core −60%+</td><td>Thấp (hạ tầng)</td></tr>
+  <tr><td>4</td><td>Integrity incremental: chỉ kiểm file mới từ snapshot trước</td><td>Chạy lại 200 cty vẫn tốn 33 phút integrity</td><td>chạy lại 1,2 giờ → vài phút</td><td>Trung bình</td></tr>
+  <tr><td>5</td><td>Chia lô XBRL theo “trọng lượng” instance thay vì 100 cố định</td><td>RAM 2,6 → 7,4 GB theo lô nặng nhất</td><td>RAM đỉnh ổn định, cho phép thêm worker</td><td>Thấp</td></tr>
+  <tr><td>6</td><td>Exhibit index / links không dựng lại khi không đổi</td><td>Chạy lại vẫn parse lại document không có link</td><td>chạy lại −10–15 phút</td><td>Thấp</td></tr>
+</table>
+</div>
+<div class="callout">Cách trình bày khi vào doanh nghiệp: <strong>đặt mục tiêu (SLA)</strong> → đo baseline → tìm nút cổ chai (Amdahl: chỉ phần chiếm thời gian lớn mới đáng tối ưu) → sửa → A/B test với dữ liệu giống hệt → ghi lại đánh đổi (RAM, đĩa, độ phức tạp). Ví dụ SLA: “filing mới vào Silver trong 1 giờ, RAM ≤ 8 GB, 0 FAIL”.</div>
+</section>
+
+<!-- ============ Q6 ============ -->
+<section id="q6">
+<span class="qnum">Câu 6</span>
+<h2>Kỹ năng Data Engineering: đã thể hiện gì, còn thiếu gì</h2>
+<p>Tự đánh giá theo khung kỹ năng DE phổ biến (0–4 ô). Đây là nhận định, không phải điểm đo được.</p>
+<div class="tablewrap card">
+<table id="skills">
+  <tr><th>Mảng</th><th>Mức</th><th>Bằng chứng trong LexiFin / còn thiếu</th></tr>
+</table>
+</div>
+<div class="grid2">
+  <div class="card">
+    <h3>Đã thể hiện rõ</h3>
+    <ul>
+      <li>Ingest có rate-limit, incremental theo manifest, Bronze bất biến</li>
+      <li>Kiến trúc medallion, bảng Iceberg, data model có khoá/FK/lineage</li>
+      <li>Data contract + quality gate 266 check, fail-fast</li>
+      <li>Xử lý bộ nhớ giới hạn, theo lô, resume sau crash</li>
+      <li>Profiling, benchmark A/B, tối ưu có số liệu</li>
+      <li>427 test tự động, tài liệu vận hành</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Nên học tiếp (theo thứ tự)</h3>
+    <ol>
+      <li><strong>Orchestration</strong>: Airflow/Dagster (lịch chạy, retry, backfill)</li>
+      <li><strong>Cloud</strong>: S3/GCS, chạy trên VM/K8s, quản lý chi phí</li>
+      <li><strong>Distributed compute</strong>: Spark hoặc DuckDB/Polars ở quy mô lớn</li>
+      <li><strong>SQL modeling</strong>: dbt, star schema cho lớp Gold</li>
+      <li><strong>CI/CD + Docker</strong>: test và deploy tự động</li>
+      <li><strong>Observability</strong>: metric, dashboard, cảnh báo, data SLA</li>
+    </ol>
+  </div>
+</div>
+</section>
+
+<footer>Nguồn số liệu: <code>benchmark_silver.py</code> report của từng mức (<code>data/scale/{5,50,100,200}</code>, <code>data/bench_opt/{old,new}</code>), log build và audit Silver 500 công ty. Code: commit <code>ef316fa</code>.</footer>
+</main>
+
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script>
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmt = (v, d = 0) => v.toLocaleString('vi-VN', { maximumFractionDigits: d, minimumFractionDigits: 0 });
+const NS = 'http://www.w3.org/2000/svg';
+const el = (tag, attrs = {}, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+const tip = document.getElementById('tip');
+function showTip(evt, html) { tip.innerHTML = html; tip.style.opacity = 1; moveTip(evt); }
+function moveTip(evt) { const w = tip.offsetWidth, h = tip.offsetHeight; let x = evt.clientX + 14, y = evt.clientY + 14; if (x + w > innerWidth - 8) x = evt.clientX - w - 14; if (y + h > innerHeight - 8) y = evt.clientY - h - 14; tip.style.left = x + 'px'; tip.style.top = y + 'px'; }
+function hideTip() { tip.style.opacity = 0; }
+function niceMax(v) { const p = Math.pow(10, Math.floor(Math.log10(v))); const m = v / p; return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p; }
+function ticks(max, n = 4) { const s = max / n; return Array.from({ length: n + 1 }, (_, i) => i * s); }
+function legend(id, items) { const box = document.getElementById(id); box.innerHTML = items.map(([n, c]) => `<span><i style="background:var(${c})"></i>${n}</span>`).join(''); }
+function rbar(x, y, w, h, r) { r = Math.min(r, w, h / 2); if (w <= 0) return ''; return `M${x},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h - r}Q${x + w},${y + h} ${x + w - r},${y + h}H${x}Z`; }
+function rcol(x, y, w, h, r) { r = Math.min(r, h, w / 2); if (h <= 0) return ''; return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`; }
+
+/* Horizontal bars; series = [{name, color, values}] grouped per category */
+function hbars(id, cats, series, o = {}) {
+  const box = document.getElementById(id); box.innerHTML = '';
+  const W = box.clientWidth || 600, labelW = o.labelW || Math.min(150, W * 0.36), barH = o.barH || 12, gap = 2, groupGap = o.groupGap || 10;
+  const gh = series.length * barH + (series.length - 1) * gap;
+  const H = cats.length * (gh + groupGap) + 24;
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': o.aria || '' }, box);
+  const max = niceMax(o.max || Math.max(...series.flatMap(s => s.values)));
+  const plotW = W - labelW - 46, x = v => labelW + (v / max) * plotW;
+  const g = el('g', { class: 'axis' }, svg);
+  ticks(max, W < 420 ? 2 : 4).forEach(t => { el('line', { x1: x(t), x2: x(t), y1: 0, y2: H - 20, stroke: css('--grid') }, g); const tx = el('text', { x: x(t), y: H - 6, 'text-anchor': 'middle' }, g); tx.textContent = o.tick ? o.tick(t) : fmt(t); });
+  cats.forEach((c, i) => {
+    const y0 = i * (gh + groupGap) + groupGap / 2;
+    const t = el('text', { x: labelW - 8, y: y0 + gh / 2 + 4, 'text-anchor': 'end', class: 'lbl' }, svg); t.textContent = c;
+    series.forEach((s, j) => {
+      const v = s.values[i], y = y0 + j * (barH + gap);
+      const p = el('path', { d: rbar(labelW, y, Math.max(1.5, x(v) - labelW), barH, 4), fill: css(s.color) }, svg);
+      if (o.valueLabels !== false) { const vt = el('text', { x: x(v) + 5, y: y + barH / 2 + 4, class: 'vlbl' }, svg); vt.textContent = o.vfmt ? o.vfmt(v) : fmt(v); }
+      const hit = el('rect', { x: labelW, y: y - gap / 2, width: plotW + 40, height: barH + gap, fill: 'transparent' }, svg);
+      const html = `<b>${c}</b>` + series.map(ss => `<div class="row"><i style="background:${css(ss.color)}"></i>${ss.name ? ss.name + ': ' : ''}${o.vfmt ? o.vfmt(ss.values[i]) : fmt(ss.values[i])}</div>`).join('') + (o.extra ? o.extra(i) : '');
+      hit.addEventListener('pointerenter', e => { p.style.opacity = .8; showTip(e, html); });
+      hit.addEventListener('pointermove', moveTip);
+      hit.addEventListener('pointerleave', () => { p.style.opacity = 1; hideTip(); });
+    });
+  });
+}
+
+/* Line chart over numeric x, crosshair + tooltip */
+function lines(id, xs, series, o = {}) {
+  const box = document.getElementById(id); box.innerHTML = '';
+  const W = box.clientWidth || 600, H = o.H || 220, m = { l: 44, r: 16, t: 10, b: 30 };
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': o.aria || '' }, box);
+  const xmax = o.xmax || Math.max(...xs), ymax = niceMax(o.ymax || Math.max(...series.flatMap(s => s.values.filter(v => v != null))));
+  const X = v => m.l + (v / xmax) * (W - m.l - m.r), Y = v => H - m.b - (v / ymax) * (H - m.t - m.b);
+  const g = el('g', { class: 'axis' }, svg);
+  ticks(ymax, 4).forEach(t => { el('line', { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: css('--grid') }, g); const tx = el('text', { x: m.l - 6, y: Y(t) + 4, 'text-anchor': 'end' }, g); tx.textContent = o.ytick ? o.ytick(t) : fmt(t, 1); });
+  (o.xticks || xs).forEach(t => { const tx = el('text', { x: X(t), y: H - 10, 'text-anchor': 'middle' }, g); tx.textContent = o.xtick ? o.xtick(t) : fmt(t); });
+  if (o.limit) { el('line', { x1: m.l, x2: W - m.r, y1: Y(o.limit.v), y2: Y(o.limit.v), stroke: css('--critical'), 'stroke-dasharray': '4 4', 'stroke-width': 1.5 }, svg); const lt = el('text', { x: W - m.r, y: Y(o.limit.v) - 5, 'text-anchor': 'end', class: 'lbl' }, svg); lt.textContent = o.limit.label; }
+  series.forEach(s => {
+    const pts = xs.map((x, i) => [x, s.values[i]]).filter(p => p[1] != null);
+    el('path', { d: pts.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ',' + Y(p[1])).join(''), fill: 'none', stroke: css(s.color), 'stroke-width': 2, 'stroke-dasharray': s.dash || '', 'stroke-linejoin': 'round' }, svg);
+    if (!s.dash) pts.forEach(p => el('circle', { cx: X(p[0]), cy: Y(p[1]), r: 4.5, fill: css(s.color), stroke: css('--surface-1'), 'stroke-width': 2 }, svg));
+    if (s.endLabel) { const lp = pts[pts.length - 1]; const t = el('text', { x: X(lp[0]) - 6, y: Y(lp[1]) - 9, 'text-anchor': 'end', class: 'vlbl' }, svg); t.textContent = s.endLabel; }
+  });
+  const cross = el('line', { y1: m.t, y2: H - m.b, stroke: css('--text-muted'), 'stroke-width': 1, opacity: 0 }, svg);
+  const hit = el('rect', { x: m.l, y: 0, width: W - m.l - m.r, height: H - m.b, fill: 'transparent' }, svg);
+  hit.addEventListener('pointermove', e => {
+    const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) * (W / r.width);
+    let i = 0; xs.forEach((x, k) => { if (Math.abs(X(x) - px) < Math.abs(X(xs[i]) - px)) i = k; });
+    cross.setAttribute('x1', X(xs[i])); cross.setAttribute('x2', X(xs[i])); cross.setAttribute('opacity', .5);
+    showTip(e, `<b>${o.xname ? o.xname(i) : fmt(xs[i])}</b>` + series.filter(s => s.values[i] != null).map(s => `<div class="row"><i style="background:${css(s.color)}"></i>${s.name}: ${o.vfmt ? o.vfmt(s.values[i]) : fmt(s.values[i], 1)}</div>`).join(''));
+  });
+  hit.addEventListener('pointerleave', () => { cross.setAttribute('opacity', 0); hideTip(); });
+}
+
+/* Vertical stacked columns */
+function stackcols(id, cats, series, o = {}) {
+  const box = document.getElementById(id); box.innerHTML = '';
+  const W = box.clientWidth || 600, H = o.H || 220, m = { l: 40, r: 10, t: 10, b: 30 };
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': o.aria || '' }, box);
+  const totals = cats.map((_, i) => series.reduce((a, s) => a + s.values[i], 0));
+  const ymax = niceMax(Math.max(...totals)), Y = v => (v / ymax) * (H - m.t - m.b);
+  const g = el('g', { class: 'axis' }, svg);
+  ticks(ymax, 4).forEach(t => { const y = H - m.b - Y(t); el('line', { x1: m.l, x2: W - m.r, y1: y, y2: y, stroke: css('--grid') }, g); const tx = el('text', { x: m.l - 6, y: y + 4, 'text-anchor': 'end' }, g); tx.textContent = fmt(t); });
+  const slot = (W - m.l - m.r) / cats.length, bw = Math.min(56, slot * 0.55);
+  cats.forEach((c, i) => {
+    const x = m.l + slot * i + (slot - bw) / 2; let acc = 0;
+    const tx = el('text', { x: x + bw / 2, y: H - 10, 'text-anchor': 'middle', class: 'lbl' }, svg); tx.textContent = c;
+    const marks = [];
+    series.forEach((s, j) => {
+      const h = Y(s.values[i]), y = H - m.b - Y(acc) - h; acc += s.values[i];
+      const top = j === series.length - 1;
+      marks.push(el('path', { d: top ? rcol(x, y, bw, Math.max(0, h - 2), 4) : `M${x},${y + 2}h${bw}v${Math.max(0, h - 2)}h${-bw}Z`, fill: css(s.color) }, svg));
+    });
+    const tt = el('text', { x: x + bw / 2, y: H - m.b - Y(totals[i]) - 6, 'text-anchor': 'middle', class: 'vlbl' }, svg); tt.textContent = o.vfmt ? o.vfmt(totals[i]) : fmt(totals[i], 1);
+    const hit = el('rect', { x: m.l + slot * i, y: 0, width: slot, height: H - m.b, fill: 'transparent' }, svg);
+    hit.addEventListener('pointerenter', e => { marks.forEach(p => p.style.opacity = .8); showTip(e, `<b>${c}</b>` + series.map(s => `<div class="row"><i style="background:${css(s.color)}"></i>${s.name}: ${o.vfmt ? o.vfmt(s.values[i]) : fmt(s.values[i], 1)}</div>`).join('')); });
+    hit.addEventListener('pointermove', moveTip);
+    hit.addEventListener('pointerleave', () => { marks.forEach(p => p.style.opacity = 1); hideTip(); });
+  });
+}
+
+/* ---------- data ---------- */
+const apple = [['content_blocks', 717], ['document_tables', 63], ['document_table_cells', 6269], ['document_links', 3239], ['xbrl_relationships', 2229], ['xbrl_facts', 1127], ['xbrl_dimensions', 235], ['xbrl_contexts', 193], ['xbrl_networks', 142], ['documents', 102], ['exhibits', 63], ['sections', 30], ['xbrl_units', 7]].sort((a, b) => b[1] - a[1]);
+const errs = [['filing_entities_invalid', 80], ['xbrl_taxonomy_cache_miss', 53], ['silver_pipeline_failed', 15], ['xbrl_facts_stage_failed', 11], ['sec_filing_invalid', 9], ['xbrl_core_filing_failed', 2], ['xbrl_instance_facts_conflict', 2]];
+const scaleLbl = ['5 cty', '50 cty', '100 cty', '200 cty', '500 cty'];
+const checked = { pdc: [12809, 153465, 314089, 639013, 1610127], links: [365221, 4848006, 9843422, 19563065, 46899422] };
+const warn = {
+  pdc: [149, 1667, 3426, 6944, 17854],
+  links: [1154, 28820, 57962, 117797, 270771],
+};
+const filings = [343, 3850, 7977, 16141];
+const buildH = [10.0 / 60, 2.7, 5.8, 12.3];
+const thru = [34.2, 23.8, 23.0, 21.9];
+const ramGB = [2689, 6434, 7549, 6697].map(v => v / 1024);
+const rerunInt = [34.3 / 60, 259.2 / 60, (29.7 - 18.2), (72 - 43.6)];
+const rerunOther = [22.8 / 60, 5.5, 18.2, 43.6];
+const stages = ['filings', 'documents', 'filing_entities', 'narrative', 'document_tables', 'document_links', 'exhibit_index', 'xbrl_core', 'xbrl_facts', 'xbrl_enrichment', 'xbrl_linkbases', 'integrity'];
+const st = {
+  5: [26.1, 53.5, 1.6, 28.8, 87.4, 29.6, 2.5, 18.9, 245.7, 29.0, 43.4, 35.1],
+  50: [370.6, 1210.7, 133.3, 492.9, 1354.0, 701.5, 38.8, 756.3, 2873.4, 729.1, 749.7, 278.9],
+  100: [684.9, 1647.0, 250.6, 928.2, 2898.2, 1564.4, 108.6, 1618.4, 6242.1, 1829.2, 2234.6, 804.0],
+  200: [1489.2, 4008.0, 525.7, 2511.6, 5878.6, 3013.2, 370.4, 3382.3, 12151.0, 3746.9, 5066.0, 1984.9],
+};
+const abOld = [113.4, 49.5, 2.7, 58.2, 192.4, 78.0, 4.1, 52.0, 503.6, 375.8, 476.9, 138.3];
+const abNew = [12.9, 115.3, 4.9, 59.8, 192.1, 78.4, 4.2, 52.0, 514.7, 102.0, 92.8, 60.9];
+const skills = [
+  ['Ingestion & incremental', 3, 'Rate-limit SEC, manifest append-only, phát hiện filing mới; thiếu: CDC/streaming'],
+  ['Data modeling', 3, '19 bảng có grain, khoá, 32 FK, lineage; thiếu: lớp Gold/star schema cho người dùng'],
+  ['Data quality', 4, 'Contract từng row, 266 check, fail-fast, resume; đối chiếu ngược về Bronze'],
+  ['Performance & scale', 3, 'Batch giới hạn RAM, song song, cache, benchmark A/B; thiếu: chạy phân tán nhiều máy'],
+  ['Testing & tài liệu', 3, '427 test, coverage, AGENTS.md; thiếu: CI tự chạy mỗi commit'],
+  ['Orchestration', 1, 'Script bash + resume theo stage; thiếu: Airflow/Dagster, lịch, alert'],
+  ['Cloud & hạ tầng', 1, 'Có Terraform VM nhưng chạy local trên USB HDD; thiếu: object storage, IAM, chi phí'],
+  ['Observability', 2, 'Log JSON có cấu trúc, report; thiếu: metric, dashboard, cảnh báo'],
+  ['SQL / analytics serving', 1, 'DuckDB cho audit; thiếu: dbt, warehouse, BI, consumer thật'],
+];
+
+function render() {
+  hbars('c-apple', apple.map(a => a[0]), [{ color: '--series-1', values: apple.map(a => a[1]) }], { aria: 'Số row Silver từ Apple 10-K', barH: 13, groupGap: 6, labelW: 150 });
+  hbars('c-errors', errs.map(a => a[0]), [{ color: '--series-2', values: errs.map(a => a[1]) }], { aria: 'Sự kiện lỗi khi build 500 công ty', barH: 13, groupGap: 8, labelW: 175 });
+  const per = k => warn[k].map((v, i) => v / checked[k][i] * 1e6);
+  legend('lg-warn', [['PUBLIC DOCUMENT COUNT sai', '--series-1'], ['Link không resolve', '--series-2']]);
+  hbars('c-warn', scaleLbl, [{ name: 'PUBLIC DOCUMENT COUNT sai', color: '--series-1', values: per('pdc') }, { name: 'Link không resolve', color: '--series-2', values: per('links') }], { aria: 'Cảnh báo integrity trên 1 triệu row', barH: 10, labelW: 70, vfmt: v => fmt(v), extra: i => `<div class="meta">${fmt(warn.pdc[i])} document · ${fmt(warn.links[i])} link</div>` });
+  legend('lg-time', [['Đo thực tế', '--series-1'], ['Nếu tăng tuyến tính', '--series-old']]);
+  const lin = filings.map(f => buildH[0] / filings[0] * f);
+  lines('c-time', filings, [{ name: 'Đo thực tế', color: '--series-1', values: buildH, endLabel: '12,3 h' }, { name: 'Tuyến tính', color: '--series-old', values: lin, dash: '5 4' }], { aria: 'Thời gian build theo số filing', xmax: 17000, xticks: [0, 4000, 8000, 12000, 16000], xtick: v => fmt(v), ytick: v => fmt(v, 1) + ' h', vfmt: v => fmt(v, 1) + ' h', xname: i => `${scaleLbl[i]} · ${fmt(filings[i])} filing` });
+  lines('c-thru', filings, [{ name: 'Filing/phút', color: '--series-1', values: thru }], { aria: 'Filing mỗi phút', xmax: 17000, xticks: [0, 4000, 8000, 12000, 16000], ymax: 40, vfmt: v => fmt(v, 1), xname: i => `${scaleLbl[i]} · ${fmt(filings[i])} filing` });
+  lines('c-ram', filings, [{ name: 'RAM tối đa', color: '--series-1', values: ramGB }], { aria: 'RAM tối đa theo quy mô', xmax: 17000, xticks: [0, 4000, 8000, 12000, 16000], ymax: 12, limit: { v: 12, label: 'MemoryMax 12 GB' }, ytick: v => fmt(v) + ' GB', vfmt: v => fmt(v, 1) + ' GB', xname: i => `${scaleLbl[i]} · ${fmt(filings[i])} filing` });
+  legend('lg-rerun', [['Các stage khác', '--series-1'], ['Integrity', '--series-2']]);
+  stackcols('c-rerun', scaleLbl.slice(0, 4), [{ name: 'Các stage khác', color: '--series-1', values: rerunOther }, { name: 'Integrity', color: '--series-2', values: rerunInt }], { aria: 'Thời gian chạy lại', vfmt: v => fmt(v, 1) + ' ph' });
+  legend('lg-stage', [['5 cty', '--series-1'], ['50 cty', '--series-2'], ['100 cty', '--series-3'], ['200 cty', '--series-4']]);
+  const per1k = n => st[n].map(v => v / ({ 5: 343, 50: 3850, 100: 7977, 200: 16141 })[n] * 1000);
+  hbars('c-stage', stages, [5, 50, 100, 200].map((n, i) => ({ name: n + ' cty', color: ['--series-1', '--series-2', '--series-3', '--series-4'][i], values: per1k(n) })), { aria: 'Giây trên 1000 filing theo stage', barH: 7, groupGap: 10, labelW: 120, valueLabels: false, vfmt: v => fmt(v) + ' s' });
+  legend('lg-ab', [['Code cũ', '--series-old'], ['Code mới', '--series-1']]);
+  hbars('c-ab', stages, [{ name: 'Cũ', color: '--series-old', values: abOld }, { name: 'Mới', color: '--series-1', values: abNew }], { aria: 'Thời gian stage trước và sau tối ưu', barH: 10, groupGap: 10, labelW: 120, vfmt: v => fmt(v, 1) + ' s' });
+}
+const sk = document.getElementById('skills');
+skills.forEach(([a, n, t]) => { const tr = document.createElement('tr'); tr.innerHTML = `<td>${a}</td><td><span class="score" aria-label="${n}/4">${[0, 1, 2, 3].map(i => `<i class="${i < n ? 'on' : ''}"></i>`).join('')}</span></td><td>${t}</td>`; sk.appendChild(tr); });
+render();
+let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(render, 120); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
+new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+</script>
+</body>
+</html>

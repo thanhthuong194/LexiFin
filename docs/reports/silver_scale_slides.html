@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LexiFin Silver — báo cáo scale và tối ưu</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+body{margin:0;background:#2b2f36;font-family:'IBM Plex Sans',Arial,sans-serif;padding:24px 16px}
+.frame{max-width:1200px;margin:0 auto 8px;aspect-ratio:16/9;position:relative;overflow:hidden;border-radius:8px;box-shadow:0 4px 18px rgba(0,0,0,.35)}
+.scaler{width:1920px;height:1080px;transform-origin:0 0;position:absolute;left:0;top:0}
+.slide{width:1920px;height:1080px;box-sizing:border-box;position:relative}
+.slide *{margin:0;box-sizing:border-box}
+.slide ul,.slide ol{padding-left:40px}
+.slide table{border-collapse:collapse;width:100%}
+.slide th,.slide td{text-align:left;padding:.35em .6em;border-bottom:1px solid #d9d5cc}
+.notes{max-width:1200px;margin:0 auto 32px;color:#c9ced6;font-size:14px;line-height:1.5}
+</style></head><body>
+<div class="frame" id="slide-1"><div class="scaler"><section class="slide" id="cover" data-transition="fade" style="background:#15202b;color:#f4f2ec;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px;display:flex;flex-direction:column;justify-content:space-between">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#7fb0f0;letter-spacing:2px">LEXIFIN · SEC BRONZE → SILVER</p>
+<div style="display:flex;flex-direction:column;gap:32px">
+<h1 style="font-size:96px;font-weight:600;line-height:1.1;color:#f4f2ec">Chuẩn hoá, lỗi, scale<br>và tối ưu pipeline Silver</h1>
+<p style="font-size:40px;line-height:1.35;color:#c9d4e0;width:1400px">Từ 5 đến 500 công ty S&amp;P 500: 40.824 filing, 269 triệu row, 0 FAIL</p>
+</div>
+<div style="display:flex;gap:64px">
+<p style="font-size:24px;color:#c9d4e0">Báo cáo trả lời 6 câu hỏi của thầy</p>
+<p style="font-size:24px;color:#c9d4e0">Số đo thật, 26–27/10/2026</p>
+<p style="font-size:24px;color:#c9d4e0">12 CPU · 15,5 GB RAM · USB HDD</p>
+</div>
+
+</section></div></div><p class="notes"><b>Ghi chú 1:</b> Mục tiêu: trả lời 6 câu hỏi của thầy bằng số đo thật trên máy dev. Mọi con số trong deck đều lấy từ benchmark và log, không ước lượng trừ chỗ ghi rõ.</p>
+<div class="frame" id="slide-2"><div class="scaler"><section class="slide" id="answers" data-transition="fade" style="background:#f7f6f2;color:#1b2430;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:48px">
+<div style="display:flex;flex-direction:column;gap:12px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6;letter-spacing:2px">TRẢ LỜI NHANH</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Sáu câu hỏi, sáu câu trả lời</h2>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;flex:1">
+<div style="display:flex;flex-direction:column;gap:12px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6">1 · Chuẩn hoá</p>
+<p style="font-size:28px;line-height:1.35;color:#3d4756">1 file raw → 19 bảng có khoá, FK, lineage qua 12 stage</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6">2 · Lỗi</p>
+<p style="font-size:28px;line-height:1.35;color:#3d4756">11 kiểu lỗi dữ liệu + 6 lỗi hạ tầng, đều có log và cách xử lý</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6">3 · Scale</p>
+<p style="font-size:28px;line-height:1.35;color:#3d4756">5 → 200 công ty: thời gian tăng nhanh hơn dữ liệu, RAM 2,6 → 7,4 GB</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6">4 · Tối ưu</p>
+<p style="font-size:28px;line-height:1.35;color:#3d4756">Build −37%, chạy lại nhanh 3×, cùng 4.716.499 row</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6">5 · Tối ưu tiếp</p>
+<p style="font-size:28px;line-height:1.35;color:#3d4756">6 việc xếp theo lợi ích; lớn nhất là dùng chung DTS của Arelle</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6">6 · Kỹ năng DE</p>
+<p style="font-size:28px;line-height:1.35;color:#3d4756">Mạnh: quality, modeling. Thiếu: orchestration, cloud, CI/CD</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;font-size:24px;color:#6b7280">Chi tiết và biểu đồ tương tác: trang báo cáo đi kèm</p>
+
+</section></div></div><p class="notes"><b>Ghi chú 2:</b> Slide tóm tắt: mỗi câu hỏi một câu trả lời ngắn. Các slide sau đi lần lượt từng câu.</p>
+<div class="frame" id="slide-3"><div class="scaler"><section class="slide" id="flow" data-transition="fade" style="background:#f7f6f2;color:#1b2430;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<div style="display:flex;flex-direction:column;gap:12px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6;letter-spacing:2px">CÂU 1 · CHUẨN HOÁ</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Từ một file raw đến 19 bảng Iceberg</h2>
+</div>
+<div style="display:flex;gap:16px;align-items:center">
+<p style="font-size:26px;background:#e9e6de;padding:12px 20px;border-radius:10px">SEC EDGAR</p>
+<p style="font-size:30px;color:#6b7280">→</p>
+<p style="font-size:26px;background:#e9e6de;padding:12px 20px;border-radius:10px">Bronze: full-submission.txt + manifest (sha256)</p>
+<p style="font-size:30px;color:#6b7280">→</p>
+<p style="font-size:26px;background:#dce8fa;padding:12px 20px;border-radius:10px">Silver: 12 stage, đọc bảng cha</p>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:24px;flex:1">
+<div style="display:flex;flex-direction:column;gap:16px;background:#ffffff;border:1px solid #e1ded6;border-top:6px solid #2a6fd6;border-radius:12px;padding:28px">
+<h3 style="font-size:32px;font-weight:600">Filing &amp; tài liệu</h3>
+<p style="font-size:26px;line-height:1.4;color:#3d4756">filings · documents · filing_entities</p>
+<p style="font-size:24px;line-height:1.4;color:#5a6472">1 row mỗi khối &lt;DOCUMENT&gt;, verify hash</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:16px;background:#ffffff;border:1px solid #e1ded6;border-top:6px solid #2a6fd6;border-radius:12px;padding:28px">
+<h3 style="font-size:32px;font-weight:600">Văn bản</h3>
+<p style="font-size:26px;line-height:1.4;color:#3d4756">sections · blocks · tables · cells · links · exhibits</p>
+<p style="font-size:24px;line-height:1.4;color:#5a6472">Cây PART → ITEM, lưới cell nhìn thấy được</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:16px;background:#ffffff;border:1px solid #e1ded6;border-top:6px solid #2a6fd6;border-radius:12px;padding:28px">
+<h3 style="font-size:32px;font-weight:600">XBRL</h3>
+<p style="font-size:26px;line-height:1.4;color:#3d4756">instances · contexts · facts · dimensions · labels · relationships</p>
+<p style="font-size:24px;line-height:1.4;color:#5a6472">Arelle nạp DTS, số liệu tài chính có kỳ và đơn vị</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:16px;background:#ffffff;border:1px solid #e1ded6;border-top:6px solid #e0662f;border-radius:12px;padding:28px">
+<h3 style="font-size:32px;font-weight:600">Integrity</h3>
+<p style="font-size:26px;line-height:1.4;color:#3d4756">266 check: khoá, 32 FK, lineage, count, cây section</p>
+<p style="font-size:24px;line-height:1.4;color:#5a6472">So lại với Bronze trên filing mẫu</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;font-size:24px;color:#6b7280">Bronze bất biến · Silver dựng lại được hoàn toàn từ Bronze</p>
+
+</section></div></div><p class="notes"><b>Ghi chú 3:</b> Bronze giữ nguyên file SEC, không bao giờ sửa. Mỗi stage Silver đọc bảng cha đã lưu, không quét lại raw, nên chạy lại được từng stage và resume sau lỗi. Stage cuối là integrity gate: có FAIL thì exit 1.</p>
+<div class="frame" id="slide-4"><div class="scaler"><section class="slide" id="apple" data-transition="fade" style="background:#f7f6f2;color:#1b2430;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<div style="display:flex;flex-direction:column;gap:12px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6;letter-spacing:2px">CÂU 1 · VÍ DỤ THẬT</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Apple 10-K 2024: 9,76 MB raw → ~14.400 row</h2>
+</div>
+<div style="display:flex;gap:32px;align-items:stretch;flex:1">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#15202b;border-radius:16px;padding:36px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#7fb0f0">RAW</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;line-height:1.5;color:#e8edf3">&lt;ix:nonFraction name="us-gaap:Revenue…" contextRef="c-1" unitRef="usd" scale="6"&gt;391,035&lt;/ix:nonFraction&gt;</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;line-height:1.5;color:#e8edf3">PUBLIC DOCUMENT COUNT: 103</p>
+</div>
+<p style="font-size:56px;color:#6b7280;align-self:center">→</p>
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:36px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6">SILVER</p>
+<p style="font-size:28px;line-height:1.4;color:#3d4756"><b>numeric_value</b> = 391.035.000.000 USD</p>
+<p style="font-size:28px;line-height:1.4;color:#3d4756"><b>kỳ</b> 2023-10-01 → 2024-09-28</p>
+<p style="font-size:28px;line-height:1.4;color:#3d4756"><b>102</b> document thật (header khai sai 103)</p>
+<p style="font-size:28px;line-height:1.4;color:#3d4756"><b>30</b> section · <b>63</b> bảng · <b>6.269</b> cell · <b>1.127</b> fact</p>
+<p style="font-size:28px;line-height:1.4;color:#3d4756"><b>lineage</b>: document_id + XPath tới thẻ gốc</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;font-size:24px;color:#6b7280">Filing 0000320193-24-000123 · đọc từ Silver 5 công ty</p>
+
+</section></div></div><p class="notes"><b>Ghi chú 4:</b> Ví dụ doanh thu Apple: text "391,035" với scale 6 thành số 391 tỷ USD, có kỳ và CIK. Giữ cả raw_value để đối chiếu. Header SEC khai 103 document nhưng thực tế 102: chỉ cảnh báo, vì đây là lỗi của SEC trong giai đoạn 2024-01 đến 2026-03.</p>
+<div class="frame" id="slide-5"><div class="scaler"><section class="slide" id="dataerr" data-transition="fade" style="background:#f7f6f2;color:#1b2430;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<div style="display:flex;flex-direction:column;gap:12px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6;letter-spacing:2px">CÂU 2 · LỖI DỮ LIỆU</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Lỗi hiếm chỉ lộ ra ở 500 công ty</h2>
+</div>
+<table style="font-size:26px;color:#1b2430">
+<tr><th style="width:30%">Lỗi</th><th style="width:38%">Ví dụ thật</th><th style="width:32%">Xử lý</th></tr>
+<tr><td>Header SEC có trường mới</td><td>LEI (22 filing), địa chỉ ngoài Mỹ (57)</td><td>Bỏ qua đúng 2 key đã biết</td></tr>
+<tr style="background:#efece5"><td>SEC ngắt dòng mỗi 65.536 byte</td><td>Allegion 10-K: cắt giữa thẻ &lt;td s⏎tyle</td><td>Bỏ nguồn XBRL hỏng, giữ text</td></tr>
+<tr><td>Filing nộp chung</td><td>Exelon + Constellation: 2 folder</td><td>Giữ 1 bản khi checksum trùng</td></tr>
+<tr style="background:#efece5"><td>Namespace khai báo lại</td><td>Colgate 2021</td><td>Giữ binding đầu tiên</td></tr>
+<tr><td>Concept extension khác nhau</td><td>Fifth Third, Ford</td><td>Giữ bản đầu + warning</td></tr>
+<tr style="background:#efece5"><td>Thiếu taxonomy offline</td><td>53 URI năm mới</td><td>Tải bổ sung, build lại tự động</td></tr>
+<tr><td>Số document khai sai</td><td>17.854 document</td><td>Chỉ cảnh báo (lỗi của SEC)</td></tr>
+</table>
+<p style="position:absolute;left:128px;bottom:64px;font-size:24px;color:#6b7280">Lưu ở: log JSON từng run · report integrity (PASS/WARN/FAIL + sample ID) · AGENTS.md</p>
+
+</section></div></div><p class="notes"><b>Ghi chú 5:</b> Mỗi lỗi được ghi thành event trong log JSON có filing và stage. Nguyên tắc: lỗi đã hiểu rõ và vô hại thì bỏ qua có cảnh báo; lỗi lạ thì vẫn reject để không âm thầm sinh dữ liệu sai. Build 500 công ty có 15 lần dừng để sửa các lỗi này.</p>
+<div class="frame" id="slide-6"><div class="scaler"><section class="slide" id="infra" data-transition="fade" style="background:#f7f6f2;color:#1b2430;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<div style="display:flex;flex-direction:column;gap:12px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6;letter-spacing:2px">CÂU 2 · LỖI HẠ TẦNG</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Máy, mạng và điện cũng là nguồn lỗi</h2>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;flex:1">
+<div style="display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">Treo mạng</h3>
+<p style="font-size:26px;line-height:1.4;color:#3d4756">Tải taxonomy treo vô hạn</p>
+<p style="font-size:26px;line-height:1.4;color:#2a6fd6">→ timeout 60 s, offline + cache</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">Hết RAM</h3>
+<p style="font-size:26px;line-height:1.4;color:#3d4756">Treo máy 2 lần khi script đọc mọi cột</p>
+<p style="font-size:26px;line-height:1.4;color:#2a6fd6">→ systemd-run MemoryMax</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">Reader giữ RAM</h3>
+<p style="font-size:26px;line-height:1.4;color:#3d4756">PyIceberg +700 MB theo số file</p>
+<p style="font-size:26px;line-height:1.4;color:#2a6fd6">→ đọc từng file, trả RAM</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">Lô quá nặng</h3>
+<p style="font-size:26px;line-height:1.4;color:#3d4756">Mùa 10-K dồn ~1 triệu cell vào một lô</p>
+<p style="font-size:26px;line-height:1.4;color:#2a6fd6">→ cắt lô theo số bảng</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">Ổ exFAT</h3>
+<p style="font-size:26px;line-height:1.4;color:#3d4756">Không hard link, không journal</p>
+<p style="font-size:26px;line-height:1.4;color:#2a6fd6">→ code xử lý cả hai, fsck sau sự cố</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">Mất điện</h3>
+<p style="font-size:26px;line-height:1.4;color:#3d4756">Giữa audit 18 giờ</p>
+<p style="font-size:26px;line-height:1.4;color:#2a6fd6">→ audit lưu từng bước, resume</p>
+</div>
+</div>
+
+</section></div></div><p class="notes"><b>Ghi chú 6:</b> Ở quy mô nhỏ những lỗi này không xuất hiện. Từ 50 công ty trở lên, RAM và thời gian chạy dài làm chúng thành vấn đề thật; cách xử lý chung là giới hạn tài nguyên cứng và làm mọi bước chạy tiếp được.</p>
+<div class="frame" id="slide-7"><div class="scaler"><section class="slide" id="scaletable" data-transition="fade" style="background:#f7f6f2;color:#1b2430;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<div style="display:flex;flex-direction:column;gap:12px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6;letter-spacing:2px">CÂU 3 · SCALE</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Năm mức dữ liệu, cùng một pipeline</h2>
+</div>
+<table style="font-size:28px;color:#1b2430;font-variant-numeric:tabular-nums">
+<tr><th style="width:14%">Mức</th><th style="width:13%;text-align:right">Filing</th><th style="width:13%;text-align:right">Bronze</th><th style="width:15%;text-align:right">Row Silver</th><th style="width:15%;text-align:right">Build</th><th style="width:14%;text-align:right">RAM đỉnh</th><th style="width:16%;text-align:right">Integrity</th></tr>
+<tr><td>5 cty</td><td style="text-align:right">343</td><td style="text-align:right">1,6 GB</td><td style="text-align:right">2,2 tr</td><td style="text-align:right">10 phút</td><td style="text-align:right">2,6 GB</td><td style="text-align:right">35 s</td></tr>
+<tr style="background:#efece5"><td>50 cty</td><td style="text-align:right">3.850</td><td style="text-align:right">23 GB</td><td style="text-align:right">28,2 tr</td><td style="text-align:right">2,7 giờ</td><td style="text-align:right">6,3 GB</td><td style="text-align:right">4,6 phút</td></tr>
+<tr><td>100 cty</td><td style="text-align:right">7.977</td><td style="text-align:right">47 GB</td><td style="text-align:right">57,3 tr</td><td style="text-align:right">5,8 giờ</td><td style="text-align:right">7,4 GB</td><td style="text-align:right">13,4 phút</td></tr>
+<tr style="background:#efece5"><td>200 cty</td><td style="text-align:right">16.141</td><td style="text-align:right">96 GB</td><td style="text-align:right">113,3 tr</td><td style="text-align:right">12,3 giờ</td><td style="text-align:right">6,5 GB</td><td style="text-align:right">33 phút</td></tr>
+<tr><td>500 cty*</td><td style="text-align:right">40.824</td><td style="text-align:right">242 GB</td><td style="text-align:right">269,0 tr</td><td style="text-align:right">~41 giờ máy</td><td style="text-align:right">—</td><td style="text-align:right">18,4 giờ</td></tr>
+</table>
+<p style="font-size:26px;color:#3d4756">Mọi mức: <b>0 FAIL</b> trên 266 check, chỉ có WARN đã giải thích được.</p>
+<p style="position:absolute;left:128px;bottom:64px;font-size:24px;color:#6b7280">* 500 công ty chạy bằng code cũ, 6 ngày wall-clock do 15 lần dừng; 5–200 bằng code mới, 3 XBRL worker</p>
+
+</section></div></div><p class="notes"><b>Ghi chú 7:</b> Các mức 5 đến 200 chạy liên tục 26–27/10 bằng code mới, mỗi mức build từ đầu rồi chạy lại. Mức 500 là lần build thật trước đó bằng code cũ, gồm cả thời gian chạy lại sau lỗi.</p>
+<div class="frame" id="slide-8"><div class="scaler"><section class="slide" id="scalecharts" data-transition="fade" style="background:#f7f6f2;color:#1b2430;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<div style="display:flex;flex-direction:column;gap:12px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6;letter-spacing:2px">CÂU 3 · SCALE</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Dữ liệu ×47, thời gian build ×74</h2>
+</div>
+<div style="display:flex;gap:32px;flex:1">
+<div style="flex:3;display:flex;flex-direction:column;gap:18px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<h3 style="font-size:30px;font-weight:600">Giờ build: thực tế so với tăng tuyến tính</h3>
+<div style="display:flex;gap:24px">
+<p style="font-size:24px;color:#3d4756"><span style="color:#2a6fd6">■</span> Thực tế</p>
+<p style="font-size:24px;color:#3d4756"><span style="color:#a3a29b">■</span> Nếu tuyến tính từ 5 cty</p>
+</div>
+<div style="display:flex;align-items:center;gap:16px"><p style="font-size:26px;width:120px">5 cty</p><div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;align-items:center;gap:10px"><div style="width:12px;height:22px;background:#2a6fd6;border-radius:0 4px 4px 0"></div><p style="font-size:24px">0,2 h</p></div><div style="width:12px;height:22px;background:#a3a29b;border-radius:0 4px 4px 0"></div></div></div>
+<div style="display:flex;align-items:center;gap:16px"><p style="font-size:26px;width:120px">50 cty</p><div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;align-items:center;gap:10px"><div style="width:187px;height:22px;background:#2a6fd6;border-radius:0 4px 4px 0"></div><p style="font-size:24px">2,7 h</p></div><div style="display:flex;align-items:center;gap:10px"><div style="width:129px;height:22px;background:#a3a29b;border-radius:0 4px 4px 0"></div><p style="font-size:24px;color:#5a6472">1,9 h</p></div></div></div>
+<div style="display:flex;align-items:center;gap:16px"><p style="font-size:26px;width:120px">100 cty</p><div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;align-items:center;gap:10px"><div style="width:401px;height:22px;background:#2a6fd6;border-radius:0 4px 4px 0"></div><p style="font-size:24px">5,8 h</p></div><div style="display:flex;align-items:center;gap:10px"><div style="width:269px;height:22px;background:#a3a29b;border-radius:0 4px 4px 0"></div><p style="font-size:24px;color:#5a6472">3,9 h</p></div></div></div>
+<div style="display:flex;align-items:center;gap:16px"><p style="font-size:26px;width:120px">200 cty</p><div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;align-items:center;gap:10px"><div style="width:851px;height:22px;background:#2a6fd6;border-radius:0 4px 4px 0"></div><p style="font-size:24px">12,3 h</p></div><div style="display:flex;align-items:center;gap:10px"><div style="width:543px;height:22px;background:#a3a29b;border-radius:0 4px 4px 0"></div><p style="font-size:24px;color:#5a6472">7,9 h</p></div></div></div>
+</div>
+<div style="flex:2;display:flex;flex-direction:column;gap:24px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<p style="font-size:72px;font-weight:600;line-height:1.1;color:#1b2430">34 → 22</p>
+<p style="font-size:26px;color:#3d4756">filing/phút từ 5 đến 200 cty: đĩa USB thành nút cổ chai</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<p style="font-size:72px;font-weight:600;line-height:1.1;color:#1b2430">2,6 → 7,4 GB</p>
+<p style="font-size:26px;color:#3d4756">RAM đỉnh ở XBRL facts, theo lô nặng nhất</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#ffffff;border:1px solid #e1ded6;border-radius:16px;padding:32px">
+<p style="font-size:72px;font-weight:600;line-height:1.1;color:#1b2430">1 ph → 72 ph</p>
+<p style="font-size:26px;color:#3d4756">chạy lại khi không có gì mới</p>
+</div>
+</div>
+</div>
+
+</section></div></div><p class="notes"><b>Ghi chú 8:</b> Filing tăng 47 lần (343 → 16.141) nhưng thời gian build tăng 74 lần (10 phút → 12,3 giờ). Nguyên nhân chính: đọc ổ USB 34 MB/s, CPU/wall của documents chỉ 0,25. RAM đỉnh do lô 100 instance XBRL nặng nhất quyết định. Chạy lại không có gì mới vẫn tốn 72 phút vì integrity và vài stage quét lại toàn bảng.</p>
+<div class="frame" id="slide-9"><div class="scaler"><section class="slide" id="levels" data-transition="fade" style="background:#f7f6f2;color:#1b2430;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<div style="display:flex;flex-direction:column;gap:12px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6;letter-spacing:2px">CÂU 3 · VẤN ĐỀ THEO MỨC</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Mỗi mức lớn hơn mở ra vấn đề mới</h2>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:20px;flex:1">
+<div style="display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-top:6px solid #9ec5f4;border-radius:12px;padding:26px">
+<h3 style="font-size:32px;font-weight:600">5 cty</h3>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">Tải taxonomy treo</p>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">Bảng HTML: ô đệm, ô ẩn</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-top:6px solid #6da7ec;border-radius:12px;padding:26px">
+<h3 style="font-size:32px;font-weight:600">50 cty</h3>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">RAM tăng theo bảng → đọc theo batch, commit theo lô</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-top:6px solid #3987e5;border-radius:12px;padding:26px">
+<h3 style="font-size:32px;font-weight:600">100 cty</h3>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">~1 triệu cell/lô</p>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">XBRL = 50% thời gian → worker song song</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-top:6px solid #256abf;border-radius:12px;padding:26px">
+<h3 style="font-size:32px;font-weight:600">200 cty</h3>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">Đĩa chậm: data ×2, thời gian ×2,5</p>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">Chạy lại mất 1,2 giờ</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#ffffff;border:1px solid #e1ded6;border-top:6px solid #184f95;border-radius:12px;padding:26px">
+<h3 style="font-size:32px;font-weight:600">500 cty</h3>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">11 kiểu lỗi dữ liệu hiếm</p>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">Hash 226 GB: 2,7 giờ</p>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">Integrity 18,4 giờ, 145 GB tạm</p>
+</div>
+</div>
+<p style="font-size:30px;line-height:1.4;color:#1b2430;width:1500px">Ở 5 công ty mọi thứ “chạy được”. Ở 500 công ty chỉ thứ gì <b>có giới hạn RAM, chạy tiếp được sau lỗi và đo được</b> mới sống sót.</p>
+
+</section></div></div><p class="notes"><b>Ghi chú 9:</b> Mỗi mức gặp vấn đề mà mức trước không có. Lỗi hiếm như Allegion chỉ xuất hiện 1 lần trên 40.824 filing. Chi phí nhỏ cố định như hash lại hay quét lại toàn bảng thì nhân lên theo dữ liệu.</p>
+<div class="frame" id="slide-10"><div class="scaler"><section class="slide" id="optstatement" data-transition="fade" style="background:#2a6fd6;color:#f7f6f2;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px;display:flex;flex-direction:column;justify-content:center;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#e3edfb;letter-spacing:2px">CÂU 4 · TỐI ƯU ĐÃ LÀM</p>
+<h1 style="font-size:200px;font-weight:700;line-height:1;color:#f7f6f2">−37%</h1>
+<p style="font-size:48px;line-height:1.3;color:#f7f6f2;width:1400px">thời gian build, cùng đúng 4.716.499 row và cùng kết quả integrity</p>
+<p style="font-size:30px;line-height:1.4;color:#e3edfb;width:1400px">Mẫu 2% của 500 công ty (769 filing): 34,1 → 21,5 phút · CPU −50% · chạy lại 5 phút → 101 giây</p>
+
+</section></div></div><p class="notes"><b>Ghi chú 10:</b> Nguyên tắc: tối ưu không được đổi một row dữ liệu. Đo trước bằng benchmark từng stage, tìm phần lặp lại, sửa, rồi A/B trên cùng mẫu dữ liệu.</p>
+<div class="frame" id="slide-11"><div class="scaler"><section class="slide" id="abtest" data-transition="fade" style="background:#f7f6f2;color:#1b2430;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<div style="display:flex;flex-direction:column;gap:12px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6;letter-spacing:2px">CÂU 4 · A/B THEO STAGE</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Ba tối ưu, bỏ việc lặp lại</h2>
+</div>
+<div style="display:flex;gap:40px;flex:1">
+<div style="flex:3;display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;gap:24px">
+<p style="font-size:24px;color:#3d4756"><span style="color:#a3a29b">■</span> Code cũ</p>
+<p style="font-size:24px;color:#3d4756"><span style="color:#2a6fd6">■</span> Code mới (giây)</p>
+</div>
+<div style="display:flex;align-items:center;gap:16px"><p style="font-size:24px;width:200px">filings</p><div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:10px"><div style="width:174px;height:18px;background:#a3a29b;border-radius:0 4px 4px 0"></div><p style="font-size:24px;color:#5a6472">113</p></div><div style="display:flex;align-items:center;gap:10px"><div style="width:20px;height:18px;background:#2a6fd6;border-radius:0 4px 4px 0"></div><p style="font-size:24px">13</p></div></div></div>
+<div style="display:flex;align-items:center;gap:16px"><p style="font-size:24px;width:200px">documents</p><div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:10px"><div style="width:76px;height:18px;background:#a3a29b;border-radius:0 4px 4px 0"></div><p style="font-size:24px;color:#5a6472">50</p></div><div style="display:flex;align-items:center;gap:10px"><div style="width:177px;height:18px;background:#2a6fd6;border-radius:0 4px 4px 0"></div><p style="font-size:24px">115</p></div></div></div>
+<div style="display:flex;align-items:center;gap:16px"><p style="font-size:24px;width:200px">xbrl_facts</p><div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:10px"><div style="width:775px;height:18px;background:#a3a29b;border-radius:0 4px 4px 0"></div><p style="font-size:24px;color:#5a6472">504</p></div><div style="display:flex;align-items:center;gap:10px"><div style="width:792px;height:18px;background:#2a6fd6;border-radius:0 4px 4px 0"></div><p style="font-size:24px">515</p></div></div></div>
+<div style="display:flex;align-items:center;gap:16px"><p style="font-size:24px;width:200px">enrichment</p><div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:10px"><div style="width:578px;height:18px;background:#a3a29b;border-radius:0 4px 4px 0"></div><p style="font-size:24px;color:#5a6472">376</p></div><div style="display:flex;align-items:center;gap:10px"><div style="width:157px;height:18px;background:#2a6fd6;border-radius:0 4px 4px 0"></div><p style="font-size:24px">102</p></div></div></div>
+<div style="display:flex;align-items:center;gap:16px"><p style="font-size:24px;width:200px">linkbases</p><div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:10px"><div style="width:733px;height:18px;background:#a3a29b;border-radius:0 4px 4px 0"></div><p style="font-size:24px;color:#5a6472">477</p></div><div style="display:flex;align-items:center;gap:10px"><div style="width:143px;height:18px;background:#2a6fd6;border-radius:0 4px 4px 0"></div><p style="font-size:24px">93</p></div></div></div>
+<div style="display:flex;align-items:center;gap:16px"><p style="font-size:24px;width:200px">integrity</p><div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:10px"><div style="width:213px;height:18px;background:#a3a29b;border-radius:0 4px 4px 0"></div><p style="font-size:24px;color:#5a6472">138</p></div><div style="display:flex;align-items:center;gap:10px"><div style="width:94px;height:18px;background:#2a6fd6;border-radius:0 4px 4px 0"></div><p style="font-size:24px">61</p></div></div></div>
+</div>
+<div style="flex:2;display:flex;flex-direction:column;gap:20px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#ffffff;border:1px solid #e1ded6;border-radius:14px;padding:26px">
+<h3 style="font-size:28px;font-weight:600">Cache kết quả Arelle</h3>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">Nạp DTS 1 lần thay vì 3. Đổi: ~6 GB đĩa tạm</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#ffffff;border:1px solid #e1ded6;border-radius:14px;padding:26px">
+<h3 style="font-size:28px;font-weight:600">Tin checksum manifest</h3>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">Không đọc lại 226 GB. Đổi: documents tự đọc đĩa</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#ffffff;border:1px solid #e1ded6;border-radius:14px;padding:26px">
+<h3 style="font-size:28px;font-weight:600">DuckDB + 4 worker</h3>
+<p style="font-size:24px;line-height:1.4;color:#3d4756">Hash join, resume. Đổi: RAM audit 0,8 → 1,7 GB</p>
+</div>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;font-size:24px;color:#6b7280">Các stage khác gần như không đổi · RAM đỉnh cả build 2,9 → 3,1 GB: chưa giảm</p>
+
+</section></div></div><p class="notes"><b>Ghi chú 11:</b> Enrichment và linkbases nhanh 4–5 lần nhờ đọc lại kết quả Arelle đã lưu. Filings không còn băm lại file, nhưng documents giờ phải tự đọc từ đĩa nên chậm hơn; tổng hai stage vẫn giảm 163 → 128 giây. Integrity nhanh hơn 2,3 lần nhưng dùng gấp đôi RAM. Nói thẳng: RAM đỉnh chưa giảm, đó là việc tiếp theo.</p>
+<div class="frame" id="slide-12"><div class="scaler"><section class="slide" id="nextopt" data-transition="fade" style="background:#f7f6f2;color:#1b2430;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<div style="display:flex;flex-direction:column;gap:12px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6;letter-spacing:2px">CÂU 5 · TỐI ƯU TIẾP THEO</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Sáu việc, xếp theo lợi ích trên công sức</h2>
+</div>
+<table style="font-size:26px;color:#1b2430">
+<tr><th style="width:40%">Việc</th><th style="width:36%">Vì sao (số đo)</th><th style="width:24%">Ước lợi ích</th></tr>
+<tr><td>Dùng chung DTS chuẩn trong worker Arelle</td><td>load_dts = 63% thời gian facts</td><td>facts −40–60%</td></tr>
+<tr style="background:#efece5"><td>Song song narrative / tables / links</td><td>chỉ dùng 1 trong 12 lõi</td><td>3 stage −50–70%</td></tr>
+<tr><td>Bronze trên SSD hoặc object storage</td><td>CPU/wall documents 0,25</td><td>stage I/O −60%</td></tr>
+<tr style="background:#efece5"><td>Integrity incremental</td><td>chạy lại 200 cty: 33 phút audit</td><td>còn vài phút</td></tr>
+<tr><td>Chia lô XBRL theo trọng lượng</td><td>RAM 2,6 → 7,4 GB theo lô</td><td>RAM đỉnh ổn định</td></tr>
+<tr style="background:#efece5"><td>Không dựng lại links / exhibits khi không đổi</td><td>parse lại mỗi lần chạy</td><td>chạy lại −10–15 phút</td></tr>
+</table>
+<p style="font-size:28px;line-height:1.4;color:#3d4756;width:1600px">Cách làm ở doanh nghiệp: <b>đặt SLA</b> (vd. filing mới vào Silver trong 1 giờ, RAM ≤ 8 GB, 0 FAIL) → đo baseline → sửa nút cổ chai lớn nhất → A/B với dữ liệu giống hệt.</p>
+<p style="position:absolute;left:128px;bottom:64px;font-size:24px;color:#6b7280">Lợi ích là ước lượng từ profile đã đo, chưa triển khai</p>
+
+</section></div></div><p class="notes"><b>Ghi chú 12:</b> Theo định luật Amdahl, chỉ phần chiếm nhiều thời gian mới đáng tối ưu. Ở 200 công ty: XBRL facts 28%, tables 13%, linkbases 11%, documents 9%. Máy có 12 lõi nhưng trung bình chỉ dùng ~1,3 lõi, nên song song hoá còn nhiều chỗ.</p>
+<div class="frame" id="slide-13"><div class="scaler"><section class="slide" id="skills" data-transition="fade" style="background:#f7f6f2;color:#1b2430;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<div style="display:flex;flex-direction:column;gap:12px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;color:#2a6fd6;letter-spacing:2px">CÂU 6 · KỸ NĂNG DATA ENGINEERING</p>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Mạnh ở chất lượng dữ liệu, thiếu ở vận hành</h2>
+</div>
+<div style="display:flex;gap:32px;flex:1">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#ffffff;border:1px solid #e1ded6;border-top:6px solid #2a6fd6;border-radius:16px;padding:36px">
+<h3 style="font-size:34px;font-weight:600">Đã thể hiện rõ</h3>
+<ul style="font-size:26px;line-height:1.5;color:#3d4756">
+<li>Ingest incremental, Bronze bất biến</li>
+<li>Medallion + Iceberg, model có khoá, FK, lineage</li>
+<li>Data contract + 266 check, fail-fast</li>
+<li>RAM giới hạn, theo lô, resume sau crash</li>
+<li>Profiling, benchmark A/B, tối ưu có số liệu</li>
+<li>427 test tự động, tài liệu vận hành</li>
+</ul>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#ffffff;border:1px solid #e1ded6;border-top:6px solid #e0662f;border-radius:16px;padding:36px">
+<h3 style="font-size:34px;font-weight:600">Nên học tiếp (theo thứ tự)</h3>
+<ol style="font-size:26px;line-height:1.5;color:#3d4756">
+<li>Orchestration: Airflow / Dagster</li>
+<li>Cloud: S3/GCS, IAM, chi phí</li>
+<li>Distributed: Spark, Polars</li>
+<li>SQL modeling: dbt, star schema (Gold)</li>
+<li>CI/CD + Docker</li>
+<li>Observability: metric, dashboard, alert</li>
+</ol>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;font-size:24px;color:#6b7280">Tự đánh giá theo khung kỹ năng DE phổ biến, không phải điểm đo được</p>
+
+</section></div></div><p class="notes"><b>Ghi chú 13:</b> Ước lượng: phần xử lý dữ liệu và chất lượng đã ở mức tốt; phần vận hành sản xuất (lịch chạy, cloud, CI/CD, giám sát, người dùng cuối của lớp Gold) gần như chưa có. Đây là những thứ doanh nghiệp hỏi nhiều nhất khi tuyển data engineer.</p>
+<div class="frame" id="slide-14"><div class="scaler"><section class="slide" id="closing" data-transition="fade" style="background:#15202b;color:#f4f2ec;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px;display:flex;flex-direction:column;justify-content:center;gap:48px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#7fb0f0;letter-spacing:2px">TÓM LẠI</p>
+<div style="display:flex;flex-direction:column;gap:28px">
+<p style="font-size:44px;line-height:1.3;color:#f4f2ec"><b>269 triệu row</b> từ 242 GB raw, 0 FAIL ở mọi mức</p>
+<p style="font-size:44px;line-height:1.3;color:#f4f2ec"><b>Scale lộ ra vấn đề</b> mà dữ liệu nhỏ không có: lỗi hiếm, RAM, đĩa, thời gian chạy lại</p>
+<p style="font-size:44px;line-height:1.3;color:#f4f2ec"><b>Tối ưu có đo đạc</b>: −37% thời gian, không đổi một row</p>
+<p style="font-size:44px;line-height:1.3;color:#f4f2ec"><b>Bước tiếp</b>: Arelle dùng chung DTS, song song hoá, orchestration</p>
+</div>
+
+</section></div></div><p class="notes"><b>Ghi chú 14:</b> Kết: dữ liệu đúng trước, nhanh sau, và mọi tối ưu đều phải chứng minh bằng benchmark trên cùng dữ liệu.</p>
+<script>
+function fit(){document.querySelectorAll('.frame').forEach(f=>{f.firstElementChild.style.transform='scale('+(f.clientWidth/1920)+')'})}
+addEventListener('resize',fit);fit();
+</script></body></html>

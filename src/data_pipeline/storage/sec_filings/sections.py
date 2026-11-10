@@ -13,5 +13,5 @@ SECTIONS_TABLE = "sec_filings.sections"
 # inferred from restarting items, TOC heading lines and index PARTs dropped,
 # 8-K items opened by layout tables.
 SECTIONS_SPEC = SilverTableSpec(
-    SECTIONS_TABLE, SECTIONS_ARROW_SCHEMA, FILING_YEAR_PARTITION, rules_version=2
+    SECTIONS_TABLE, SECTIONS_ARROW_SCHEMA, FILING_YEAR_PARTITION, rules_version=3
 )
