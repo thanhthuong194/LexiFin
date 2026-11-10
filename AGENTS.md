@@ -4,7 +4,7 @@ Currently only SEC 10-K/10-Q/8-K filings of the top-N companies in the IVV ETF (
 
 ## Commands
 
-- Install: `uv sync --locked` (Python 3.13; `vnstock`/`vnai` come from the private index `vnstocks.com`).
+- Install: `uv sync --locked` (Python 3.13).
 - All tests: `uv run pytest` (~470 tests, ~8 min, no network; coverage is on in `addopts`). `make check` runs every CI step (`.github/workflows/ci.yml`: ruff format + lint, mypy strict, vulture with `vulture_whitelist.py`, jscpd, pytest; ~9 min); config lives in `pyproject.toml`. Most of the time is Arelle loading fixture taxonomies: each pipeline run in the integration tests has three XBRL stages that load instances (facts, enrichment, linkbases; ~0.25 s per load), then the integrity gate audits everything again.
 - One test: `uv run pytest tests/unit/utils/test_timer.py::<test_name> --no-cov`.
 - SEC ingest (Bronze):

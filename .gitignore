@@ -16,3 +16,6 @@ logs
 **/.coverage
 **/.ruff_cache/
 .mypy_cache
+
+# Local Qdrant (docker volume)
+qdrant_storage/
