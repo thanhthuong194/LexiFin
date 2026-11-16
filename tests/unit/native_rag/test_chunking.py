@@ -405,3 +405,11 @@ def test_exhibit_numbers_stay_labels() -> None:
     table = render_table(cells)
     assert table.header == (" | Description | Form | Exhibit",)
     assert table.rows == ("10.1 | Credit Agreement | 8-K | 10.2",)
+
+
+def test_paragraph_without_sentences_stays_under_cap() -> None:
+    paragraph = Paragraph("p", " ".join(f"{i}.5%" for i in range(200)), False)
+    chunks = chunk_paragraphs([paragraph], None, _sizing(cap=40))
+    assert len(chunks) > 1
+    assert all(COUNTER.count(c.text) + 2 <= 40 for c in chunks)
+    assert [c.part for c in chunks] == list(range(1, len(chunks) + 1))

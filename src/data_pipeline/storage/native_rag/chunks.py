@@ -9,6 +9,13 @@ CHUNKS_TABLE = "native_rag.chunks"
 # Version of the chunking rules (method, caps, noise rules, rendering). Bump
 # it whenever the same Silver rows would give different chunks, then purge
 # and rebuild the table.
+# Version 2 (2026-11-17): long paragraphs cut in thirds of the budget with a
+# short overlap, so no part exceeds the cap (v1 rejected 5 documents at 513-514
+# tokens on the 500-company Silver).
 CHUNKS_SPEC = SilverTableSpec(
-    CHUNKS_TABLE, CHUNKS_ARROW_SCHEMA, FILING_YEAR_PARTITION, layer="gold"
+    CHUNKS_TABLE,
+    CHUNKS_ARROW_SCHEMA,
+    FILING_YEAR_PARTITION,
+    rules_version=2,
+    layer="gold",
 )

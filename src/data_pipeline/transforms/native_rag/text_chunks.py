@@ -237,27 +237,33 @@ def _split_paragraph(
 ) -> list[TextChunk]:
     """Cut a too-long paragraph at sentence boundaries into balanced parts.
 
-    Each part after the first starts with the previous part's last sentence
-    (context for its vector); a sentence longer than half the budget is cut
-    by tokens. Parts share the block and carry `part`/`part_count`.
+    A sentence longer than a third of the budget is cut by tokens. Each part
+    after the first starts with the previous part's last piece when that piece
+    is at most a quarter of the budget (a short sentence gives its vector
+    context; a long token cut would not). Parts are added until every part
+    fits; if single pieces with their overlap still do not (tokens are not
+    exactly additive), overlaps are dropped. Parts share the block and carry
+    `part`/`part_count`.
     """
 
-    half = max(sizing.budget(subheading) // 2, 1)
+    budget = sizing.budget(subheading)
+    third = max(budget // 3, 1)
     pieces: list[str] = []
     for sentence in split_sentences(paragraph.text):
-        if sizing.size(sentence) > half:
-            pieces.extend(sizing.split_tokens(sentence, half))
+        if sizing.size(sentence) > third:
+            pieces.extend(sizing.split_tokens(sentence, third))
         else:
             pieces.append(sentence)
     sizes = [sizing.size(piece) for piece in pieces]
-    parts = max(2, -(-sum(sizes) // half))
+    overlap_max = budget // 4
+    parts = max(2, -(-sum(sizes) // max(budget - overlap_max, 1)))
     while True:
         groups = _partition(pieces, sizes, min(parts, len(pieces)))
-        texts = [
-            ((groups[i - 1][-1] if i else "") + "".join(group)).strip()
-            for i, group in enumerate(groups)
-        ]
-        if parts >= len(pieces) or all(sizing.fits(subheading, t) for t in texts):
+        texts = _overlapped(groups, sizing, overlap_max)
+        if all(sizing.fits(subheading, t) for t in texts):
+            break
+        if parts >= len(pieces):
+            texts = _overlapped(groups, sizing, -1)
             break
         parts += 1
     if len(texts) == 1:
@@ -266,3 +272,18 @@ def _split_paragraph(
         TextChunk(text, (paragraph.block_id,), subheading, position, len(texts))
         for position, text in enumerate(texts, start=1)
     ]
+
+
+def _overlapped(
+    groups: Sequence[Sequence[str]], sizing: Sizing, overlap_max: int
+) -> list[str]:
+    """Join each group, prefixed by the previous group's last piece when it is
+    at most `overlap_max` tokens (never when negative)."""
+
+    texts: list[str] = []
+    for index, group in enumerate(groups):
+        previous = groups[index - 1][-1] if index else ""
+        if previous and sizing.size(previous) > overlap_max:
+            previous = ""
+        texts.append((previous + "".join(group)).strip())
+    return texts

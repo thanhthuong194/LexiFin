@@ -35,8 +35,8 @@ FILINGS = [
 # default parameters, at CHUNKS_SPEC.rules_version. A different digest means
 # the same Silver now gives different chunks: bump the rules version.
 FIXTURE_CHUNKS = (
-    1,
-    "926445cfab71ee03c395c9d811954d2cc2fb2b9997629c66bd43267054494ec6",
+    2,
+    "5a0bb996e6d94d9eb5d4715e87c8a2a1933773b76d9547a677f1331deb7a5eb0",
 )
 PROCESSED_AT = datetime(2026, 11, 16, tzinfo=UTC)
 _ROWS = "".join(
