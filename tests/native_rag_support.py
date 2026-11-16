@@ -23,3 +23,14 @@ class WordCounter:
         if pieces and head:
             pieces[0] = head + pieces[0]
         return pieces or [text]
+
+
+class DigitCounter(WordCounter):
+    """A `TokenCounter` for tests where digits are expensive (5 tokens each on
+    top of one per word), so `(part 12/13)` costs well more than `(part 9/9)`:
+    the real tokenizer also spends one token per digit."""
+
+    identity = "test-digits"
+
+    def count(self, text: str) -> int:
+        return super().count(text) + 5 * sum(ch.isdigit() for ch in text)

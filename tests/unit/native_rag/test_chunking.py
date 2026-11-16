@@ -32,7 +32,7 @@ from src.data_pipeline.transforms.native_rag.text_chunks import (
     chunk_paragraphs,
     is_title_like,
 )
-from tests.native_rag_support import WordCounter
+from tests.native_rag_support import DigitCounter, WordCounter
 
 pytestmark = pytest.mark.unit
 
@@ -413,3 +413,47 @@ def test_paragraph_without_sentences_stays_under_cap() -> None:
     assert len(chunks) > 1
     assert all(COUNTER.count(c.text) + 2 <= 40 for c in chunks)
     assert [c.part for c in chunks] == list(range(1, len(chunks) + 1))
+
+
+def test_wide_table_parts_fit_with_their_real_labels() -> None:
+    # A header so wide that each part holds one row; some rows are cut by
+    # tokens, so there are more parts than rows and `(part i/n)` grows. Rows
+    # of every length near the cap must still fit with their real label.
+    columns = 12
+    header = [
+        Cell(1, c + 2, 1, f"Three months ended period {c}") for c in range(columns)
+    ]
+    sections = {
+        "root": SourceSection(
+            "root", 1, None, "document", None, "Doc", 1, ("Cover",), "cover"
+        )
+    }
+
+    def context(
+        path: tuple[str, ...], subheading: str | None, table: str | None
+    ) -> str:
+        return " | ".join(["Example", *path, f"Table: {table}"])
+
+    params = ChunkParams(max_tokens=120, min_unit_tokens=4)
+    for extra in range(40):
+        rows = [
+            Cell(r, c + 2, 1, f"{r},{c}00")
+            for r in range(2, 11)
+            for c in range(columns)
+        ] + [
+            Cell(
+                r, 1, 1, "Long segment label " * 30 if r % 4 == 0 else "S" + "y" * extra
+            )
+            for r in range(2, 11)
+        ]
+        blocks = [
+            SourceBlock("d:block:000001", 1, "root", "paragraph", "Segment results"),
+            SourceBlock("d:block:000002", 2, "root", "table", "x" * 200),
+        ]
+        cells = {"d:block:000002:table": header + rows}
+        result = chunk_document(
+            DocumentInput(blocks, sections, cells, context), DigitCounter(), params
+        )
+        tables = [c for c in result.chunks if c.chunk_kind == "table"]
+        assert len(tables) > 9, extra
+        assert all(c.token_count <= params.max_tokens for c in tables), extra

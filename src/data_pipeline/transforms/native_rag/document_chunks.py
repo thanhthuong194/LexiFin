@@ -289,14 +289,30 @@ class _Builder:
     ) -> list[ChunkDraft]:
         title_text = " ".join(line.text for line in title) or None
         cap = self._params.max_tokens
-        most = max(len(table.rendered.rows) + len(footnotes), 2)
-        widest = self._context(section.path, subheading, _label(title_text, most, most))
         rendered = RenderedTable(
             table.rendered.header,
             (*table.rendered.rows, *(note.text for note in footnotes)),
         )
-        parts = split_rows(rendered, "", lambda text: self._tokens(widest, text) <= cap)
-        parts = self._hard_split(parts, widest)
+        # Size parts against the widest label; token cuts can add parts and
+        # lengthen `(part i/n)`, so check the real prefixes and cut finer
+        # until every part fits.
+        most = max(len(rendered.rows), 2)
+        margin = 0
+        while True:
+            widest = self._context(
+                section.path, subheading, _label(title_text, most, most)
+            )
+            parts = split_rows(rendered, "", self._fits_within(widest, cap - margin))
+            parts = self._hard_split(parts, widest, margin)
+            labels = _part_labels(title_text, len(parts))
+            over = max(
+                self._tokens(self._context(section.path, subheading, label), text) - cap
+                for label, text in zip(labels, parts, strict=True)
+            )
+            if over <= 0:
+                break
+            most = max(most, len(parts))
+            margin += over
         block_ids = tuple(
             dict.fromkeys(
                 [
@@ -308,9 +324,8 @@ class _Builder:
         )
         drafts: list[ChunkDraft] = []
         count = len(parts)
-        for position, text in enumerate(parts, start=1):
-            label = _label(title_text, position, count) if count > 1 else title_text
-            context = self._context(section.path, subheading, label or "")
+        for position, (label, text) in enumerate(zip(labels, parts, strict=True), 1):
+            context = self._context(section.path, subheading, label)
             drafts.append(
                 ChunkDraft(
                     section.section_id,
@@ -328,10 +343,13 @@ class _Builder:
             )
         return drafts
 
-    def _hard_split(self, parts: list[str], context: str) -> list[str]:
-        """Cut by tokens any part still over the cap (a single huge row)."""
+    def _fits_within(self, context: str, limit: int) -> Callable[[str], bool]:
+        return lambda text: self._tokens(context, text) <= limit
 
-        cap = self._params.max_tokens
+    def _hard_split(self, parts: list[str], context: str, margin: int) -> list[str]:
+        """Cut by tokens any part still over the cap less `margin` (a huge row)."""
+
+        cap = self._params.max_tokens - margin
         budget = cap - self._counter.count(context + "\n\n")
         result: list[str] = []
         for part in parts:
@@ -340,6 +358,15 @@ class _Builder:
             else:
                 result.extend(self._counter.split(part, max(budget - 8, 1)))
         return result
+
+
+def _part_labels(title: str | None, count: int) -> list[str]:
+    """The `Table:` label of each part: the title (or "" untitled) when the
+    table is one chunk, else with `(part i/n)`."""
+
+    if count == 1:
+        return [title or ""]
+    return [_label(title, position, count) for position in range(1, count + 1)]
 
 
 def _splits_block(run: Sequence[Paragraph]) -> bool:
