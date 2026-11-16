@@ -3,7 +3,7 @@
 # $(DATA_DIR)/bronze/sec_filings) and ARGS (more script options), e.g.
 # `make silver DATA_DIR=data ARGS=--allow-taxonomy-network`.
 
-.PHONY: install format lint types dead-code duplication test check silver audit
+.PHONY: install format lint types dead-code duplication test test-full check silver audit
 
 DATA_DIR ?=
 ARGS ?=
@@ -31,6 +31,10 @@ duplication:
 
 test:
 	uv run pytest
+
+# Every test on 4 workers with coverage: before a push or a server run.
+test-full:
+	uv run --with pytest-xdist pytest -n 4
 
 check: lint types dead-code duplication test
 	uv run ruff format --check .
