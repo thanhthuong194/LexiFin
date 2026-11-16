@@ -172,13 +172,16 @@ def render_table(cells: Sequence[Cell]) -> RenderedTable:
     rows = _rows(cells)
     label_column = min(cell.column for row in rows for cell in row)
     leading, header_rows = _header(rows, label_column)
-    groups, notes = _groups(header_rows, label_column, _first_value_column(rows))
+    groups, notes = _groups(
+        header_rows, label_column, _first_value_column(rows, label_column)
+    )
     header_lines = [*leading, *notes]
     if groups:
         header_lines.append(" | ".join(["", *(label for _, _, label in groups)]))
     body = rows[len(leading) + len(header_rows) :]
     return RenderedTable(
-        tuple(header_lines), tuple(_render_row(row, groups) for row in body)
+        tuple(header_lines),
+        tuple(_render_row(row, groups, label_column) for row in body),
     )
 
 
@@ -233,17 +236,25 @@ def _groups(
     return groups, notes
 
 
-def _render_row(row: Sequence[Cell], groups: Sequence[tuple[int, int, str]]) -> str:
+def _is_label(column: int, text: str, first: int, label_column: int) -> bool:
+    """Left of the first output column: text, or anything in the label column."""
+
+    return column < first and (column == label_column or not is_value(text))
+
+
+def _render_row(
+    row: Sequence[Cell], groups: Sequence[tuple[int, int, str]], label_column: int
+) -> str:
     values = _glue(row)
     if not groups:
         return " | ".join(text for _, text in values)
     first = groups[0][0]
     label = " ".join(
-        c.text.strip() for c in row if c.column < first and not is_value(c.text)
+        c.text.strip() for c in row if _is_label(c.column, c.text, first, label_column)
     )
     slots = [""] * len(groups)
     for column, text in values:
-        if column < first and not is_value(text):
+        if _is_label(column, text, first, label_column):
             continue
         slot = _slot(groups, column)
         slots[slot] = f"{slots[slot]} {text}".strip()
@@ -253,8 +264,16 @@ def _render_row(row: Sequence[Cell], groups: Sequence[tuple[int, int, str]]) -> 
     return " | ".join(cells_out)
 
 
-def _first_value_column(rows: Sequence[Sequence[Cell]]) -> int:
-    columns = [c.column for row in rows for c in row if is_value(c.text)]
+def _first_value_column(rows: Sequence[Sequence[Cell]], label_column: int) -> int:
+    """First grid column holding a value, the label column excepted (exhibit
+    numbers such as `10.1` there are labels)."""
+
+    columns = [
+        c.column
+        for row in rows
+        for c in row
+        if c.column != label_column and is_value(c.text)
+    ]
     return min(columns) if columns else 1 << 30
 
 

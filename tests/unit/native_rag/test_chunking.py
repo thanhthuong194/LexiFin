@@ -389,3 +389,19 @@ def test_spanning_label_and_check_mark_cells() -> None:
     ]
     table = render_table(cells)
     assert table.rows == ("Current assets:", "Cash | 10 | 9 | X")
+
+
+def test_exhibit_numbers_stay_labels() -> None:
+    cells = [
+        Cell(1, 1, 1, "Exhibit"),
+        Cell(1, 2, 1, "Description"),
+        Cell(1, 3, 1, "Form"),
+        Cell(1, 4, 1, "Exhibit"),
+        Cell(2, 1, 1, "10.1"),
+        Cell(2, 2, 1, "Credit Agreement"),
+        Cell(2, 3, 1, "8-K"),
+        Cell(2, 4, 1, "10.2"),
+    ]
+    table = render_table(cells)
+    assert table.header == (" | Description | Form | Exhibit",)
+    assert table.rows == ("10.1 | Credit Agreement | 8-K | 10.2",)

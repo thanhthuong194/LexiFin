@@ -36,9 +36,43 @@ FILINGS = [
 # the same Silver now gives different chunks: bump the rules version.
 FIXTURE_CHUNKS = (
     1,
-    "70c7877df1be1ce3912e148b656bdcf4fa5793a630f49e6b67e7380a83f459dc",
+    "926445cfab71ee03c395c9d811954d2cc2fb2b9997629c66bd43267054494ec6",
 )
 PROCESSED_AT = datetime(2026, 11, 16, tzinfo=UTC)
+_ROWS = "".join(
+    f"<tr><td>Segment {name}</td><td>$</td><td>{a:,}</td><td>$</td><td>{b:,}</td>"
+    f"<td>{p}</td><td>%</td></tr>"
+    for name, a, b, p in [
+        ("Americas", 167045, 162560, 3),
+        ("Europe", 101328, 94294, 7),
+        ("Greater China", 66952, 72559, -8),
+        ("Japan", 25052, 24257, 3),
+        ("Rest of Asia Pacific", 30658, 29615, 4),
+    ]
+)
+_SENTENCES = " ".join(
+    f"Sentence {i} explains how demand for widgets changed in region {i}."
+    for i in range(70)
+)
+# An EX-99 with what the primary fixtures lack: a data table over 100 chars
+# (lead-in title, units row, `$`/`%` cells, a footnote) and a paragraph longer
+# than the cap (split by sentences).
+RESULTS = (
+    "EX-99.3",
+    "10",
+    "ex99-3.htm",
+    "QUARTERLY RESULTS",
+    (
+        "\n<html><body><p>Segment Results</p>"
+        "<p>Net sales by reportable segment were as follows:</p>"
+        "<table><tr><td></td><td colspan='2'>2025</td><td colspan='2'>2024</td>"
+        "<td colspan='2'>Change</td></tr>"
+        f"{_ROWS}</table>"
+        "<p>(1) Segments are managed on a geographic basis.</p>"
+        f"<p>{_SENTENCES}</p>"
+        "</body></html>\n"
+    ),
+)
 
 
 def _rows(data_dir: Path) -> list[dict[str, object]]:
@@ -58,7 +92,7 @@ def _digest(rows: list[dict[str, object]]) -> str:
 
 def test_chunks_from_fixture_silver(tmp_path: Path, write_sec_filing) -> None:
     for cik, form, accession, filed in FILINGS:
-        extra = (PRESS_RELEASE,) if form == "8-K" else ()
+        extra = (PRESS_RELEASE, RESULTS) if form == "8-K" else ()
         write_sec_filing(
             tmp_path,
             cik=cik,
@@ -72,7 +106,7 @@ def test_chunks_from_fixture_silver(tmp_path: Path, write_sec_filing) -> None:
 
     summary = run_native_rag_chunks(tmp_path, counter, PROCESSED_AT)
     assert summary.status == "completed", summary.problems
-    assert summary.documents_chunked == 4
+    assert summary.documents_chunked == 5
     rows = _rows(tmp_path)
     assert len(rows) == summary.chunks_written
     by_form = {row["form"] for row in rows}
@@ -81,6 +115,21 @@ def test_chunks_from_fixture_silver(tmp_path: Path, write_sec_filing) -> None:
     assert ("10-K", "mdna") in topics
     assert ("10-Q", "legal_proceedings") in topics
     assert ("8-K", "ex99") in topics
+    tables = [r for r in rows if r["chunk_kind"] == "table"]
+    assert len(tables) == 1
+    table = tables[0]
+    assert table["table_title"] == (
+        "Segment Results Net sales by reportable segment were as follows:"
+    )
+    assert str(table["text"]).splitlines()[:2] == [
+        " | 2025 | 2024 | Change",
+        "Segment Americas | $167,045 | $162,560 | 3%",
+    ]
+    assert str(table["text"]).endswith(
+        "(1) Segments are managed on a geographic basis."
+    )
+    parts = [r for r in rows if r["part"] is not None]
+    assert len(parts) >= 2 and {len(r["block_ids"]) for r in parts} == {1}
     # Two-column fixture tables are read as text rows.
     assert any("Revenue $1,000" in str(r["text"]) for r in rows if r["form"] == "10-K")
     for row in rows:
@@ -102,7 +151,7 @@ def test_chunks_from_fixture_silver(tmp_path: Path, write_sec_filing) -> None:
     assert (rerun.status, rerun.chunks_written, rerun.documents_skipped) == (
         "completed",
         0,
-        4,
+        5,
     )
     changed = run_native_rag_chunks(
         tmp_path, counter, PROCESSED_AT, params=ChunkParams(max_tokens=256)
