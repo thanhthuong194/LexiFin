@@ -1,0 +1,268 @@
+from __future__ import annotations
+
+import re
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+
+from src.data_pipeline.transforms.native_rag.noise import COMPANY_SUFFIX
+from src.data_pipeline.transforms.native_rag.sentences import split_sentences
+
+TITLE_MAX_CHARS = 120
+TITLE_MAX_WORDS = 12
+_LETTER = re.compile(r"[A-Za-z]")
+JOINER = "\n"
+
+
+def is_title_like(text: str) -> bool:
+    """A short standalone line that reads as a subheading.
+
+    At most 120 chars and 12 words, contains a letter, and does not end in
+    sentence or clause punctuation (`.`, `,`, `;`, `:`), except a company
+    suffix (`Amazon.com, Inc.`).
+    """
+
+    stripped = text.strip()
+    return (
+        0 < len(stripped) <= TITLE_MAX_CHARS
+        and len(stripped.split()) <= TITLE_MAX_WORDS
+        and bool(_LETTER.search(stripped))
+        and (stripped[-1] not in ".,;:" or bool(COMPANY_SUFFIX.search(stripped)))
+    )
+
+
+@dataclass(frozen=True)
+class Paragraph:
+    """One text block in reading order (a layout-table row counts as one)."""
+
+    block_id: str
+    text: str
+    title_like: bool
+
+
+@dataclass(frozen=True)
+class TextChunk:
+    """Body of one text chunk. `part`/`part_count` are set on the pieces of a
+    paragraph too long for one chunk (all from the same block)."""
+
+    text: str
+    block_ids: tuple[str, ...]
+    subheading: str | None
+    part: int | None = None
+    part_count: int | None = None
+
+
+@dataclass(frozen=True)
+class Sizing:
+    """How the chunker measures text.
+
+    `size` counts tokens of a body without special tokens; `fits` says whether
+    the embedded chunk (prefix with this subheading + body) is within the cap;
+    `budget` is the body tokens left beside the prefix of a subheading;
+    `split_tokens` cuts text into pieces of at most N tokens; `min_tokens` is
+    the size under which a unit is merged into a neighbour.
+    """
+
+    size: Callable[[str], int]
+    fits: Callable[[str | None, str], bool]
+    budget: Callable[[str | None], int]
+    split_tokens: Callable[[str, int], list[str]]
+    min_tokens: int
+
+
+@dataclass
+class _Unit:
+    subheading: str | None
+    paragraphs: list[Paragraph]
+
+    def text(self) -> str:
+        return JOINER.join(p.text for p in self.paragraphs)
+
+
+def chunk_paragraphs(
+    paragraphs: Sequence[Paragraph], subheading: str | None, sizing: Sizing
+) -> list[TextChunk]:
+    """Chunk one run of paragraphs of a section (no table inside the run).
+
+    1. Topic units: a title-like paragraph opens a unit and names its
+       subheading; paragraphs before the first title keep `subheading` (the
+       one in force where the run starts).
+    2. A unit under `min_tokens` merges whole into the next unit, else into
+       the previous one, when the result fits; otherwise it stays short. The
+       merged unit keeps the first unit's subheading. A unit that is only its
+       title line keeps the subheading in force before it.
+    3. A unit that fits is one chunk; a longer one is cut between paragraphs
+       into balanced parts; a paragraph that alone exceeds the budget is cut
+       by sentences (`_split_paragraph`) and never packed with neighbours.
+    """
+
+    units = _units(paragraphs, subheading)
+    units = _merge_short(units, sizing)
+    chunks: list[TextChunk] = []
+    in_force = subheading
+    for unit in units:
+        if unit.text().strip() == unit.subheading:
+            # A lone title line names nothing below it: keep the subheading
+            # in force instead of repeating the text as its own heading.
+            unit.subheading = in_force
+        in_force = unit.subheading
+        if sizing.fits(unit.subheading, unit.text()):
+            chunks.append(
+                TextChunk(
+                    unit.text(),
+                    tuple(p.block_id for p in unit.paragraphs),
+                    unit.subheading,
+                )
+            )
+            continue
+        chunks.extend(_split_unit(unit, sizing))
+    return chunks
+
+
+def _units(paragraphs: Sequence[Paragraph], subheading: str | None) -> list[_Unit]:
+    units: list[_Unit] = []
+    for paragraph in paragraphs:
+        if paragraph.title_like or not units:
+            name = paragraph.text.strip() if paragraph.title_like else subheading
+            units.append(_Unit(name, [paragraph]))
+        else:
+            units[-1].paragraphs.append(paragraph)
+    return units
+
+
+def _merge_short(units: list[_Unit], sizing: Sizing) -> list[_Unit]:
+    index = 0
+    while index < len(units):
+        unit = units[index]
+        if len(units) > 1 and sizing.size(unit.text()) < sizing.min_tokens:
+            if index + 1 < len(units):
+                merged = _Unit(
+                    unit.subheading, unit.paragraphs + units[index + 1].paragraphs
+                )
+                if sizing.fits(merged.subheading, merged.text()):
+                    units[index : index + 2] = [merged]
+                    continue
+            if index > 0:
+                previous = units[index - 1]
+                merged = _Unit(
+                    previous.subheading, previous.paragraphs + unit.paragraphs
+                )
+                if sizing.fits(merged.subheading, merged.text()):
+                    units[index - 1 : index + 1] = [merged]
+                    index -= 1
+                    continue
+        index += 1
+    return units
+
+
+def _split_unit(unit: _Unit, sizing: Sizing) -> list[TextChunk]:
+    budget = sizing.budget(unit.subheading)
+    chunks: list[TextChunk] = []
+    run: list[Paragraph] = []
+
+    def flush() -> None:
+        for group in _balanced(run, lambda p: p.text, sizing, unit.subheading):
+            chunks.append(
+                TextChunk(
+                    JOINER.join(p.text for p in group),
+                    tuple(p.block_id for p in group),
+                    unit.subheading,
+                )
+            )
+        run.clear()
+
+    for paragraph in unit.paragraphs:
+        if sizing.size(paragraph.text) > budget or not sizing.fits(
+            unit.subheading, paragraph.text
+        ):
+            flush()
+            chunks.extend(_split_paragraph(paragraph, unit.subheading, sizing))
+        else:
+            run.append(paragraph)
+    flush()
+    return chunks
+
+
+def _balanced[T](
+    items: Sequence[T],
+    text_of: Callable[[T], str],
+    sizing: Sizing,
+    subheading: str | None,
+) -> list[list[T]]:
+    """Cut items (each fitting alone) into the fewest contiguous groups that
+    fit, as even as possible: the smallest largest group for that count."""
+
+    if not items:
+        return []
+    sizes = [sizing.size(text_of(item)) + 1 for item in items]
+    parts = max(1, -(-sum(sizes) // max(sizing.budget(subheading), 1)))
+    while True:
+        groups = _partition(items, sizes, parts)
+        if all(
+            sizing.fits(subheading, JOINER.join(text_of(i) for i in g)) for g in groups
+        ):
+            return groups
+        if parts >= len(items):
+            return [[item] for item in items]
+        parts += 1
+
+
+def _partition[T](
+    items: Sequence[T], sizes: Sequence[int], parts: int
+) -> list[list[T]]:
+    """Greedy cut under the smallest bound that yields at most `parts` groups."""
+
+    def greedy(bound: int) -> list[list[T]]:
+        groups: list[list[T]] = [[]]
+        total = 0
+        for item, size in zip(items, sizes, strict=True):
+            if groups[-1] and total + size > bound:
+                groups.append([])
+                total = 0
+            groups[-1].append(item)
+            total += size
+        return groups
+
+    low, high = max(sizes), sum(sizes)
+    while low < high:
+        middle = (low + high) // 2
+        if len(greedy(middle)) <= parts:
+            high = middle
+        else:
+            low = middle + 1
+    return greedy(low)
+
+
+def _split_paragraph(
+    paragraph: Paragraph, subheading: str | None, sizing: Sizing
+) -> list[TextChunk]:
+    """Cut a too-long paragraph at sentence boundaries into balanced parts.
+
+    Each part after the first starts with the previous part's last sentence
+    (context for its vector); a sentence longer than half the budget is cut
+    by tokens. Parts share the block and carry `part`/`part_count`.
+    """
+
+    half = max(sizing.budget(subheading) // 2, 1)
+    pieces: list[str] = []
+    for sentence in split_sentences(paragraph.text):
+        if sizing.size(sentence) > half:
+            pieces.extend(sizing.split_tokens(sentence, half))
+        else:
+            pieces.append(sentence)
+    sizes = [sizing.size(piece) for piece in pieces]
+    parts = max(2, -(-sum(sizes) // half))
+    while True:
+        groups = _partition(pieces, sizes, min(parts, len(pieces)))
+        texts = [
+            ((groups[i - 1][-1] if i else "") + "".join(group)).strip()
+            for i, group in enumerate(groups)
+        ]
+        if parts >= len(pieces) or all(sizing.fits(subheading, t) for t in texts):
+            break
+        parts += 1
+    if len(texts) == 1:
+        return [TextChunk(texts[0], (paragraph.block_id,), subheading)]
+    return [
+        TextChunk(text, (paragraph.block_id,), subheading, position, len(texts))
+        for position, text in enumerate(texts, start=1)
+    ]

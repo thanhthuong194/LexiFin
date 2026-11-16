@@ -27,6 +27,7 @@ from pyiceberg.transforms import Transform
 from pyiceberg.types import NestedField
 
 SILVER_CATALOG_NAME = "lexifin_silver"
+GOLD_CATALOG_NAME = "lexifin_gold"
 # Iceberg reserves partition field IDs from 1000 upwards.
 _FIRST_PARTITION_FIELD_ID = 1000
 # Table property holding the version of the rules a table's rows were built
@@ -49,6 +50,35 @@ def silver_catalog_paths(data_dir: Path) -> tuple[Path, Path]:
     return data_dir / "_catalog" / "silver.db", data_dir / "silver"
 
 
+def gold_catalog_paths(data_dir: Path) -> tuple[Path, Path]:
+    """Return the Gold catalog database and default warehouse under `data_dir`."""
+
+    return data_dir / "_catalog" / "gold.db", data_dir / "gold"
+
+
+def _open_catalog(name: str, paths: tuple[Path, Path]) -> SqlCatalog:
+    database_path, warehouse_path = paths
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    warehouse_path.mkdir(parents=True, exist_ok=True)
+    return SqlCatalog(
+        name, uri=f"sqlite:///{database_path}", warehouse=str(warehouse_path)
+    )
+
+
+def _open_catalog_read_only(
+    name: str, layer: str, paths: tuple[Path, Path]
+) -> SqlCatalog:
+    database_path, warehouse_path = paths
+    for path in (database_path, warehouse_path):
+        if not path.exists():
+            raise FileNotFoundError(f"{layer} catalog path is missing: {path}")
+    return SqlCatalog(
+        name,
+        uri=f"sqlite:///file:{quote(str(database_path))}?mode=ro&uri=true",
+        warehouse=str(warehouse_path),
+    )
+
+
 def open_silver_catalog(data_dir: Path) -> SqlCatalog:
     """Open (creating if needed) the local SQLite catalog of the Silver layer.
 
@@ -57,14 +87,7 @@ def open_silver_catalog(data_dir: Path) -> SqlCatalog:
     its database connections are closed; tables need it open to commit.
     """
 
-    database_path, warehouse_path = silver_catalog_paths(data_dir)
-    database_path.parent.mkdir(parents=True, exist_ok=True)
-    warehouse_path.mkdir(parents=True, exist_ok=True)
-    return SqlCatalog(
-        SILVER_CATALOG_NAME,
-        uri=f"sqlite:///{database_path}",
-        warehouse=str(warehouse_path),
-    )
+    return _open_catalog(SILVER_CATALOG_NAME, silver_catalog_paths(data_dir))
 
 
 def open_silver_catalog_read_only(data_dir: Path) -> SqlCatalog:
@@ -76,22 +99,34 @@ def open_silver_catalog_read_only(data_dir: Path) -> SqlCatalog:
     `open_silver_catalog`.
     """
 
-    database_path, warehouse_path = silver_catalog_paths(data_dir)
-    for path in (database_path, warehouse_path):
-        if not path.exists():
-            raise FileNotFoundError(f"Silver catalog path is missing: {path}")
-    return SqlCatalog(
-        SILVER_CATALOG_NAME,
-        uri=f"sqlite:///file:{quote(str(database_path))}?mode=ro&uri=true",
-        warehouse=str(warehouse_path),
+    return _open_catalog_read_only(
+        SILVER_CATALOG_NAME, "Silver", silver_catalog_paths(data_dir)
     )
 
 
-def silver_table_location(data_dir: Path, identifier: str) -> Path:
-    """Return `<data_dir>/silver/<namespace>/<table>` for a Silver table."""
+def open_gold_catalog(data_dir: Path) -> SqlCatalog:
+    """Open (creating if needed) the Gold catalog, `<data_dir>/_catalog/gold.db`.
+
+    Gold has its own catalog so purging or rebuilding a Gold table never
+    touches the Silver catalog. Warehouse: `<data_dir>/gold`.
+    """
+
+    return _open_catalog(GOLD_CATALOG_NAME, gold_catalog_paths(data_dir))
+
+
+def open_gold_catalog_read_only(data_dir: Path) -> SqlCatalog:
+    """Open the existing Gold catalog read-only (see `open_silver_catalog_read_only`)."""
+
+    return _open_catalog_read_only(
+        GOLD_CATALOG_NAME, "Gold", gold_catalog_paths(data_dir)
+    )
+
+
+def table_location(data_dir: Path, identifier: str, layer: str = "silver") -> Path:
+    """Return `<data_dir>/<layer>/<namespace>/<table>` for a table of a layer."""
 
     namespace, table_name = identifier.rsplit(".", maxsplit=1)
-    return data_dir / "silver" / namespace / table_name
+    return data_dir / layer / namespace / table_name
 
 
 def _iceberg_schema(arrow_schema: pa.Schema) -> Schema:
@@ -224,6 +259,8 @@ class SilverTableSpec:
     arrow_schema: pa.Schema
     partition_by: tuple[PartitionColumn, ...] = ()
     rules_version: int = 1
+    # Directory under `data_dir` holding the table's files: "silver" or "gold".
+    layer: str = "silver"
 
     def open(self, catalog: Catalog, data_dir: Path) -> tuple[Table, bool]:
         """Load the table, or create it under `data_dir` from this definition;
@@ -242,7 +279,7 @@ class SilverTableSpec:
             table = catalog.create_table(
                 self.identifier,
                 schema=schema,
-                location=str(silver_table_location(data_dir, self.identifier)),
+                location=str(table_location(data_dir, self.identifier, self.layer)),
                 partition_spec=_partition_spec(schema, self.partition_by),
                 properties={RULES_VERSION_PROPERTY: str(self.rules_version)},
             )

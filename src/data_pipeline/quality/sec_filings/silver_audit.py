@@ -52,8 +52,8 @@ from src.data_pipeline.storage.iceberg import (
     current_snapshot_id,
     open_silver_catalog_read_only,
     silver_catalog_paths,
-    silver_table_location,
     snapshot_total,
+    table_location,
 )
 from src.data_pipeline.storage.sec_filings.documents import DOCUMENTS_TABLE
 from src.data_pipeline.storage.sec_filings.filings import FILINGS_TABLE
@@ -198,7 +198,7 @@ def _check_definitions(
             "the table lives at <data_dir>/silver/<namespace>/<table>",
         ) as run:
             run.rows_checked = 1
-            expected = silver_table_location(data_dir, identifier)
+            expected = table_location(data_dir, identifier)
             if Path(table.location()) != expected:
                 run.found(identifier, f"{table.location()} is not {expected}")
         valid = check_data_files(table, identifier, report) and valid

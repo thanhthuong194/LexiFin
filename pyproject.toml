@@ -19,6 +19,7 @@ dependencies = [
     "zstandard>=0.25.0",
     "qdrant-client>=1.20.0",
     "pytz>=2026.6",
+    "tokenizers>=0.23.3",
 ]
 
 [tool.pytest]

@@ -1,70 +1,82 @@
 <!doctype html>
-<html lang="vi">
+<html lang="vi" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Silver và RAG</title>
-<meta name="description" content="Cải thiện Silver sau báo cáo scale 27/10 và kế hoạch RAG với kết quả dự kiến ở 500 công ty.">
+<meta name="description" content="Cải thiện Silver sau báo cáo scale 27/10, kế hoạch RAG và GraphRAG với kết quả dự kiến ở 500 công ty.">
 <style>
 :root {
   color-scheme: light;
-  --bg: #f6f5f2;
-  --surface-1: #fcfcfb;
-  --surface-2: #f0efec;
-  --border: #e2e0da;
-  --grid: #e8e6e1;
-  --text-primary: #0b0b0b;
-  --text-secondary: #52514e;
-  --text-muted: #77756f;
-  --accent: #2a78d6;
-  --series-1: #2a78d6;
-  --series-2: #eb6834;
-  --series-3: #1baf7a;
-  --series-4: #eda100;
-  --series-old: #a9a79f;
-  --good: #0ca30c;
-  --warning: #fab219;
-  --serious: #ec835a;
-  --critical: #d03b3b;
-  --code-bg: #f0efec;
+  --bg: #ffffff;
+  --surface-1: #ffffff;
+  --surface-2: #f4f7fb;
+  --border: #e3e8ef;
+  --grid: #edf1f6;
+  --text-primary: #111827;
+  --text-secondary: #4b5563;
+  --text-muted: #6b7280;
+  --accent: #2563eb;
+  --series-1: #2563eb;
+  --series-2: #f97316;
+  --series-3: #10b981;
+  --series-4: #f59e0b;
+  --series-old: #cbd5e1;
+  --tint-1: #eff6ff;
+  --tint-2: #fff7ed;
+  --tint-3: #ecfdf5;
+  --tint-4: #fffbeb;
+  --good: #16a34a;
+  --warning: #f59e0b;
+  --serious: #f97316;
+  --critical: #dc2626;
+  --code-bg: #eef2f7;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #121211;
-    --surface-1: #1a1a19;
-    --surface-2: #232321;
-    --border: #34342f;
-    --grid: #2c2c29;
-    --text-primary: #f0efec;
-    --text-secondary: #c3c2b7;
-    --text-muted: #96958c;
-    --accent: #3987e5;
-    --series-1: #3987e5;
-    --series-2: #d95926;
-    --series-3: #199e70;
-    --series-4: #c98500;
-    --series-old: #6c6b65;
-    --code-bg: #232321;
+    --bg: #0f1115;
+    --surface-1: #171a21;
+    --surface-2: #1e222b;
+    --border: #2d323d;
+    --grid: #252a33;
+    --text-primary: #f3f4f6;
+    --text-secondary: #c7cbd3;
+    --text-muted: #9aa1ad;
+    --accent: #60a5fa;
+    --series-1: #60a5fa;
+    --series-2: #fb923c;
+    --series-3: #34d399;
+    --series-4: #fbbf24;
+    --series-old: #4b5563;
+    --tint-1: #172238;
+    --tint-2: #2b1d12;
+    --tint-3: #11281f;
+    --tint-4: #2a2312;
+    --code-bg: #1e222b;
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #121211;
-  --surface-1: #1a1a19;
-  --surface-2: #232321;
-  --border: #34342f;
-  --grid: #2c2c29;
-  --text-primary: #f0efec;
-  --text-secondary: #c3c2b7;
-  --text-muted: #96958c;
-  --accent: #3987e5;
-  --series-1: #3987e5;
-  --series-2: #d95926;
-  --series-3: #199e70;
-  --series-4: #c98500;
-  --series-old: #6c6b65;
-  --code-bg: #232321;
+  --bg: #0f1115;
+  --surface-1: #171a21;
+  --surface-2: #1e222b;
+  --border: #2d323d;
+  --grid: #252a33;
+  --text-primary: #f3f4f6;
+  --text-secondary: #c7cbd3;
+  --text-muted: #9aa1ad;
+  --accent: #60a5fa;
+  --series-1: #60a5fa;
+  --series-2: #fb923c;
+  --series-3: #34d399;
+  --series-4: #fbbf24;
+  --series-old: #4b5563;
+  --tint-1: #172238;
+  --tint-2: #2b1d12;
+  --tint-3: #11281f;
+  --tint-4: #2a2312;
+  --code-bg: #1e222b;
 }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
@@ -84,14 +96,14 @@ li { margin: 4px 0; }
 code { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; color: var(--text-primary); overflow-wrap: anywhere; }
 .lede { font-size: 16px; max-width: 760px; }
 .meta { color: var(--text-muted); font-size: 13px; }
-.qnum { display: inline-block; font-size: 12px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: .06em; }
+.qnum { display: inline-block; font-size: 12px; font-weight: 650; color: var(--accent); background: var(--tint-1); padding: 2px 10px; border-radius: 999px; text-transform: uppercase; letter-spacing: .06em; }
 nav.toc { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 20px 0 0; }
 nav.toc a { font-size: 13px; color: var(--text-secondary); text-decoration: none; border: 1px solid var(--border); background: var(--surface-1); padding: 4px 10px; border-radius: 999px; }
 nav.toc a:hover { color: var(--text-primary); border-color: var(--text-muted); }
 .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin: 16px 0; }
 .card h3 { margin-top: 0; }
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 24px 0 8px; }
-.kpi { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.kpi { background: var(--tint-1); border: 1px solid var(--border); border-top: 3px solid var(--accent); border-radius: 10px; padding: 14px; }
 .kpi .v { font-size: 26px; font-weight: 650; line-height: 1.15; font-variant-numeric: tabular-nums; }
 .kpi .l { font-size: 12.5px; color: var(--text-secondary); margin-top: 4px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -122,7 +134,9 @@ summary { cursor: pointer; color: var(--text-muted); font-size: 13px; }
 .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 @media (max-width: 760px) { .flow { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 420px) { .flow { grid-template-columns: 1fr; } }
-.lane { background: var(--surface-2); border-radius: 8px; padding: 10px; }
+.lane { background: var(--tint-1); border-radius: 8px; padding: 10px; }
+.lane:nth-child(2) { background: var(--tint-2); } .lane:nth-child(3) { background: var(--tint-3); } .lane:nth-child(4) { background: var(--tint-4); }
+.lane:nth-child(2) .step { border-left-color: var(--series-2); } .lane:nth-child(3) .step { border-left-color: var(--series-3); } .lane:nth-child(4) .step { border-left-color: var(--series-4); }
 .lane h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
 .step { background: var(--surface-1); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 6px 8px; margin: 6px 0; font-size: 12.5px; color: var(--text-secondary); }
 .step b { display: block; color: var(--text-primary); font-size: 13px; }
@@ -148,13 +162,23 @@ pre { margin: 0; background: var(--code-bg); border-radius: 6px; padding: 10px; 
 .lvl .h { font-weight: 650; font-size: 15px; }
 .lvl .s { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
 .lvl ul { padding-left: 16px; font-size: 12.5px; margin: 0; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 12px 0; }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; font-size: 13px; color: var(--text-secondary); }
+.tile b { display: block; color: var(--text-primary); font-size: 14px; margin-bottom: 2px; }
+.tile.c2 { border-left-color: var(--series-2); } .tile.c3 { border-left-color: var(--series-3); } .tile.c4 { border-left-color: var(--series-4); }
+.yes { color: var(--good); font-weight: 650; } .no { color: var(--critical); font-weight: 650; }
+.steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; counter-reset: st; }
+@media (max-width: 760px) { .steps { grid-template-columns: 1fr; } }
+.steps div { background: var(--tint-3); border-radius: 8px; padding: 10px; font-size: 12.5px; color: var(--text-secondary); }
+.steps div b { display: block; color: var(--text-primary); font-size: 13px; }
+.note { font-size: 12.5px; color: var(--text-muted); }
 footer { margin-top: 56px; color: var(--text-muted); font-size: 12.5px; }
 </style>
 </head>
 <body>
 <main>
 <header>
-  <h1>Silver: cải thiện sau báo cáo scale, và RAG</h1>
+  <h1>Cải thiện thời gian xử lý dữ liệu, RAG và GraphRAG</h1>
   <div class="kpis">
     <div class="kpi"><div class="v">18,4 → 4,8 h</div><div class="l">Integrity audit 500 công ty</div></div>
     <div class="kpi"><div class="v">0 FAIL</div><div class="l">268 check trên 323 triệu row</div></div>
@@ -162,7 +186,7 @@ footer { margin-top: 56px; color: var(--text-muted); font-size: 12.5px; }
     <div class="kpi"><div class="v">51 → 0</div><div class="l">văn bản không nhận được section</div></div>
   </div>
   <nav class="toc">
-    <a href="#a1">A1 · Audit</a><a href="#a2">A2 · Thời gian & RAM</a><a href="#a3">A3 · Chất lượng dữ liệu</a><a href="#b1">B1 · Kiến trúc RAG</a><a href="#b2">B2 · Thông số</a><a href="#b3">B3 · Kết quả</a>
+    <a href="#a1">A1 · Audit</a><a href="#a2">A2 · Thời gian & RAM</a><a href="#a3">A3 · Chất lượng dữ liệu</a><a href="#b1">B1 · Kiến trúc RAG</a><a href="#b2">B2 · Thông số</a><a href="#b3">B3 · Kết quả</a><a href="#b4">B4 · Cải tiến chunking</a><a href="#c1">C1 · GraphRAG flow</a><a href="#c2">C2 · Lớp 1</a><a href="#c3">C3 · Lớp 2</a><a href="#c4">C4 · Phần cứng & LLM</a>
   </nav>
 </header>
 
@@ -196,7 +220,6 @@ footer { margin-top: 56px; color: var(--text-muted); font-size: 12.5px; }
     <div class="legend" id="lg-run"></div>
     <div class="chart" id="c-run"></div>
   </div>
-  <p><strong>Tối ưu tiếp theo</strong> (theo thời gian đo được): audit incremental chỉ kiểm phần mới (−4,8 h), đánh dấu parent không có con để khỏi parse lại (−2 h), song song hoá tables/links (CPU đang rảnh), Bronze trên SSD.</p>
 </section>
 
 <section id="a3">
@@ -204,8 +227,7 @@ footer { margin-top: 56px; color: var(--text-muted); font-size: 12.5px; }
   <h2>Chất lượng dữ liệu</h2>
   <ul>
     <li><strong>EX-99:</strong> +25.188 thông cáo 8-K, 2,05 triệu block, 345 nghìn bảng, 51,6 triệu ô; row cũ không đổi.</li>
-    <li><strong>Nhận diện section</strong> (cần cho chunk RAG): sửa 4 mẫu lỗi thật (tiêu đề là link, 10-Q thiếu PART II, mục lục viết như tiêu đề, 8-K đặt Item trong bảng). Trên 508 văn bản: root-only 51 → 0, mã lặp 153 → 15, 304 văn bản đối chứng không hỏng.</li>
-    <li><strong>Kiểm soát:</strong> <code>rules_version</code> cho từng bảng, golden test 19 bảng, 491 test, coverage 95%. Silver 500 công ty đang được dựng lại theo quy tắc section mới.</li>
+    <li><strong>Nhận diện section</strong>: sửa 4 mẫu lỗi (tiêu đề là link, 10-Q thiếu PART II, mục lục viết như tiêu đề, 8-K đặt Item trong bảng). Trên 508 văn bản: root-only 51 → 0, mã lặp 153 → 15, 304 văn bản đối chứng không hỏng.</li>
   </ul>
 </section>
 
@@ -219,10 +241,10 @@ footer { margin-top: 56px; color: var(--text-muted); font-size: 12.5px; }
         <div class="step"><b>tables · cells · xbrl_facts</b>bảng, concept của ô</div>
       </div>
       <div class="lane"><h4>Gold</h4>
-        <div class="step"><b>gold.rag_chunks</b>chunk + metadata + lineage, audit và version như Silver</div>
+        <div class="step"><b>gold.rag_chunks</b>chunk + metadata + lineage, audit và version</div>
       </div>
       <div class="lane"><h4>Index</h4>
-        <div class="step"><b>Qwen3-Embedding-0.6B</b>embed batch trên Kaggle/Colab</div>
+        <div class="step"><b>Qwen3-Embedding-0.6B</b></div>
         <div class="step"><b>Qdrant</b>dense + BM25</div>
       </div>
       <div class="lane"><h4>Truy vấn</h4>
@@ -245,7 +267,7 @@ footer { margin-top: 56px; color: var(--text-muted); font-size: 12.5px; }
         <tr><td>Ngữ cảnh đầu chunk</td><td><code>công ty · form · kỳ · section</code></td><td>500 công ty có văn bản giống nhau; thiếu thì truy hồi nhầm công ty</td></tr>
         <tr><td>Metadata lọc</td><td>cik, form, năm tài chính, item, loại văn bản</td><td>“Apple, 10-K 2024” lọc trước khi tìm vector</td></tr>
         <tr><td>Embedding</td><td>Qwen3-Embedding-0.6B, 1024 chiều, tối đa 32k token</td><td>chạy được trên GPU miễn phí và CPU khi truy vấn</td></tr>
-        <tr><td>Index</td><td>Qdrant HNSW (m = 16), vector int8 trong RAM, bản gốc trên đĩa</td><td>vừa RAM 15 GB của homepc</td></tr>
+        <tr><td>Index</td><td>Qdrant HNSW (m = 16), vector int8 trong RAM, bản gốc trên đĩa</td><td>vừa RAM</td></tr>
         <tr><td>Truy hồi</td><td>dense top-50 + BM25 top-50 → RRF → rerank → top-8</td><td>BM25 bắt tên riêng, mã concept; dense bắt diễn đạt khác</td></tr>
         <tr><td>Sinh câu trả lời</td><td>Gemini, ngữ cảnh 8 chunk (~4k token), bắt buộc trích dẫn</td><td>trả lời kiểm chứng được</td></tr>
         <tr><td>Baseline so sánh</td><td>chunk cố định 512 token, chỉ dense</td><td>chứng minh lợi ích của chunk theo cấu trúc và hybrid</td></tr>
@@ -278,6 +300,126 @@ footer { margin-top: 56px; color: var(--text-muted); font-size: 12.5px; }
         <tr><td rowspan="3">Hệ thống</td><td>Độ trễ truy hồi p95 (không tính LLM)</td><td class="n">&lt; 3 s</td><td>embed câu hỏi + Qdrant + rerank 50 chunk</td></tr>
         <tr><td>Độ trễ trả lời đầy đủ p95</td><td class="n">&lt; 10 s</td><td>cộng Gemini ~4k token vào</td></tr>
         <tr><td>Dựng index Qdrant</td><td class="n">~1 h</td><td>upsert 2,5 tr vector + BM25</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="b4">
+  <span class="qnum">B4</span>
+  <h2>Cải tiến chunking sau khảo sát dữ liệu</h2>
+  <p>Đo trên 5 công ty.</p>
+
+  <h3>Bảng phải dựng lại từ ô</h3>
+  <div class="ba">
+    <div><p class="cap">Hiện tại: không rõ số thuộc năm nào</p><pre>Three Months Ended March 31,
+2025
+2026
+Online stores (1)
+$
+57,407
+$
+64,254
+…</pre></div>
+    <div class="arrow">→</div>
+    <div><p class="cap">Sau cải tiến: có tiền tố ngữ cảnh</p><pre>AMAZON COM INC | 10-Q | FY2026 Q1 | Item 1 | Table: Net sales…
+
+| | Q1 2025 | Q1 2026 |
+| Online stores (1) | $57,407 | $64,254 |
+| Physical stores (2) | 5,533 | 5,785 |
+…</pre></div>
+  </div>
+
+  <h3>Thay đổi chính so với B2</h3>
+  <div class="tiles">
+    <div class="tile"><b>Cắt theo cấu trúc</b>section → heading → đoạn; 512 token chỉ là trần; section dài thì chia đều</div>
+    <div class="tile"><b>Lọc nhiễu</b>số trang, header lặp, mục lục, bảng rỗng</div>
+    <div class="tile c2"><b>Bảng</b>dựng từ ô, kèm tiêu đề và chú thích; bảng lớn thì lặp hàng tiêu đề</div>
+    <div class="tile c2"><b>Tiền tố mọi chunk</b>công ty · form · năm/quý tài chính (XBRL) · section</div>
+    <div class="tile c3"><b>Metadata lọc</b>section_topic chung (MD&amp;A, Risk…), item 8-K, kỳ, ticker, ngành</div>
+    <div class="tile c3"><b>Parent–child</b>tìm trên chunk nhỏ, đưa đoạn lân cận cho LLM</div>
+    <div class="tile c4"><b>Gộp boilerplate</b>khi truy hồi, theo hash của text</div>
+  </div>
+
+  <h3>Thí nghiệm chọn phương án (cùng bộ ~300 câu hỏi)</h3>
+  <div class="card tablewrap">
+    <table>
+      <tbody>
+        <tr><td><b>A</b> cắt cố định 512 token</td><td><b>B</b> theo cấu trúc + tiền tố (chính)</td><td><b>B+O</b> B + overlap</td></tr>
+        <tr><td><b>C</b> B + ngữ cảnh do LLM viết</td><td><b>D</b> LLM viết lại thành mệnh đề</td><td><b>E</b> semantic chunking</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Cải thiện</h3>
+  <div class="card">
+    <div class="legend" id="lg-improve"></div>
+    <div class="chart" id="c-improve"></div>
+  </div>
+</section>
+
+<section id="c1">
+  <span class="qnum">C1</span>
+  <h2>GraphRAG</h2>
+  <div class="card">
+    <div class="flow">
+      <div class="lane"><h4>Nguồn</h4>
+        <div class="step"><b>Silver</b>filings, sections, XBRL facts / dimensions / relationships</div>
+        <div class="step"><b>native_rag.chunks</b>text đã chunk, có metadata</div>
+      </div>
+      <div class="lane"><h4>Dựng đồ thị</h4>
+        <div class="step"><b>Lớp 1 · tất định</b>quan hệ có sẵn trong Silver, không LLM</div>
+        <div class="step"><b>Lớp 2 · LLM trích</b>trích → bổ sung → kiểm chứng → hợp nhất thực thể</div>
+        <div class="step"><b>Lớp 3 · tóm tắt</b>theo ngành × chủ đề × năm</div>
+      </div>
+      <div class="lane"><h4>Lưu trữ</h4>
+        <div class="step"><b>gold/graph_rag</b>Iceberg, nguồn gốc: entities, claims, edges, summaries</div>
+        <div class="step"><b>Neo4j</b>index truy vấn, nạp lại được từ Gold</div>
+      </div>
+      <div class="lane"><h4>Trả lời</h4>
+        <div class="step"><b>Định tuyến</b>đoạn văn → Qdrant · số liệu → SQL · quan hệ → Cypher · tổng hợp → tóm tắt</div>
+        <div class="step"><b>LLM</b>trả lời kèm trích dẫn chunk</div>
+      </div>
+    </div>
+  </div>
+  <div class="tiles">
+    <div class="tile"><b>Có sẵn dạng cấu trúc thì không qua LLM</b>XBRL, header SEC, mã item 8-K</div>
+    <div class="tile c2"><b>Mỗi quan hệ phải có bằng chứng</b>câu trích nguyên văn + <code>chunk_id</code>, kiểm tra tự động</div>
+    <div class="tile c3"><b>Schema cố định</b>LLM không tự đặt loại quan hệ hay tên rủi ro</div>
+    <div class="tile c4"><b>Gắn thời gian</b>mỗi khẳng định gắn với filing và năm tài chính</div>
+  </div>
+</section>
+
+<section id="c2">
+  <span class="qnum">C2</span>
+  <h2>Lớp 1: đồ thị tất định từ Silver</h2>
+  <div class="card tablewrap">
+    <table>
+      <thead><tr><th>Quan hệ</th><th>Ví dụ</th><th>Nguồn Silver</th></tr></thead>
+      <tbody>
+        <tr><td>Công ty → filing → section</td><td>Apple → 10-K FY2025 → Item 1A</td><td><code>filings</code>, <code>filing_entities</code>, <code>sections</code></td></tr>
+        <tr><td>Phân khúc kinh doanh (kèm doanh thu)</td><td>Apple → iPhone, doanh thu FY2025</td><td><code>xbrl_dimensions</code> + <code>xbrl_facts</code></td></tr>
+        <tr><td>Thị trường địa lý (kèm doanh thu)</td><td>Apple → Greater China</td><td><code>xbrl_dimensions</code> + <code>xbrl_facts</code></td></tr>
+        <tr><td>Khách hàng lớn</td><td>công ty → khách hàng chiếm 12% doanh thu</td><td>fact <code>ConcentrationRiskPercentage</code></td></tr>
+        <tr><td>Chỉ tiêu tài chính chính theo năm</td><td>Revenue, NetIncome, Assets (30–50 chỉ tiêu)</td><td><code>xbrl_facts</code>, <code>xbrl_contexts</code></td></tr>
+        <tr><td>Cấu trúc chỉ tiêu (gộp trùng giữa filing)</td><td>Revenue = Products + Services</td><td><code>xbrl_relationships</code></td></tr>
+        <tr><td>Sự kiện 8-K theo mã item</td><td>5.02 thay đổi lãnh đạo, 2.01 hoàn tất M&amp;A</td><td><code>sections</code></td></tr>
+        <tr><td>Dẫn chiếu giữa filing</td><td>10-K → hợp đồng tín dụng trong 8-K cũ</td><td><code>document_links</code>, <code>exhibits</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="c3">
+  <span class="qnum">C3</span>
+  <h2>Lớp 2: LLM trích thực thể và quan hệ</h2>
+  <h3>Phạm vi và schema</h3>
+  <div class="card tablewrap">
+    <table>
+      <tbody>
+        <tr><td><b>Đọc</b></td><td>10-K Item 1, 1A, 3, 7, 7A, 8; 10-Q MD&amp;A, Legal, Risk; mọi item 8-K và thông cáo EX-99.</td></tr>
+        <tr><td><b>Node</b></td><td>Company (CIK) · Person · Product/Segment · Geography · RiskCategory (danh mục cố định ~50 loại) · Event (theo mã item 8-K) · Agreement</td></tr>
+        <tr><td><b>Quan hệ</b></td><td>SUPPLIER_OF · CUSTOMER_OF · COMPETES_WITH · PARTNER_OF · SUBSIDIARY_OF · ACQUIRED / DIVESTED · OFFICER_OF / DIRECTOR_OF · OPERATES_IN · EXPOSED_TO · PARTY_TO · LENDER_TO</td></tr>
       </tbody>
     </table>
   </div>
@@ -425,7 +567,7 @@ const kindColor = { n: '--series-1', v: '--series-2', i: '--critical' };
 const kindName = { n: 'Việc mới', v: 'Kiểm lại, không thêm row', i: 'Integrity audit' };
 
 function render() {
-  legend('lg-audit', [['trước khi sửa', '--series-2'], ['ssau khi sửa', '--series-1']]);
+  legend('lg-audit', [['trước khi sửa', '--series-2'], ['sau khi sửa', '--series-1']]);
   xyLines('c-audit', [
     { name: '03/11, trước khi sửa', color: '--series-2', pts: audit03, end: 'fail', label: 'OOM · check 192', labelDx: -10, labelDy: -10, anchor: 'end' },
     { name: '05/11, sau khi sửa', color: '--series-1', pts: audit05, label: '268', labelDx: -8, labelDy: -10, anchor: 'end' },
@@ -434,6 +576,11 @@ function render() {
   hbarsKind('c-run', run.filter(r => r[1] >= 600));
   hbars('c-recall', ['Baseline: cắt cố định, dense', 'BM25', 'Dense', 'Hybrid', 'Hybrid + rerank'], [{ name: 'Recall@10', color: '--series-1', values: [0.55, 0.55, 0.65, 0.75, 0.85] }], { aria: 'Recall@10 kỳ vọng', barH: 14, labelW: 170, max: 1, tick: t => fmt(t, 2), vfmt: v => fmt(v, 2) });
   colorBars('c-recall', ['--series-old', '--series-1', '--series-1', '--series-1', '--series-1']);
+  legend('lg-improve', [['Kế hoạch B3', '--series-old'], ['Cải tiến', '--series-1']]);
+  hbars('c-improve', ['Recall@10', 'MRR@10', 'Trả lời đúng', 'Faithfulness'], [
+    { name: 'Kế hoạch B3', color: '--series-old', values: [0.85, 0.70, 0.80, 0.90] },
+    { name: 'Cải tiến', color: '--series-1', values: [0.89, 0.775, 0.875, 0.92] },
+  ], { aria: 'Chỉ số kế hoạch và cải tiến', barH: 12, labelW: 120, max: 1, tick: t => fmt(t, 2), vfmt: v => fmt(v, 3) });
 }
 
 /* One bar per stage, colored by kind */

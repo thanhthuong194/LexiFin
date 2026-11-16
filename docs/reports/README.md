@@ -4,7 +4,8 @@ Trả lời 6 câu hỏi: dữ liệu được chuẩn hoá từ raw ra sao, l�
 
 - `silver_scale_report.html`: báo cáo đầy đủ, biểu đồ tương tác. Mở trực tiếp bằng trình duyệt, không cần mạng.
 - `silver_scale_slides.html`: 14 slide kèm ghi chú thuyết trình (font tải từ Google Fonts, offline thì dùng font hệ thống).
-- `silver_improvements_report.html` (07/11/2026): A. cải thiện sau báo cáo scale trên Silver 500 công ty (audit 18,4 → 4,8 h, sửa OOM, EX-99, section); B. kế hoạch RAG: thông số kỹ thuật và kết quả dự kiến (ước tính, chưa đo).
+- `silver_improvements_report.html` (07/11/2026): A. cải thiện sau báo cáo scale trên Silver 500 công ty (audit 18,4 → 4,8 h, sửa OOM, EX-99, section); B. kế hoạch RAG: thông số kỹ thuật và kết quả dự kiến (ước tính, chưa đo). B4 (13/11/2026): cải tiến chunking sau khảo sát dữ liệu, bộ thí nghiệm A–E, chỉ số dự kiến. C (13/11/2026): kế hoạch GraphRAG (3 lớp, Neo4j, đánh giá, lộ trình, kết quả dự kiến).
+- `graphrag.md` (13/11/2026): GraphRAG là gì, quy mô data, thiết kế 3 lớp (tất định từ Silver, LLM trích có kiểm chứng, tóm tắt nhóm), Neo4j hay NebulaGraph, đánh giá, lộ trình. Bản thảo luận, chưa có code.
 
 Số liệu lấy từ `scripts/sec_filings/benchmark_silver.py` (code `ef316fa`):
 
