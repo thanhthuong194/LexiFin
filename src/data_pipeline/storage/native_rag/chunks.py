@@ -16,10 +16,14 @@ CHUNKS_TABLE = "native_rag.chunks"
 # classified (data tables kept: Silver puts whole statements there when it finds
 # no item heading); a section's opening block is dropped only when at most
 # min(title, 200) + 40 chars (HP 8-K items whose title is the whole table).
+# Version 4 (2026-11-17): a repeated line is a running header only near page
+# breaks or with a page counter (row labels of tables laid out as text stay);
+# word-fragmented documents (55 on 500-company Silver) are joined into
+# paragraphs.
 CHUNKS_SPEC = SilverTableSpec(
     CHUNKS_TABLE,
     CHUNKS_ARROW_SCHEMA,
     FILING_YEAR_PARTITION,
-    rules_version=3,
+    rules_version=4,
     layer="gold",
 )

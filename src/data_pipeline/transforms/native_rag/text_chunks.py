@@ -37,6 +37,12 @@ class Paragraph:
     block_id: str
     text: str
     title_like: bool
+    # Further blocks joined into this paragraph (word-fragmented documents).
+    extra_block_ids: tuple[str, ...] = ()
+
+    @property
+    def block_ids(self) -> tuple[str, ...]:
+        return (self.block_id, *self.extra_block_ids)
 
 
 @dataclass(frozen=True)
@@ -109,7 +115,7 @@ def chunk_paragraphs(
             chunks.append(
                 TextChunk(
                     unit.text(),
-                    tuple(p.block_id for p in unit.paragraphs),
+                    tuple(b for p in unit.paragraphs for b in p.block_ids),
                     unit.subheading,
                 )
             )
@@ -164,7 +170,7 @@ def _split_unit(unit: _Unit, sizing: Sizing) -> list[TextChunk]:
             chunks.append(
                 TextChunk(
                     JOINER.join(p.text for p in group),
-                    tuple(p.block_id for p in group),
+                    tuple(b for p in group for b in p.block_ids),
                     unit.subheading,
                 )
             )
@@ -267,9 +273,9 @@ def _split_paragraph(
             break
         parts += 1
     if len(texts) == 1:
-        return [TextChunk(texts[0], (paragraph.block_id,), subheading)]
+        return [TextChunk(texts[0], paragraph.block_ids, subheading)]
     return [
-        TextChunk(text, (paragraph.block_id,), subheading, position, len(texts))
+        TextChunk(text, paragraph.block_ids, subheading, position, len(texts))
         for position, text in enumerate(texts, start=1)
     ]
 

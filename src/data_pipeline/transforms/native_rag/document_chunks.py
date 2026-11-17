@@ -25,6 +25,8 @@ from src.data_pipeline.transforms.native_rag.text_chunks import (
 )
 from src.data_pipeline.transforms.native_rag.tokenizer import TokenCounter
 
+FRAGMENT_MAX_CHARS = 15
+FRAGMENTED_MIN_BLOCKS = 300
 _FOOTNOTE = re.compile(r"^\s*(\(\s*[0-9a-z]{1,2}\s*\)|[0-9]{1,2}\)|\*{1,3}|[†‡§])")
 
 
@@ -109,6 +111,7 @@ def chunk_document(
     dropped: dict[str, str] = dict(drop_reasons(document.blocks, document.sections))
     chunks: list[ChunkDraft] = []
     builder = _Builder(document.context, counter, params)
+    fragmented = is_fragmented(document.blocks)
     for section_id, run in groupby(
         (b for b in document.blocks if b.block_id not in dropped),
         key=lambda b: b.section_id,
@@ -116,8 +119,48 @@ def chunk_document(
         items: list[Paragraph | _Table] = []
         for block in run:
             items.extend(_read_block(block, document.cells_by_table, params, dropped))
+        if fragmented:
+            items = _defragment(items)
         chunks.extend(builder.section(document.sections[section_id], items))
     return DocumentChunks(chunks, dropped)
+
+
+def is_fragmented(blocks: Sequence[SourceBlock]) -> bool:
+    """Whether a document's text is split into word-sized blocks (absolutely
+    positioned layouts: more than 300 text blocks, over half of them at most
+    15 chars)."""
+
+    texts = [b.text.strip() for b in blocks if b.block_type != "table"]
+    short = sum(len(t) <= FRAGMENT_MAX_CHARS for t in texts)
+    return len(texts) > FRAGMENTED_MIN_BLOCKS and short * 2 > len(texts)
+
+
+def _defragment(items: Sequence[Paragraph | _Table]) -> list[Paragraph | _Table]:
+    """Join consecutive text paragraphs into sentences-ending paragraphs: a
+    paragraph closes after a piece ending in `.`, `!`, `?` or `:`, or at a
+    table. Joined paragraphs are never subheadings (layout gives no cue)."""
+
+    result: list[Paragraph | _Table] = []
+    pieces: list[Paragraph] = []
+
+    def close() -> None:
+        if pieces:
+            ids = [b for p in pieces for b in p.block_ids]
+            unique = tuple(dict.fromkeys(ids))
+            text = " ".join(p.text for p in pieces)
+            result.append(Paragraph(unique[0], text, False, unique[1:]))
+            pieces.clear()
+
+    for item in items:
+        if isinstance(item, _Table):
+            close()
+            result.append(item)
+            continue
+        pieces.append(item)
+        if item.text.rstrip().endswith((".", "!", "?", ":")):
+            close()
+    close()
+    return result
 
 
 def _read_block(
@@ -316,9 +359,9 @@ class _Builder:
         block_ids = tuple(
             dict.fromkeys(
                 [
-                    *(line.block_id for line in title),
+                    *(b for line in title for b in line.block_ids),
                     table.block_id,
-                    *(n.block_id for n in footnotes),
+                    *(b for n in footnotes for b in n.block_ids),
                 ]
             )
         )

@@ -457,3 +457,32 @@ def test_wide_table_parts_fit_with_their_real_labels() -> None:
         tables = [c for c in result.chunks if c.chunk_kind == "table"]
         assert len(tables) > 9, extra
         assert all(c.token_count <= params.max_tokens for c in tables), extra
+
+
+def test_word_fragmented_document_is_joined() -> None:
+    words = ("Revenue increased due to strong demand in every region. " * 40).split()
+    sections = {
+        "root": SourceSection(
+            "root", 1, None, "document", None, "Doc", 1, ("Cover",), "cover"
+        )
+    }
+    blocks = [
+        SourceBlock(f"d:block:{i:06d}", i, "root", "paragraph", w)
+        for i, w in enumerate(words, start=1)
+    ]
+
+    def context(
+        path: tuple[str, ...], subheading: str | None, table: str | None
+    ) -> str:
+        return "Example"
+
+    result = chunk_document(
+        DocumentInput(blocks, sections, {}, context),
+        COUNTER,
+        ChunkParams(max_tokens=200),
+    )
+    assert result.dropped == {}
+    assert all(c.subheading is None for c in result.chunks)
+    assert result.chunks[0].text.startswith("Revenue increased due to strong demand")
+    placed = [b for c in result.chunks for b in c.block_ids]
+    assert sorted(placed) == sorted(b.block_id for b in blocks)

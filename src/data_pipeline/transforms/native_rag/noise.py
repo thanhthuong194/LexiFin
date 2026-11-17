@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import re
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
@@ -54,6 +55,12 @@ RUNNING_HEADER_MIN_SECTIONS = 3
 # Page headers of one long section (financial statement notes) repeat on
 # every page: this many repeats count without the section condition.
 RUNNING_HEADER_MIN_REPEATS_ANYWHERE = 8
+# A repeated line counts as a running header only near page breaks: within
+# this many blocks of a page number, a `Table of Contents` line or another
+# running header, for at least half its occurrences.
+PAGE_BREAK_WINDOW = 3
+PAGE_COUNTER_RISING_SHARE = 0.8
+_LAST_NUMBER = re.compile(r"(\d+)\D*$")
 
 
 def _header_key(text: str) -> str:
@@ -81,25 +88,11 @@ def drop_reasons(
     section when it is about its title, at most min(title, 200) + 40 chars
     (the title goes into the prefix); empty text (an empty
     table included); text without letters or digits; page numbers (`12`,
-    `Page 12`, `xii`, `F-12`, `- 12 -`, `23.`); running headers (text or a
-    small table of at most 100 chars, not a sentence, whose text with digits as
-    `#` occurs at least 4 times in at least 3 sections of the document, or at
-    least 8 times anywhere).
+    `Page 12`, `xii`, `F-12`, `- 12 -`, `23.`); running headers and footers
+    (`_running_headers`: repeated short lines near page breaks).
     """
 
-    occurrences: dict[str, list[str]] = defaultdict(list)
-    for block in blocks:
-        if _could_be_running_header(block.text):
-            occurrences[_header_key(block.text)].append(block.section_id)
-    running_headers = {
-        key
-        for key, section_ids in occurrences.items()
-        if len(section_ids) >= RUNNING_HEADER_MIN_REPEATS_ANYWHERE
-        or (
-            len(section_ids) >= RUNNING_HEADER_MIN_REPEATS
-            and len(set(section_ids)) >= RUNNING_HEADER_MIN_SECTIONS
-        )
-    }
+    running_headers = _running_headers(blocks)
 
     short_lines = Counter(
         block.section_id
@@ -119,6 +112,77 @@ def drop_reasons(
         if reason is not None:
             reasons[block.block_id] = reason
     return reasons
+
+
+def _is_page_marker(block: SourceBlock) -> bool:
+    text = " ".join(block.text.split())
+    if block.block_type != "table" and _PAGE_NUMBER.match(text):
+        return True
+    return text.lower() == "table of contents"
+
+
+def _is_page_counter(texts: Sequence[str]) -> bool:
+    """Whether the last number of the texts mostly increases along the
+    document, like a page number inside a footer (`Apple Inc. | 2021 Form
+    10-K | 20`)."""
+
+    numbers = [int(m.group(1)) for t in texts if (m := _LAST_NUMBER.search(t))]
+    if len(set(numbers)) < RUNNING_HEADER_MIN_REPEATS - 1:
+        return False
+    rises = sum(b > a for a, b in itertools.pairwise(numbers))
+    return rises >= PAGE_COUNTER_RISING_SHARE * (len(numbers) - 1)
+
+
+def _running_headers(blocks: Sequence[SourceBlock]) -> set[str]:
+    """Keys (`_header_key`) of the document's running headers and footers.
+
+    A candidate (short, not a sentence) repeats at least 4 times in at least
+    3 sections, or at least 8 times. It is a running header when it is
+    `Table of Contents`, carries a page counter, or when at least half its
+    occurrences lie within 3 blocks of a page break (a page number, a
+    `Table of Contents` line, or another running header; two passes). Row
+    labels repeated in a table laid out as text (`US, Canada, Puerto Rico -
+    Named Storm and Earthquake`) are not near page breaks and stay.
+    """
+
+    positions: dict[str, list[int]] = defaultdict(list)
+    sections: dict[str, set[str]] = defaultdict(set)
+    texts: dict[str, list[str]] = defaultdict(list)
+    for index, block in enumerate(blocks):
+        if _could_be_running_header(block.text):
+            key = _header_key(block.text)
+            positions[key].append(index)
+            sections[key].add(block.section_id)
+            texts[key].append(" ".join(block.text.split()))
+    repeated = [
+        key
+        for key, found in positions.items()
+        if len(found) >= RUNNING_HEADER_MIN_REPEATS_ANYWHERE
+        or (
+            len(found) >= RUNNING_HEADER_MIN_REPEATS
+            and len(sections[key]) >= RUNNING_HEADER_MIN_SECTIONS
+        )
+    ]
+    headers = {
+        key
+        for key in repeated
+        if key == "table of contents" or _is_page_counter(texts[key])
+    }
+    breaks = {i for i, block in enumerate(blocks) if _is_page_marker(block)}
+    for _ in range(2):
+        marks = breaks | {i for key in headers for i in positions[key]}
+        for key in repeated:
+            near = sum(
+                any(
+                    j in marks
+                    for j in range(i - PAGE_BREAK_WINDOW, i + PAGE_BREAK_WINDOW + 1)
+                    if j != i
+                )
+                for i in positions[key]
+            )
+            if near * 2 >= len(positions[key]):
+                headers.add(key)
+    return headers
 
 
 def _is_short_line(block: SourceBlock) -> bool:

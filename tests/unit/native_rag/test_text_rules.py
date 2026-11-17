@@ -260,3 +260,32 @@ def test_oversized_toc_section_keeps_subheadings() -> None:
     assert set(reasons) == {"b0", "b1"}
     small = drop_reasons(blocks[:20], sections)
     assert len(small) == 20
+
+
+def test_running_headers_need_page_breaks_or_a_counter() -> None:
+    sections = {
+        "root": _section("root", "document", 1, None),
+        **{s: _section(s, "item", 1000 + i) for i, s in enumerate("abc")},
+    }
+    texts: list[tuple[str, str]] = []
+    for page, section in enumerate("aabbcc", start=10):
+        body = [(section, "Body text of the page goes on for a while here.")] * 4
+        texts += [
+            *body,
+            (section, "US, Canada - Named Storm"),  # a table row label, mid-page
+            *body,
+            (section, "Example Corp and Subsidiaries"),  # page header
+            (section, str(page)),
+            (section, f"Example Corp | Form 10-K | {page}"),  # page footer
+        ]
+    blocks = [
+        SourceBlock(f"b{i}", 100 + i, section, "paragraph", text)
+        for i, (section, text) in enumerate(texts)
+    ]
+    reasons = drop_reasons(blocks, sections)
+    dropped = {
+        texts[int(k[1:])][1] for k, r in reasons.items() if r == "running_header"
+    }
+    assert "Example Corp and Subsidiaries" in dropped
+    assert any(t.startswith("Example Corp | Form 10-K") for t in dropped)
+    assert "US, Canada - Named Storm" not in dropped
