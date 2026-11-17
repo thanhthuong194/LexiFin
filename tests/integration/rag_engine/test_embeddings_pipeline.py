@@ -1,111 +1,32 @@
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 
 import pytest
 
-from src.data_pipeline.contracts.native_rag.chunks import (
-    CHUNKS_ARROW_SCHEMA,
-    ChunkRecord,
-    chunk_id_for,
-    chunk_sha256,
-)
 from src.data_pipeline.contracts.native_rag.embeddings import (
     EmbeddingRecord,
     embedding_id_for,
 )
-from src.data_pipeline.storage.iceberg import append_rows, iter_rows, open_gold_catalog
-from src.data_pipeline.storage.native_rag.chunks import CHUNKS_SPEC, CHUNKS_TABLE
+from src.data_pipeline.storage.iceberg import iter_rows, open_gold_catalog
 from src.data_pipeline.storage.native_rag.embeddings import EMBEDDINGS_TABLE
 from src.data_pipeline.transforms.native_rag.context import embedded_text
 from src.llm.types import LLMProviderError
 from src.rag_engine.embedding import pipeline
 from src.rag_engine.embedding.audit import audit_embeddings
 from src.rag_engine.embedding.pipeline import normalized, run_native_rag_embeddings
+from tests.native_rag_support import (
+    NOW,
+    FakeEmbedder,
+    gold_chunk,
+    gold_chunks,
+    write_chunks,
+)
 
 pytestmark = pytest.mark.integration
-
-NOW = datetime(2026, 11, 17, tzinfo=UTC)
-
-
-class FakeEmbedder:
-    """Deterministic 8-dim vectors from the text hash; counts texts embedded."""
-
-    model = "test/fake-embedding"
-
-    def __init__(self) -> None:
-        self.texts: list[str] = []
-
-    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
-        self.texts.extend(texts)
-        return [
-            [b - 127.5 for b in hashlib.sha256(text.encode()).digest()[:8]]
-            for text in texts
-        ]
-
-    def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
-        return self.embed_documents(texts)
-
-
-def _chunk(
-    document: str, ordinal: int, count: int, filed: date, text: str
-) -> ChunkRecord:
-    context = f"Example Corp | 10-K | FY{filed.year}"
-    return ChunkRecord(
-        chunk_id=chunk_id_for(document, ordinal),
-        filing_id="sec:1",
-        document_id=document,
-        section_id=f"{document}:section:0001",
-        table_id=None,
-        block_ids=[f"{document}:block:{ordinal:06d}"],
-        filing_date=filed,
-        cik="0000320193",
-        tickers=["EX"],
-        form="10-K",
-        fiscal_year=filed.year,
-        fiscal_period="FY",
-        period_end_date=None,
-        section_topic="mdna",
-        document_type="10-K",
-        chunk_kind="text",
-        company_name="Example Corp",
-        accession_number="0000320193-25-000001",
-        sec_url="https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/a.htm",
-        section_title="Item 7",
-        subheading=None,
-        table_title=None,
-        chunk_ordinal=ordinal,
-        document_chunk_count=count,
-        part=None,
-        part_count=None,
-        context=context,
-        text=text,
-        token_count=10,
-        chunk_sha256=chunk_sha256(context, text),
-        processed_at=NOW,
-    )
-
-
-def _write_chunks(gold_dir: Path, chunks: list[ChunkRecord]) -> None:
-    with open_gold_catalog(gold_dir) as gold:
-        if gold.table_exists(CHUNKS_TABLE):
-            gold.purge_table(CHUNKS_TABLE)
-        table, _ = CHUNKS_SPEC.open(gold, gold_dir)
-        append_rows(table, chunks, CHUNKS_ARROW_SCHEMA)
-
-
-def _chunks(texts_2024: int = 3, texts_2025: int = 4) -> list[ChunkRecord]:
-    return [
-        _chunk("d24", i, texts_2024, date(2024, 2, 1), f"Revenue note {i}")
-        for i in range(1, texts_2024 + 1)
-    ] + [
-        _chunk("d25", i, texts_2025, date(2025, 2, 1), f"Margin note {i}")
-        for i in range(1, texts_2025 + 1)
-    ]
 
 
 @pytest.fixture(autouse=True)
@@ -121,8 +42,8 @@ def _stored(gold_dir: Path) -> list[dict[str, object]]:
 
 
 def test_embed_resume_audit_and_stale(tmp_path: Path) -> None:
-    chunks = _chunks()
-    _write_chunks(tmp_path, chunks)
+    chunks = gold_chunks()
+    write_chunks(tmp_path, chunks)
     embedder = FakeEmbedder()
 
     trial = run_native_rag_embeddings(tmp_path, embedder, NOW, limit=2)
@@ -159,9 +80,9 @@ def test_embed_resume_audit_and_stale(tmp_path: Path) -> None:
     assert (again.chunks_skipped, again.chunks_embedded) == (7, 0)
 
     # Chunks rebuilt with other text: stored vectors are stale.
-    changed = _chunks()
-    changed[0] = _chunk("d24", 1, 3, date(2024, 2, 1), "Rewritten revenue note")
-    _write_chunks(tmp_path, changed)
+    changed = gold_chunks()
+    changed[0] = gold_chunk("d24", 1, 3, date(2024, 2, 1), "Rewritten revenue note")
+    write_chunks(tmp_path, changed)
     stale = run_native_rag_embeddings(tmp_path, embedder, NOW)
     assert stale.status == "rejected"
     assert "purge native_rag.embeddings" in stale.problems[0]
@@ -171,7 +92,7 @@ def test_embed_resume_audit_and_stale(tmp_path: Path) -> None:
     assert failed == {"current_chunks"}
 
     # A whole year dropped from the chunks: its vectors are still seen.
-    _write_chunks(tmp_path, [c for c in chunks if c.filing_date.year == 2025])
+    write_chunks(tmp_path, [c for c in chunks if c.filing_date.year == 2025])
     gone = run_native_rag_embeddings(tmp_path, embedder, NOW)
     assert gone.status == "rejected" and "of 2024" in gone.problems[0]
 
@@ -192,7 +113,7 @@ class FailingEmbedder(FakeEmbedder):
 
 
 def test_server_failure_keeps_vectors_and_resumes(tmp_path: Path) -> None:
-    _write_chunks(tmp_path, _chunks())
+    write_chunks(tmp_path, gold_chunks())
     # concurrency 1: one group of up to 2 chunks per request, in order; 2024
     # has 3 chunks (requests 1-2, committed at 3 rows), 2025 fails at once.
     broken = run_native_rag_embeddings(
@@ -210,7 +131,7 @@ def test_server_failure_keeps_vectors_and_resumes(tmp_path: Path) -> None:
 def test_failed_verification_never_appends_twice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_chunks(tmp_path, _chunks())
+    write_chunks(tmp_path, gold_chunks())
 
     def broken_verify(*args: object, **kwargs: object) -> None:
         raise RuntimeError("read failed")
@@ -223,7 +144,7 @@ def test_failed_verification_never_appends_twice(
 
 
 def test_limit_crosses_years(tmp_path: Path) -> None:
-    _write_chunks(tmp_path, _chunks())
+    write_chunks(tmp_path, gold_chunks())
     run = run_native_rag_embeddings(tmp_path, FakeEmbedder(), NOW, limit=4)
     years = sorted(str(r["chunk_id"])[:3] for r in _stored(tmp_path))
     assert run.chunks_embedded == 4 and years == ["d24", "d24", "d24", "d25"]
@@ -260,7 +181,7 @@ def test_embedding_contract() -> None:
 
 
 def test_audit_warns_when_server_is_down(tmp_path: Path) -> None:
-    _write_chunks(tmp_path, _chunks())
+    write_chunks(tmp_path, gold_chunks())
     run_native_rag_embeddings(tmp_path, FakeEmbedder(), NOW)
     report = audit_embeddings(tmp_path, FakeEmbedder.model, embedder=FailingEmbedder(1))
     statuses = {c.name: c.status for c in report.checks}

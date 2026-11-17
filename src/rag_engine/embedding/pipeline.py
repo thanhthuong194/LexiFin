@@ -9,7 +9,9 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from pyiceberg.expressions import And, BooleanExpression, GreaterThanOrEqual, LessThan
+from pyiceberg.exceptions import CommitFailedException
+from pyiceberg.expressions import BooleanExpression
+from pyiceberg.expressions.parser import parse
 from pyiceberg.table import Table
 
 from src.data_pipeline.contracts.native_rag.embeddings import (
@@ -68,10 +70,7 @@ class _Pending:
 def year_filter(year: int) -> BooleanExpression:
     """Data files of one `year(filing_date)` partition."""
 
-    return And(
-        GreaterThanOrEqual("filing_date", f"{year}-01-01"),  # type: ignore[call-arg, arg-type]
-        LessThan("filing_date", f"{year + 1}-01-01"),  # type: ignore[call-arg, arg-type]
-    )
+    return parse(f"filing_date >= '{year}-01-01' and filing_date < '{year + 1}-01-01'")
 
 
 def table_years(*tables: Table) -> list[int]:
@@ -276,7 +275,7 @@ def _embed_all(
             # failure of this commit is logged, the original error re-raised.
             try:
                 run.commit()
-            except Exception as error:  # noqa: BLE001 - the original error is re-raised
+            except (OSError, ValueError, RuntimeError, CommitFailedException) as error:
                 logger.error(
                     "native_rag_embeddings_final_commit_failed", error=str(error)
                 )

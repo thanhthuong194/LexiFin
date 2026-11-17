@@ -41,7 +41,7 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-Status = Literal["PASS", "WARN", "FAIL"]
+Status = Literal["PASS", "WARN", "FAIL", "SKIP"]
 # Documents whose share of characters outside every chunk exceeds this get a WARN.
 UNCOVERED_WARN_SHARE = 0.30
 SMALL_CHUNK_TOKENS = 16
@@ -72,6 +72,11 @@ class AuditReport:
     ) -> None:
         status: Status = "PASS" if not problems else "WARN" if warn else "FAIL"
         self.checks.append(Check(name, status, detail, tuple(problems[:SAMPLE_ROWS])))
+
+    def skip(self, name: str, detail: str, reason: str) -> None:
+        """A check that could not run here (it neither passes nor fails)."""
+
+        self.checks.append(Check(name, "SKIP", detail, (reason,)))
 
 
 def _rows(

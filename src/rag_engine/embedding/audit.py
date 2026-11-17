@@ -109,16 +109,22 @@ def _audit_year(table: Table, chunks: Table, year: int, found: _Findings) -> Non
         wrong_size, not_unit = _vector_problems(mine)
         found.wrong_size += wrong_size
         found.not_unit += not_unit
-        for chunk_id, digest, vector in zip(
-            mine["chunk_id"].to_pylist(),
-            mine["chunk_sha256"].to_pylist(),
-            mine["vector"].to_pylist(),
-            strict=True,
+        vectors = mine["vector"]
+        for row, (chunk_id, digest) in enumerate(
+            zip(
+                mine["chunk_id"].to_pylist(),
+                mine["chunk_sha256"].to_pylist(),
+                strict=True,
+            )
         ):
             stored[chunk_id] = digest
-            if current.get(chunk_id) == digest:
-                found.sample.append((_rank(chunk_id), chunk_id, year, vector))
-        found.sample = sorted(found.sample)[: found.sample_size]
+            if current.get(chunk_id) != digest:
+                continue
+            rank = _rank(chunk_id)
+            # Python floats only for vectors that enter the sample.
+            if len(found.sample) < found.sample_size or rank < found.sample[-1][0]:
+                entry = (rank, chunk_id, year, vectors[row].as_py())
+                found.sample = sorted([*found.sample, entry])[: found.sample_size]
     found.duplicates += [key for key, n in ids.items() if n > 1]
     found.stale += stale_vectors(stored, current)
     found.missing += sum(1 for chunk_id in current if chunk_id not in stored)
