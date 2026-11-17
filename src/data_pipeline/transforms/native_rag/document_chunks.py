@@ -27,6 +27,15 @@ from src.data_pipeline.transforms.native_rag.tokenizer import TokenCounter
 
 FRAGMENT_MAX_CHARS = 15
 FRAGMENTED_MIN_BLOCKS = 300
+# Lines that introduce what follows (a table's title or lead-in), never
+# trailing text of the table before.
+_LEAD_IN = re.compile(
+    r":\s*$|following tables?\b|\bbelow[.:]?\s*$|^\s*note\s+\d+\b"
+    r"|\b(shown|presented|set forth|summarized|listed|detailed|provided)\s+below\b",
+    re.IGNORECASE,
+)
+# Statement footers: always the end of the table above, never a title.
+_TABLE_FOOTER = re.compile(r"\b(see|refer to) (the )?accompanying\b", re.IGNORECASE)
 _FOOTNOTE = re.compile(r"^\s*(\(\s*[0-9a-z]{1,2}\s*\)|[0-9]{1,2}\)|\*{1,3}|[†‡§])")
 
 
@@ -243,7 +252,10 @@ class _Builder:
             subheading = heading or subheading
             run = []
             footnotes, index = self._footnotes(items, index + 1)
-            chunks.extend(self._table(section, item, title, footnotes, subheading))
+            trailing, index = self._trailing(items, index)
+            chunks.extend(
+                self._table(section, item, title, [*footnotes, *trailing], subheading)
+            )
         chunks.extend(self._text(section, run, subheading, sizing))
         return chunks
 
@@ -294,6 +306,54 @@ class _Builder:
             notes.append(paragraph)
             index += 1
         return notes, index
+
+    def _trailing(
+        self, items: Sequence[Paragraph | _Table], start: int
+    ) -> tuple[list[Paragraph], int]:
+        """Short lines right after a table that belong to it, e.g. a statement's
+        footer "See accompanying Notes to Condensed Consolidated Financial
+        Statements." They are taken when they are short (together under
+        `min_unit_tokens`), neither title-like, a lead-in (ending in `:`,
+        "following table", "below"), nor a note heading, do not split a
+        layout table's rows, and are followed by a table, a title-like line,
+        a lead-in (the next table's) or the end of the section. Right before a
+        table, a last line that is not a statement footer stays: it
+        introduces that table (its title when short).
+        A short first sentence of prose (followed by more prose) stays text;
+        a section whose whole content is "None." has no table before it."""
+
+        taken: list[Paragraph] = []
+        tokens = 0
+        index = start
+        while index < len(items):
+            item = items[index]
+            if not isinstance(item, Paragraph) or item.title_like:
+                break
+            text = item.text.strip()
+            if _LEAD_IN.search(text):
+                break
+            tokens += max(self._counter.count(text) - 1, 0)
+            if tokens >= self._params.min_unit_tokens:
+                break
+            following = items[index + 1] if index + 1 < len(items) else None
+            if isinstance(following, Paragraph) and following.block_id == item.block_id:
+                break
+            taken.append(item)
+            index += 1
+        following = items[index] if index < len(items) else None
+        if not taken or not (
+            following is None
+            or isinstance(following, _Table)
+            or following.title_like
+            or bool(_LEAD_IN.search(following.text.strip()))
+        ):
+            return [], start
+        if isinstance(following, _Table) and not _TABLE_FOOTER.search(taken[-1].text):
+            # The line right before the next table introduces it: its title
+            # when short, else text, as without this rule.
+            taken.pop()
+            index -= 1
+        return taken, index
 
     def _text(
         self,

@@ -20,10 +20,13 @@ CHUNKS_TABLE = "native_rag.chunks"
 # breaks or with a page counter (row labels of tables laid out as text stay);
 # word-fragmented documents (55 on 500-company Silver) are joined into
 # paragraphs.
+# Version 5 (2026-11-17): short lines right after a table (statement footers
+# such as "See accompanying Notes...") join the table chunk when followed by a
+# table, a title-like line or the section end.
 CHUNKS_SPEC = SilverTableSpec(
     CHUNKS_TABLE,
     CHUNKS_ARROW_SCHEMA,
     FILING_YEAR_PARTITION,
-    rules_version=4,
+    rules_version=5,
     layer="gold",
 )

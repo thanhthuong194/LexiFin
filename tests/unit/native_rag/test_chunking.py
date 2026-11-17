@@ -486,3 +486,88 @@ def test_word_fragmented_document_is_joined() -> None:
     assert result.chunks[0].text.startswith("Revenue increased due to strong demand")
     placed = [b for c in result.chunks for b in c.block_ids]
     assert sorted(placed) == sorted(b.block_id for b in blocks)
+
+
+def _two_tables(after_first: list[str]) -> DocumentInput:
+    sections = {
+        "root": SourceSection(
+            "root", 1, None, "document", None, "Doc", 1, ("Cover",), "cover"
+        )
+    }
+    table = "Revenue\n1,000\n900\nCost\n400\n300"
+    texts = [
+        ("table", table),
+        *(("paragraph", t) for t in after_first),
+        ("table", table),
+    ]
+    blocks = [
+        SourceBlock(f"d:block:{i:06d}", i, "root", kind, text)
+        for i, (kind, text) in enumerate(texts, start=1)
+    ]
+    grid = [
+        Cell(1, 2, 1, "2025"),
+        Cell(1, 3, 1, "2024"),
+        Cell(2, 1, 1, "Revenue"),
+        Cell(2, 2, 1, "1,000"),
+        Cell(2, 3, 1, "900"),
+        Cell(3, 1, 1, "Cost"),
+        Cell(3, 2, 1, "400"),
+        Cell(3, 3, 1, "300"),
+    ]
+    cells = {f"{b.block_id}:table": grid for b in blocks if b.block_type == "table"}
+
+    def context(
+        path: tuple[str, ...], subheading: str | None, table: str | None
+    ) -> str:
+        return "Example"
+
+    return DocumentInput(blocks, sections, cells, context)
+
+
+def test_statement_footer_joins_its_table() -> None:
+    params = ChunkParams(max_tokens=200, min_unit_tokens=16, small_table_chars=5)
+    footer = "See accompanying Notes to Financial Statements."
+    result = chunk_document(
+        _two_tables([footer, "Consolidated Balance Sheets"]), COUNTER, params
+    )
+    assert [c.chunk_kind for c in result.chunks] == ["table", "table"]
+    assert result.chunks[0].text.endswith(footer)
+    assert result.chunks[1].table_title == "Consolidated Balance Sheets"
+    # A short first sentence that leads into more prose stays text.
+    prose = [
+        "Net sales increased.",
+        (
+            "Growth came from every region and product line, led by services, "
+            "wearables and a strong holiday quarter in the Americas and Europe."
+        ),
+    ]
+    result = chunk_document(_two_tables(prose), COUNTER, params)
+    assert [c.chunk_kind for c in result.chunks] == ["table", "text", "table"]
+
+
+def test_next_tables_title_is_not_taken() -> None:
+    params = ChunkParams(max_tokens=200, min_unit_tokens=16, small_table_chars=5)
+    lead_in = "Revenue by geography is based on customer location."
+    result = chunk_document(_two_tables([lead_in]), COUNTER, params)
+    assert [c.table_title for c in result.chunks] == [None, lead_in]
+    # A footer straight before the next table still closes the table above.
+    footer = "See accompanying notes."
+    result = chunk_document(_two_tables([footer]), COUNTER, params)
+    assert result.chunks[0].text.endswith(footer)
+    assert result.chunks[1].table_title is None
+    # A colon lead-in after the footer: the footer still joins the table above.
+    result = chunk_document(
+        _two_tables([footer, "Revenue by segment was as follows:"]), COUNTER, params
+    )
+    assert result.chunks[0].text.endswith(footer)
+    assert result.chunks[1].table_title == "Revenue by segment was as follows:"
+
+
+def test_note_before_a_shown_below_lead_in_joins_the_table() -> None:
+    params = ChunkParams(max_tokens=200, min_unit_tokens=16, small_table_chars=5)
+    note = "Gross unrealized losses were not significant."
+    lead_in = "The fair values of our securities are shown below by maturity."
+    result = chunk_document(_two_tables([note, lead_in]), COUNTER, params)
+    assert [c.chunk_kind for c in result.chunks] == ["table", "table"]
+    assert result.chunks[0].text.endswith(note)
+    assert result.chunks[1].table_title == lead_in
