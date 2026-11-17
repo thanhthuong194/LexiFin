@@ -20,6 +20,9 @@ dependencies = [
     "qdrant-client>=1.20.0",
     "pytz>=2026.6",
     "tokenizers>=0.23.3",
+    "openai>=3.52.0",
+    "anthropic>=2.9.0",
+    "google-genai>=3.4.0",
 ]
 
 [tool.pytest]

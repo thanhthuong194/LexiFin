@@ -212,3 +212,51 @@ def test_qwen_tokenizer_counts_and_splits() -> None:
     pieces = counter.split(text, 50)
     assert "".join(pieces) == text
     assert all(counter.count(piece) - 1 <= 50 for piece in pieces)
+
+
+def test_toc_tables_and_long_opening_blocks_are_not_noise() -> None:
+    long_title = (
+        "Item 2.02. Results of Operations. "
+        + "The information here is furnished. " * 10
+    )
+    sections = {
+        "root": _section("root", "document", 1, None),
+        "toc": _section("toc", "table_of_contents", 2),
+        "item": SourceSection(
+            "item",
+            3,
+            "root",
+            "item",
+            "ITEM 2.02",
+            long_title,
+            10,
+            ("Item",),
+            "8k_event",
+        ),
+    }
+    blocks = [
+        SourceBlock("t", 3, "toc", "table", "Net earnings\n1,234\n1,100"),
+        SourceBlock("o", 10, "item", "table", long_title),
+    ]
+    assert drop_reasons(blocks, sections) == {}
+
+
+def test_oversized_toc_section_keeps_subheadings() -> None:
+    sections = {
+        "root": _section("root", "document", 1, None),
+        "toc": _section("toc", "table_of_contents", 2),
+    }
+    lines = [
+        "Item 1. Business 3",
+        "Table of Contents",
+        "Hurricane Ida",
+        "Operating Revenues",
+    ]
+    lines += [f"Subheading {chr(65 + i % 26)}{i // 26}x" for i in range(110)]
+    blocks = [
+        SourceBlock(f"b{i}", 10 + i, "toc", "paragraph", t) for i, t in enumerate(lines)
+    ]
+    reasons = drop_reasons(blocks, sections)
+    assert set(reasons) == {"b0", "b1"}
+    small = drop_reasons(blocks[:20], sections)
+    assert len(small) == 20

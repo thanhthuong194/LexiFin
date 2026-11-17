@@ -12,10 +12,14 @@ CHUNKS_TABLE = "native_rag.chunks"
 # Version 2 (2026-11-17): long paragraphs cut in thirds of the budget with a
 # short overlap, so no part exceeds the cap (v1 rejected 5 documents at 513-514
 # tokens on the 500-company Silver).
+# Version 3 (2026-11-17): tables inside a table-of-contents section are
+# classified (data tables kept: Silver puts whole statements there when it finds
+# no item heading); a section's opening block is dropped only when at most
+# min(title, 200) + 40 chars (HP 8-K items whose title is the whole table).
 CHUNKS_SPEC = SilverTableSpec(
     CHUNKS_TABLE,
     CHUNKS_ARROW_SCHEMA,
     FILING_YEAR_PARTITION,
-    rules_version=2,
+    rules_version=3,
     layer="gold",
 )

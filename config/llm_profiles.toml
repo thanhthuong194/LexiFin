@@ -1,0 +1,67 @@
+# LLM profiles for src/llm (get_chat / get_embedder / get_reranker).
+#
+# A profile is [<kind>.<name>]: kind = chat | embedding | rerank, name = a role
+# ("default", "judge", ...). Code asks for the role, so swapping a model is a
+# one-line edit here. [defaults] fills keys a profile leaves out.
+#
+# No URL or key belongs in this file; they live in .env (see .env.example):
+#   openai / anthropic / gemini  -> SDK default URL + OPENAI_API_KEY /
+#                                   ANTHROPIC_API_KEY / GEMINI_API_KEY
+#   openai_compat / http_rerank  -> <KIND>_<NAME>_BASE_URL (+ optional
+#                                   <KIND>_<NAME>_API_KEY), e.g. CHAT_LOCAL_BASE_URL
+#
+# Keys per kind:
+#   all        provider, model, timeout_s, max_retries,
+#              options (table merged into every request body as is)
+#   chat       max_tokens, temperature (not for anthropic), effort
+#              (anthropic output_config.effort, openai reasoning_effort,
+#              gemini thinking_level)
+#   embedding  batch_size, dimensions (Matryoshka size; omit for the model's
+#              own), query_instruction (Qwen3-Embedding query prefix)
+
+[defaults]
+timeout_s = 120
+max_retries = 3
+
+[chat.default]
+provider = "anthropic"
+model = "claude-opus-5-5"
+max_tokens = 16000
+effort = "medium"
+
+# Open model on vLLM (Colab/Kaggle): CHAT_LOCAL_BASE_URL, CHAT_LOCAL_API_KEY.
+[chat.local]
+provider = "openai_compat"
+model = "Qwen/Qwen3-32B"
+max_tokens = 8192
+temperature = 0.0
+timeout_s = 300
+
+# Same model family the chunks were token-capped with (Qwen3-Embedding-0.6B):
+# EMBEDDING_DEFAULT_BASE_URL, EMBEDDING_DEFAULT_API_KEY.
+[embedding.default]
+provider = "openai_compat"
+model = "Qwen/Qwen3-Embedding-0.6B"
+batch_size = 64
+query_instruction = "Given a question about SEC filings, retrieve passages that answer it"
+
+# vLLM /rerank: RERANK_DEFAULT_BASE_URL, RERANK_DEFAULT_API_KEY.
+[rerank.default]
+provider = "http_rerank"
+model = "Qwen/Qwen3-Reranker-0.6B"
+
+# More examples (uncomment and rename as needed):
+#
+# [chat.openai]
+# provider = "openai"
+# model = "gpt-5"
+# effort = "medium"
+#
+# [chat.gemini]
+# provider = "gemini"
+# model = "gemini-2.5-pro"
+#
+# [embedding.gemini]
+# provider = "gemini"
+# model = "gemini-embedding-001"
+# dimensions = 768
