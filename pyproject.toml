@@ -23,7 +23,15 @@ dependencies = [
     "openai>=3.52.0",
     "anthropic>=2.9.0",
     "google-genai>=3.4.0",
+    "ranx>=0.3.21",
+    "scikit-learn>=1.9.1",
+    "ragas>=0.4.4",
 ]
+
+[tool.uv]
+# instructor (via ragas) caps jiter <0.15; openai >=3.4 needs >=0.16. instructor
+# only uses jiter's stable from_json, so allow the newer jiter.
+override-dependencies = ["jiter>=0.16.0,<1"]
 
 [tool.pytest]
 minversion = "9.0"
