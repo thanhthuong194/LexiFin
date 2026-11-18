@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from lxml import etree
 
@@ -112,7 +112,7 @@ _HASHED_CELL_FIELDS = (
 def _rows_and_cells(
     table: etree._Element,
 ) -> tuple[list[etree._Element], list[PhysicalCell]]:
-    """Visible rows and cells whose nearest table is `table`, in DOM order.
+    """Owned rows and visible cells whose nearest table is `table`, in DOM order.
 
     Rows and cells of nested tables belong to those tables. Raises ValueError
     for a cell without a row of its own table.
@@ -204,7 +204,10 @@ def build_grid(raw: RawTable) -> TableLayout:
     Each cell takes the first column at or after the previous cell of its row
     whose slots are all free, so no two cells share a slot. Malformed spans
     and colspan="0" become 1 (counted in `invalid_spans`); rowspan="0" and
-    longer row spans end with their row group, as in HTML.
+    longer row spans end with their row group, as in HTML. Placement runs on
+    DOM rows; rows without a visible cell (e.g. Workiva sizing rows) are then
+    dropped, so row ordinals are 1..N over visible rows and a rowspan counts
+    only the visible rows it covers.
     """
 
     rows_left = _rows_left(raw)
@@ -235,7 +238,7 @@ def build_grid(raw: RawTable) -> TableLayout:
         cells.append(
             GridCell(
                 cell_ordinal=ordinal,
-                row_ordinal=row + 1,
+                row_ordinal=row,  # DOM row index, renumbered below
                 row_group=raw.row_groups[row],
                 row_cell_ordinal=row_cell_counts[row],
                 column_ordinal=column,
@@ -248,11 +251,24 @@ def build_grid(raw: RawTable) -> TableLayout:
                 source_xpath=cell.source_xpath,
             )
         )
+    # visible_before[i] = visible rows among DOM rows 0..i-1
+    visible_before = [0]
+    for count in row_cell_counts:
+        visible_before.append(visible_before[-1] + (count > 0))
+    placed = tuple(
+        replace(
+            cell,
+            row_ordinal=visible_before[cell.row_ordinal] + 1,
+            rowspan=visible_before[cell.row_ordinal + cell.rowspan]
+            - visible_before[cell.row_ordinal],
+        )
+        for cell in cells
+    )
     return TableLayout(
         caption="\n".join(text for text in raw.captions if text) or None,
-        row_count=len(rows_left),
-        column_count=max(c.column_ordinal + c.colspan - 1 for c in cells),
-        cells=tuple(cells),
+        row_count=visible_before[-1],
+        column_count=max(c.column_ordinal + c.colspan - 1 for c in placed),
+        cells=placed,
         invalid_spans=invalid,
     )
 

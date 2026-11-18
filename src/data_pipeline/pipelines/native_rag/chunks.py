@@ -187,7 +187,9 @@ def _section_paths(
     for row in sorted(rows, key=lambda r: r["section_ordinal"]):
         parent = sections.get(row["parent_section_id"] or "")
         if row["parent_section_id"] is None:
-            path: tuple[str, ...] = (document.label if exhibit else COVER_PAGE,)
+            path: tuple[str, ...] = (
+                short_title(document.label) if exhibit else COVER_PAGE,
+            )
         elif row["section_kind"] == "table_of_contents":
             path = (FRONT_MATTER,)
         elif parent is not None and parent.parent_section_id is None and not exhibit:

@@ -173,6 +173,43 @@ def test_invalid_and_zero_spans_follow_html_rules() -> None:
     assert layout.invalid_spans == 3
 
 
+def test_rows_without_a_visible_cell_are_not_rows() -> None:
+    hidden = '<td style="display:none"></td>'
+    layout = _layout(
+        "<table>"
+        f"<tr>{hidden}{hidden}</tr>"
+        '<tr><td rowspan="3">A</td><td>B</td></tr>'
+        f"<tr>{hidden}</tr>"
+        "<tr><td>C</td></tr>"
+        "<tr></tr>"
+        f"<tr>{hidden}</tr>"
+        "</table>"
+    )
+
+    # A spans DOM rows 2-4, of which row 3 has no visible cell.
+    assert _grid(layout) == [
+        (1, 1, 1, 2, 1, "A"),
+        (1, 2, 2, 1, 1, "B"),
+        (2, 1, 2, 1, 1, "C"),
+    ]
+    assert layout.row_count == 2
+    assert layout.column_count == 2
+
+
+def test_rowspan_ending_in_a_dropped_row_shrinks() -> None:
+    layout = _layout(
+        '<table><tr><td rowspan="2">A</td><td>B</td></tr>'
+        '<tr><td style="display:none">x</td></tr><tr><td>C</td></tr></table>'
+    )
+
+    assert _grid(layout) == [
+        (1, 1, 1, 1, 1, "A"),
+        (1, 2, 2, 1, 1, "B"),
+        (2, 1, 1, 1, 1, "C"),
+    ]
+    assert layout.row_count == 2
+
+
 def test_nested_table_is_a_separate_table_with_its_own_cells() -> None:
     body = (
         "<table><tr><td>outer<table><tr><td>inner 1</td><td>inner 2</td></tr>"

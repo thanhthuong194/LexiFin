@@ -26,8 +26,12 @@ INSTANCE_BUCKET_PARTITION = (
 
 
 XBRL_CONCEPTS_SPEC = SilverTableSpec(XBRL_CONCEPTS_TABLE, XBRL_CONCEPTS_ARROW_SCHEMA)
+# v2: no block/cell for continued facts; numeric_value drops trailing zeros.
 XBRL_FACTS_SPEC = SilverTableSpec(
-    XBRL_FACTS_TABLE, XBRL_FACTS_ARROW_SCHEMA, INSTANCE_BUCKET_PARTITION
+    XBRL_FACTS_TABLE,
+    XBRL_FACTS_ARROW_SCHEMA,
+    INSTANCE_BUCKET_PARTITION,
+    rules_version=2,
 )
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,10 +9,9 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.compute as pc
-from pyiceberg.expressions import And
+from pyiceberg.expressions import And, BooleanExpression
 from pyiceberg.table import Table
 from qdrant_client import QdrantClient, models
-from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from src.data_pipeline.storage.iceberg import (
     open_gold_catalog_read_only,
@@ -25,8 +24,10 @@ from src.data_pipeline.storage.native_rag.chunks import CHUNKS_TABLE
 from src.data_pipeline.storage.native_rag.embeddings import EMBEDDINGS_TABLE
 from src.data_pipeline.transforms.native_rag.context import embedded_text
 from src.rag_engine.embedding.pipeline import table_years, year_filter
+from src.rag_engine.indexing.companies import gold_names, load_companies
 from src.rag_engine.indexing.qdrant_store import (
     DENSE,
+    DIGEST_COLUMNS,
     SEC_FILINGS,
     SPARSE,
     CollectionSettings,
@@ -35,8 +36,10 @@ from src.rag_engine.indexing.qdrant_store import (
     enable_indexing,
     ensure_collection,
     payload,
+    point_digest,
     point_id,
 )
+from src.rag_engine.indexing.retry import retried
 from src.rag_engine.indexing.sparse import document_vector
 from src.utils.logger import get_logger, log_context
 from src.utils.timer import timed_operation
@@ -47,10 +50,6 @@ POINTS_PER_UPSERT = 512
 # Above this many chunks the collection must use the large layout.
 LARGE_MIN_CHUNKS = 500_000
 SCROLL_PAGE = 10_000
-# Transient server errors (5xx, 429, connection) retried with backoff.
-WRITE_ATTEMPTS = 5
-RETRY_BASE_SECONDS = 2.0
-_TRANSIENT = (ResponseHandlingException, UnexpectedResponse, OSError)
 CHUNK_COLUMNS = (
     "chunk_id",
     "filing_id",
@@ -94,6 +93,7 @@ class QdrantLoadSummary:
     points_skipped: int = 0
     points_upserted: int = 0
     points_deleted: int = 0
+    companies: int = 0
     problems: list[str] = field(default_factory=list)
     duration_seconds: float = 0.0
 
@@ -144,6 +144,36 @@ def vector_hashes(embeddings: Table, model_id: str, year: int) -> dict[str, str]
 
 
 @dataclass(frozen=True)
+class YearVectors:
+    """The model's vectors of one year, located without reading them:
+    `chunk_id` -> `chunk_sha256`, and -> the embeddings data file holding it."""
+
+    hashes: dict[str, str]
+    files: dict[str, str]
+
+
+def vector_index(embeddings: Table, model_id: str, year: int) -> YearVectors:
+    """Read `chunk_id`/`model_id`/`chunk_sha256` of each embeddings file of
+    the year, one file at a time. File pruning by a `chunk_id` set cannot
+    replace this: PyIceberg stops pruning `In` filters over 200 values, so a
+    first load would reread every vector of the year once per chunk file."""
+
+    index = YearVectors({}, {})
+    columns = ("chunk_id", "model_id", "chunk_sha256")
+    for path in data_files(embeddings, year):
+        for batch in scan_batches(embeddings, columns, files=[path]):
+            mine = batch.filter(pc.equal(batch["model_id"], model_id))
+            for chunk_id, digest in zip(
+                mine["chunk_id"].to_pylist(),
+                mine["chunk_sha256"].to_pylist(),
+                strict=True,
+            ):
+                index.hashes[chunk_id] = digest
+                index.files[chunk_id] = path
+    return index
+
+
+@dataclass(frozen=True)
 class Vectors:
     """Vectors of some chunks, kept as Arrow float32 (4 bytes a value)
     until a point is built, not as Python floats (~32 bytes each)."""
@@ -159,14 +189,34 @@ class Vectors:
 def vectors_of(
     embeddings: Table, model_id: str, year: int, chunk_ids: set[str]
 ) -> Vectors:
-    """The model's vectors of the given chunks of one year; only data files
-    whose `chunk_id` bounds can hold them are read."""
+    """The model's vectors of a few chunks of one year (audit samples):
+    only data files whose `chunk_id` bounds can hold them are read, which
+    prunes only up to 200 IDs (loads use `vectors_in`)."""
 
+    files = And(year_filter(year), values_filter("chunk_id", chunk_ids))
+    return _vectors(embeddings, model_id, files, chunk_ids)
+
+
+def vectors_in(
+    embeddings: Table, model_id: str, index: YearVectors, chunk_ids: set[str]
+) -> Vectors:
+    """The model's vectors of the given chunks, reading only the embeddings
+    files that hold them."""
+
+    files = sorted({index.files[chunk_id] for chunk_id in chunk_ids})
+    return _vectors(embeddings, model_id, files, chunk_ids)
+
+
+def _vectors(
+    embeddings: Table,
+    model_id: str,
+    files: list[str] | BooleanExpression,
+    chunk_ids: set[str],
+) -> Vectors:
     empty = Vectors({}, pa.array([], pa.list_(pa.float32())))
     if not chunk_ids:
         return empty
     wanted = pa.array(sorted(chunk_ids), type=pa.string())
-    files = And(year_filter(year), values_filter("chunk_id", chunk_ids))
     batches: list[pa.RecordBatch] = []
     for batch in scan_batches(
         embeddings, ("chunk_id", "model_id", "vector"), files=files
@@ -214,7 +264,8 @@ def chunks_in(
 def stored_points(
     client: QdrantClient, name: str, scope: models.Filter
 ) -> dict[str, str]:
-    """Point ID -> `chunk_sha256` of the collection's points matching `scope`."""
+    """Point ID -> `point_sha256` of the collection's points matching
+    `scope` ("" for points written before point digests)."""
 
     def page(offset: Any) -> tuple[list[models.Record], Any]:
         return retried(
@@ -223,7 +274,7 @@ def stored_points(
                 scroll_filter=scope,
                 limit=SCROLL_PAGE,
                 offset=offset,
-                with_payload=["chunk_sha256"],
+                with_payload=["point_sha256"],
                 with_vectors=False,
             ),
             "scroll",
@@ -234,34 +285,9 @@ def stored_points(
     while True:
         points, offset = page(offset)
         for point in points:
-            found[str(point.id)] = (point.payload or {}).get("chunk_sha256", "")
+            found[str(point.id)] = (point.payload or {}).get("point_sha256", "")
         if offset is None:
             return found
-
-
-def _transient(error: Exception) -> bool:
-    """Server-side or rate-limit failures; a 4xx (bad request) is not."""
-
-    if isinstance(error, UnexpectedResponse):
-        status = error.status_code or 0
-        return status == 429 or status >= 500
-    return True
-
-
-def retried[T](action: Callable[[], T], what: str) -> T:
-    """Run a server call, retrying transient errors with backoff."""
-
-    for attempt in range(1, WRITE_ATTEMPTS + 1):
-        try:
-            return action()
-        except _TRANSIENT as error:
-            if attempt == WRITE_ATTEMPTS or not _transient(error):
-                raise
-            logger.warning(
-                "qdrant_call_retry", what=what, attempt=attempt, error=str(error)[:200]
-            )
-            time.sleep(RETRY_BASE_SECONDS * 2 ** (attempt - 1))
-    raise AssertionError("unreachable")
 
 
 def _point(
@@ -309,39 +335,53 @@ class _Load:
         )
 
     def load_year(self, chunks: Table, embeddings: Table, year: int) -> None:
-        """Per data file of the year's chunks: pass 1 on hashes only finds
-        the chunks that need a point; pass 2 reads the vectors of just those
-        chunks and upserts them. Then points no current Gold chunk backs are
-        deleted."""
+        """Per data file of the year's chunks: pass 1 (no text, no vectors)
+        finds the chunks whose point is missing or differs (point digest);
+        pass 2 reads the vectors of just those chunks, from the embeddings
+        files holding them, and upserts them. Then points no current Gold
+        chunk backs are deleted; a point still equal to its chunk is kept
+        even when the chunk's vector is missing."""
 
-        hashes = vector_hashes(embeddings, self.model_id, year)
+        index = vector_index(embeddings, self.model_id, year)
         stored = stored_points(self.client, self.name, year_points(year))
         current: set[str] = set()
         for path in data_files(chunks, year):
             pending: set[str] = set()
-            for row in file_rows(chunks, path, ("chunk_id", "chunk_sha256")):
+            for row in file_rows(chunks, path, DIGEST_COLUMNS):
                 self.summary.chunks_total += 1
-                chunk_id, digest = row["chunk_id"], row["chunk_sha256"]
-                if hashes.get(chunk_id) != digest:
-                    self.summary.chunks_without_vector += 1
-                    continue
+                chunk_id = row["chunk_id"]
                 pid = point_id(chunk_id)
+                digest = point_digest(row, self.corpus)
+                if index.hashes.get(chunk_id) != row["chunk_sha256"]:
+                    self.summary.chunks_without_vector += 1
+                    if stored.get(pid) == digest:
+                        # Its point already holds this text and payload (the
+                        # digest covers the text hash): keep it while Gold
+                        # waits for the vector, so an interrupted embedding
+                        # run never empties a live collection.
+                        current.add(pid)
+                    continue
                 current.add(pid)
                 if stored.get(pid) == digest:
                     self.summary.points_skipped += 1
                 else:
                     pending.add(chunk_id)
             if pending:
-                self._upsert_file(chunks, embeddings, path, year, pending)
+                self._upsert_file(chunks, embeddings, path, index, pending)
         self.delete(sorted(set(stored) - current))
         logger.info(
             "qdrant_load_year_done", year=year, upserted=self.summary.points_upserted
         )
 
     def _upsert_file(
-        self, chunks: Table, embeddings: Table, path: str, year: int, pending: set[str]
+        self,
+        chunks: Table,
+        embeddings: Table,
+        path: str,
+        index: YearVectors,
+        pending: set[str],
     ) -> None:
-        vectors = vectors_of(embeddings, self.model_id, year, pending)
+        vectors = vectors_in(embeddings, self.model_id, index, pending)
         points: list[models.PointStruct] = []
         for chunk in file_rows(chunks, path):
             if chunk["chunk_id"] not in pending:
@@ -440,6 +480,7 @@ def _load(
                 "delete outside years",
             )
             summary.points_deleted += gone
+        summary.companies = load_companies(client, name, gold_names(chunks))
         if summary.chunks_without_vector:
             summary.problems.append(
                 f"{summary.chunks_without_vector} chunks have no current "
@@ -453,13 +494,15 @@ def run_qdrant_load(
 ) -> QdrantLoadSummary:
     """Load Gold chunks with their current vectors into a Qdrant collection.
 
-    One month of filing dates at a time: points are compared with Gold by
-    `chunk_sha256`; vectors are read only for new or changed chunks, which
+    One filing year at a time, and inside it one chunk data file at a time:
+    points are compared with Gold by point digest (payload + text hash);
+    vectors are read only for new or changed chunks, which
     are upserted (dense vector, BM25 sparse vector of the embedded text,
     payload) in acknowledged batches of POINTS_PER_UPSERT with retries;
     unchanged points are skipped; points no current Gold chunk backs (deleted,
     changed and not re-embedded, or of a year Gold no longer has) are
-    deleted. Indexing is turned on at the end. The alias is not touched: the
+    deleted. The company directory (`<collection>__companies`) is rewritten
+    from the loaded points. Indexing is turned on at the end. The alias is not touched: the
     caller switches it once the collection is indexed and audited
     (`switch_alias`). Status `incomplete` when chunks lack a current vector
     (embed, then load again). Gold is read-only. A rerun resumes.

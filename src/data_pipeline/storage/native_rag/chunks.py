@@ -23,10 +23,18 @@ CHUNKS_TABLE = "native_rag.chunks"
 # Version 5 (2026-11-17): short lines right after a table (statement footers
 # such as "See accompanying Notes...") join the table chunk when followed by a
 # table, a title-like line or the section end.
+# Version 6 (2026-11-17): a repeated line is a running header only next to a
+# page break with nothing but noise between (v5 dropped repeated segment
+# headings); lone footnote markers are never headers or subheadings and join
+# the line after them; a TOC section drops only TOC-shaped lines and 8-K
+# contents tables are TOC; lower header rows split table columns; a table's
+# subheading is its title line closest to it, never a company name line; a
+# title-only unit joins the next unit; EX-99 labels are shortened in the
+# prefix; company names come from the earliest filing only.
 CHUNKS_SPEC = SilverTableSpec(
     CHUNKS_TABLE,
     CHUNKS_ARROW_SCHEMA,
     FILING_YEAR_PARTITION,
-    rules_version=5,
+    rules_version=6,
     layer="gold",
 )

@@ -403,7 +403,7 @@ def test_exhibit_numbers_stay_labels() -> None:
         Cell(2, 4, 1, "10.2"),
     ]
     table = render_table(cells)
-    assert table.header == (" | Description | Form | Exhibit",)
+    assert table.header == ("Exhibit | Description | Form | Exhibit",)
     assert table.rows == ("10.1 | Credit Agreement | 8-K | 10.2",)
 
 
@@ -571,3 +571,192 @@ def test_note_before_a_shown_below_lead_in_joins_the_table() -> None:
     assert [c.chunk_kind for c in result.chunks] == ["table", "table"]
     assert result.chunks[0].text.endswith(note)
     assert result.chunks[1].table_title == lead_in
+
+
+def test_title_only_unit_joins_the_next_unit_under_its_subheading() -> None:
+    paragraphs = _paragraphs(
+        "Legal and Regulatory Risks",  # category heading over a risk heading
+        "We Are Subject to Payments Risks",
+        " ".join(["payments"] * 30),
+        " ".join(["fraud"] * 30),
+    )
+    chunks = chunk_paragraphs(paragraphs, None, _sizing(cap=40, min_tokens=8))
+    # v5 left "Legal and Regulatory Risks" as a chunk of its own.
+    assert chunks[0].text.startswith(
+        "Legal and Regulatory Risks\nWe Are Subject to Payments Risks"
+    )
+    assert {c.subheading for c in chunks} == {"We Are Subject to Payments Risks"}
+    sentences = " ".join(f"Sentence {i} has exactly six words." for i in range(12))
+    split = chunk_paragraphs(_paragraphs("Exhibit 99.1", sentences), None, _sizing(30))
+    assert split[0].text.startswith("Exhibit 99.1\nSentence 0")
+    assert split[0].part == 1 and split[0].block_ids == ("b0", "b1")
+
+
+def test_markers_are_not_titles() -> None:
+    assert not is_title_like("(c)") and not is_title_like("*")
+    assert is_title_like("Income Taxes")
+
+
+def test_lower_header_row_splits_the_columns_it_falls_under() -> None:
+    cells = [
+        Cell(0, 1, 2, "Common Stock"),
+        Cell(0, 3, 1, "Additional Paid-in"),
+        Cell(0, 4, 1, "Total"),
+        Cell(1, 1, 1, "Shares"),
+        Cell(1, 2, 1, "Amount"),
+        Cell(2, 0, 1, "Balances"),
+        Cell(2, 1, 1, "24,388"),
+        Cell(2, 2, 1, "24"),
+        Cell(2, 3, 1, "100"),
+        Cell(2, 4, 1, "124"),
+    ]
+    table = render_table(cells)
+    assert table.header == (
+        " | Common Stock Shares | Common Stock Amount | Additional Paid-in | Total",
+    )
+    assert table.rows == ("Balances | 24,388 | 24 | 100 | 124",)
+
+
+def test_8k_contents_table_is_toc() -> None:
+    rows = [("ITEM 2.02 Results of Operations", "3"), ("SIGNATURES", "4"),
+            ("EXHIBIT 99.1", "")]  # fmt: skip
+    cells = [
+        Cell(r, c, 1, text)
+        for r, row in enumerate(rows)
+        for c, text in enumerate(row)
+        if text
+    ]
+    assert classify_table(cells) == "toc"
+    bare = [Cell(0, 0, 1, "ITEM 8.01 Other Events"), Cell(0, 1, 1, "3"),
+            *(Cell(r, 0, 1, f"EXHIBIT 4.{r}") for r in range(1, 5))]  # fmt: skip
+    assert classify_table(bare) == "toc"
+
+
+def test_company_line_is_never_a_subheading() -> None:
+    from src.data_pipeline.transforms.native_rag.document_chunks import (
+        _subheading_after,
+    )
+
+    run = _paragraphs("Debt", "NVIDIA CORPORATION AND SUBSIDIARIES")
+    assert _subheading_after(run, None) == "Debt"
+    assert _subheading_after(_paragraphs("Apple Inc."), "Notes") == "Notes"
+
+
+def test_lower_header_row_with_label_text_stays_header() -> None:
+    cells = [
+        Cell(0, 1, 2, "Less than 12 Months"),
+        Cell(0, 3, 2, "12 Months or Greater"),
+        Cell(1, 0, 1, "(In millions)"),
+        Cell(1, 1, 1, "Fair Value"),
+        Cell(1, 2, 1, "Unrealized Losses"),
+        Cell(1, 3, 1, "Fair Value"),
+        Cell(1, 4, 1, "Unrealized Losses"),
+        Cell(2, 0, 1, "U.S. government securities"),
+        Cell(2, 1, 1, "2,569"),
+        Cell(2, 2, 1, "(51)"),
+        Cell(2, 3, 1, "34,608"),
+        Cell(2, 4, 1, "(1,411)"),
+    ]
+    table = render_table(cells)
+    assert table.rows == (
+        "U.S. government securities | 2,569 | (51) | 34,608 | (1,411)",
+    )
+    assert table.header[0].startswith("(In millions) | Less than 12 Months Fair Value")
+    two_rows = [Cell(0, 0, 1, "ITEM 5.02 Departure of Directors"), Cell(0, 1, 1, "3"),
+                Cell(1, 0, 1, "SIGNATURES"), Cell(1, 1, 1, "4")]  # fmt: skip
+    assert classify_table(two_rows) == "toc"
+
+
+def test_text_rows_mapping_onto_columns_stay_data() -> None:
+    cells = [
+        Cell(0, 0, 1, "Title of each class"),
+        Cell(0, 1, 1, "Trading Symbol(s)"),
+        Cell(0, 2, 1, "Name of exchange"),
+        Cell(1, 0, 1, "Class A Common Stock"),
+        Cell(1, 1, 1, "GOOGL"),
+        Cell(1, 2, 1, "Nasdaq"),
+        Cell(2, 0, 1, "Class C Capital Stock"),
+        Cell(2, 1, 1, "GOOG"),
+        Cell(2, 2, 1, "Nasdaq"),
+    ]
+    table = render_table(cells)
+    assert table.rows == (
+        "Class A Common Stock | GOOGL | Nasdaq",
+        "Class C Capital Stock | GOOG | Nasdaq",
+    )
+
+
+def test_exhibit_index_rows_under_a_spanning_header_stay_data() -> None:
+    cells = [
+        Cell(0, 0, 1, "Exhibit Number"),
+        Cell(0, 1, 1, "Description"),
+        Cell(0, 2, 2, "Incorporated by reference herein"),
+        Cell(1, 0, 1, "10.06.1"),
+        Cell(1, 1, 1, "Amended Stock Plan"),
+        Cell(1, 2, 1, "Annual Report on Form 10-K"),
+        Cell(1, 3, 1, "February 4, 2020"),
+        Cell(2, 0, 1, "31.1"),
+        Cell(2, 1, 1, "Certification"),
+        Cell(2, 2, 1, "Filed herewith"),
+        Cell(2, 3, 1, "1"),
+    ]
+    table = render_table(cells)
+    assert any(row.startswith("10.06.1 | Amended Stock Plan") for row in table.rows)
+
+
+def test_our_company_is_a_subheading() -> None:
+    from src.data_pipeline.transforms.native_rag.document_chunks import (
+        _subheading_after,
+    )
+
+    assert _subheading_after(_paragraphs("Our Company"), None) == "Our Company"
+
+
+def test_the_company_names_stay_company_lines() -> None:
+    from src.data_pipeline.transforms.native_rag.document_chunks import _COMPANY_LINE
+
+    for line in ("The Coca-Cola Company", "THE HOME DEPOT, INC. AND SUBSIDIARIES"):
+        assert _COMPANY_LINE.search(line), line
+    for heading in ("The Company", "Our Company", "Risks Specific to our Company"):
+        assert not _COMPANY_LINE.search(heading), heading
+
+
+def test_year_row_spanning_column_pairs_prefixes_them() -> None:
+    cells = [
+        Cell(0, 0, 1, "(In millions)"),
+        Cell(0, 1, 1, "Shares"),
+        Cell(0, 2, 1, "Amount"),
+        Cell(0, 3, 1, "Shares"),
+        Cell(0, 4, 1, "Amount"),
+        Cell(1, 0, 1, "Year Ended June 30,"),
+        Cell(1, 1, 2, "2024"),
+        Cell(1, 3, 2, "2023"),
+        Cell(2, 0, 1, "First Quarter"),
+        Cell(2, 1, 1, "7"),
+        Cell(2, 2, 1, "2,800"),
+        Cell(2, 3, 1, "6"),
+        Cell(2, 4, 1, "2,500"),
+    ]
+    table = render_table(cells)
+    assert table.header[-1].endswith(
+        "| 2024 Shares | 2024 Amount | 2023 Shares | 2023 Amount"
+    )
+    assert table.rows == ("First Quarter | 7 | 2,800 | 6 | 2,500",)
+
+
+def test_one_wide_units_cell_is_not_a_grouping_row() -> None:
+    cells = [
+        Cell(0, 1, 1, "Oct 31, 2021"),
+        Cell(0, 2, 1, "Jan 31, 2021"),
+        Cell(1, 0, 1, "Inventories:"),
+        Cell(1, 1, 2, "(In millions)"),
+        Cell(2, 0, 1, "Raw materials"),
+        Cell(2, 1, 1, "925"),
+        Cell(2, 2, 1, "632"),
+    ]
+    table = render_table(cells)
+    assert table.header[-1] == " | Oct 31, 2021 | Jan 31, 2021"
+    assert table.rows[-1] == "Raw materials | 925 | 632"
+    from src.data_pipeline.transforms.native_rag.document_chunks import _COMPANY_LINE
+
+    assert not _COMPANY_LINE.search("Overview of the Company")

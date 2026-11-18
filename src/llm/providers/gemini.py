@@ -86,7 +86,7 @@ class GeminiChat(ChatAdapter):
             config["response_json_schema"] = options.output_schema.json_schema
         config |= self.extra_body(options)
         response = self._client.models.generate_content(
-            model=self.model,
+            model=self.profile.request_model,
             contents=[_content(message) for message in messages],
             config=gtypes.GenerateContentConfig.model_validate(config),
         )
@@ -204,7 +204,7 @@ class GeminiEmbedding(BatchedEmbedding):
             config["output_dimensionality"] = self.profile.dimensions
         config |= self.profile.options
         response = self._client.models.embed_content(
-            model=self.model,
+            model=self.profile.request_model,
             contents=[gtypes.Content(parts=[gtypes.Part(text=text)]) for text in texts],
             config=gtypes.EmbedContentConfig.model_validate(config),
         )

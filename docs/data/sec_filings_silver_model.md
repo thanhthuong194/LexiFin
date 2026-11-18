@@ -142,7 +142,7 @@ erDiagram
 | `xbrl_labels`, `xbrl_relationships` | `source_document_id`: a `document_id` when the DTS file belongs to the filing, a URL for published taxonomies; plus `source_xpath`/`arc_xpath` |
 | `xbrl_concepts` | `source_schema_uri` (where first read) |
 
-`xbrl_facts.cell_id`/`block_id` are **not heuristic**: the fact's `ix:*` element lies inside that `td`/block in the same DOM parse (exact XPath match). Hidden facts, facts spanning several blocks, and XPaths matching several blocks stay null rather than guessed. No cell ↔ fact matching by value or text. In `data/`: 108,020 facts linked to a cell, 16,930 to a block, none to both.
+`xbrl_facts.cell_id`/`block_id` are **not heuristic**: the fact's `ix:*` element lies inside that `td`/block in the same DOM parse (exact XPath match). Hidden facts, facts spanning several blocks (including any fact with `ix:continuation`, rules v2), and XPaths matching several blocks stay null rather than guessed. `numeric_value` is plain decimal without insignificant zeros (`11.80` → `11.8`, `-0` → `0`; rules v2). No cell ↔ fact matching by value or text. In `data/`: 108,020 facts linked to a cell, ~15,600 to a block (v2: continued facts unlinked), none to both.
 
 ## 5. Derivable fields kept on purpose
 

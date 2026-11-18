@@ -32,6 +32,7 @@ from src.data_pipeline.transforms.sec_filings.html_blocks import (
 from src.data_pipeline.transforms.sec_filings.html_dom import (
     normalize_text,
     parse_html,
+    visible_text,
 )
 from src.data_pipeline.transforms.sec_filings.narrative import (
     DocumentNarrative,
@@ -114,6 +115,42 @@ def test_nested_inline_tags_do_not_duplicate_text() -> None:
     body = "<div><span>Revenue <b>grew <i>10%</i></b></span> in 2025</div>"
 
     assert _texts(body) == ["Revenue grew 10% in 2025"]
+
+
+def test_css_spacing_between_inline_runs_separates_words() -> None:
+    body = (
+        '<div><span>(1)</span><span style="padding-left:15pt">Goodwill</span></div>'
+        "<div><span>&#8226;</span>"
+        '<span style="font-size:10pt; PADDING-LEFT: 10pt">R</span>'
+        "<span>epurchases</span></div>"
+        '<div><span style="margin-right:4.5pt">ITEM 1A.</span>RISK FACTORS</div>'
+        '<div><span>Net</span><span style="display:inline-block">income</span>.</div>'
+        "<div><span>Ama</span><span>zon</span>"
+        '<span style="padding-left:0pt;margin-left:-3pt">.com</span></div>'
+        '<div><span>a </span><span style="padding-left:9pt"> b</span></div>'
+    )
+
+    assert _texts(body) == [
+        "(1) Goodwill",
+        "\u2022 Repurchases",
+        "ITEM 1A. RISK FACTORS",
+        "Net income .",
+        "Amazon.com",
+        "a b",
+    ]
+    assert _codes(body) == ["ITEM 1A"]
+
+
+def test_cell_text_separates_css_spaced_inline_runs() -> None:
+    cell = parse_html(
+        _html(
+            '<table><tr><td><span>(2)</span><span style="padding-left:6pt">'
+            "Net</span><span>work</span></td></tr></table>"
+        )
+    ).find(".//td")
+    assert cell is not None
+
+    assert visible_text(cell) == ("(2) Network", "")
 
 
 def test_visible_inline_xbrl_is_kept_and_hidden_content_dropped() -> None:
@@ -323,6 +360,17 @@ def test_eight_k_detects_decimal_items_signature_and_exhibit_index() -> None:
     root = narrative.sections[0].section_id
     assert {s.parent_section_id for s in narrative.sections[1:]} == {root}
     assert _codes("<div>Item 2.02 Results of Operations.</div>") == []
+
+
+def test_eight_k_item_with_sub_paragraphs_keeps_its_code() -> None:
+    body = (
+        "<div>Item 5.02(c) Appointment of Principal Officer</div><div>Text.</div>"
+        "<div>Item 5.02 (b) and (e) Departure of Directors</div><div>Text.</div>"
+        "<div>Item 9.01(d) Exhibits</div>"
+    )
+
+    assert _codes(body, "8-K") == ["ITEM 5.02", "ITEM 9.01"]
+    assert _codes("<div>Item 5.02(c) of the plan applies.</div>", "8-K") == []
 
 
 def _tree(body: str, form: str) -> list[tuple[str | None, str | None, int, str]]:
@@ -565,6 +613,31 @@ def test_ranges_hierarchy_and_most_specific_assignment() -> None:
         "table",
     ]
     assert narrative.blocks[10].text == "Revenue\n$1,000"
+
+
+def test_exhibit_index_followed_by_an_item_stays_in_its_part() -> None:
+    body = (
+        "<div>PART IV</div><div>Item 15. Exhibits</div><div>See below.</div>"
+        "<div>EXHIBIT INDEX</div><div>3.1 Charter</div>"
+        "<div>Item 16. Form 10-K Summary</div><div>None.</div>"
+        "<div>SIGNATURES</div><div>/s/ Jane Doe</div>"
+        "<div>EXHIBIT INDEX</div>"
+    )
+
+    assert [(parent, code) for parent, code, _, _ in _tree(body, "10-K")] == [
+        (None, "PART IV"),
+        ("PART IV", "ITEM 15"),
+        ("PART IV", "EXHIBIT INDEX"),
+        ("PART IV", "ITEM 16"),
+        (None, "SIGNATURES"),
+    ]
+    # Without a later item, EXHIBIT INDEX closes the PART.
+    closing = "<div>PART IV</div><div>Item 15. Exhibits</div><div>EXHIBIT INDEX</div>"
+    assert [(p, c) for p, c, _, _ in _tree(closing, "10-K")] == [
+        (None, "PART IV"),
+        ("PART IV", "ITEM 15"),
+        (None, "EXHIBIT INDEX"),
+    ]
 
 
 def test_parent_part_hash_covers_child_items_and_counts_are_declared() -> None:

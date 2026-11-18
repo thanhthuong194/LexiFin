@@ -20,6 +20,7 @@ from src.data_pipeline.contracts.sec_filings.xbrl_core import (
 )
 from src.data_pipeline.contracts.sec_filings.xbrl_facts import (
     XbrlFactRecord,
+    canonical_decimal,
     fact_sha256,
 )
 from src.data_pipeline.transforms.sec_filings.html_dom import parse_html
@@ -372,6 +373,16 @@ def test_continuation_chain_is_joined_in_order(records: list[XbrlFactRecord]) ->
     assert all(not r.continuation_refs for r in records if r is not fact)
 
 
+def test_a_continued_fact_spans_blocks_and_is_never_located(
+    rich: LoadedInstance,
+) -> None:
+    located = _records(rich, location=("block-1", None))
+    in_cell = _records(rich, location=(None, "cell-1"))
+
+    assert (located[7].block_id, in_cell[7].cell_id) == (None, None)
+    assert all(r.block_id == "block-1" for i, r in enumerate(located) if i != 7)
+
+
 MISSING_CONTINUATION = (
     '<p><ix:nonNumeric name="ex:Description" contextRef="FY" '
     'continuedAt="missing">a</ix:nonNumeric></p>'
@@ -523,6 +534,35 @@ def test_numeric_value_is_exact_and_untransformable_values_stay_raw(
     assert (sec_words.raw_value, sec_words.normalized_value) == ("no", None)
     assert sec_words.numeric_value is None
     assert unusable == 1
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("11.80", "11.8"),
+        ("1.000", "1"),
+        ("-0", "0"),
+        ("-0.00", "0"),
+        ("1E+3", "1000"),
+        ("1200", "1200"),
+        ("0.000120", "0.00012"),
+        ("-5.50", "-5.5"),
+        ("NaN", None),
+        ("abc", None),
+    ],
+)
+def test_canonical_decimal_drops_insignificant_zeros(
+    value: str, expected: str | None
+) -> None:
+    assert canonical_decimal(value) == expected
+
+
+def test_numeric_value_with_trailing_zeros_is_rejected(
+    records: list[XbrlFactRecord],
+) -> None:
+    ratio = records[3].model_dump()
+    with pytest.raises(ValidationError, match="plain finite decimal"):
+        XbrlFactRecord.model_validate({**ratio, "numeric_value": "0.10"})
 
 
 def test_fact_hash_covers_source_fields_but_not_enrichment(

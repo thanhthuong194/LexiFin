@@ -54,7 +54,7 @@ class AnthropicChat(ChatAdapter):
     @override
     def _complete(self, messages: list[Message], options: ChatOptions) -> Completion:
         request: dict[str, Any] = {
-            "model": self.model,
+            "model": self.profile.request_model,
             "max_tokens": self.max_tokens(options),
             "messages": [_message(message) for message in messages],
         }

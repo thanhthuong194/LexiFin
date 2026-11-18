@@ -11,6 +11,10 @@ from src.data_pipeline.storage.sec_filings.filings import FILING_YEAR_PARTITION
 DOCUMENT_TABLE_CELLS_TABLE = "sec_filings.document_table_cells"
 
 
+# v2: row ordinals and rowspans skip rows without a visible cell
 DOCUMENT_TABLE_CELLS_SPEC = SilverTableSpec(
-    DOCUMENT_TABLE_CELLS_TABLE, DOCUMENT_TABLE_CELLS_ARROW_SCHEMA, FILING_YEAR_PARTITION
+    DOCUMENT_TABLE_CELLS_TABLE,
+    DOCUMENT_TABLE_CELLS_ARROW_SCHEMA,
+    FILING_YEAR_PARTITION,
+    rules_version=2,
 )

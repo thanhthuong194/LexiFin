@@ -150,7 +150,7 @@ def test_drop_reasons() -> None:
     reasons = drop_reasons(blocks, sections)
     by_text = {texts[int(k[1:])][1]: v for k, v in reasons.items()}
     assert by_text["Item 1. Business 3"] == "table_of_contents"
-    assert by_text["x"] == "table_of_contents"
+    assert by_text["x"] == "page_number"  # a TOC section keeps only non-entries
     assert by_text["Item 1. Business"] == "section_title"
     for page in ("12", "Page 3", "F-12", "xii", "23."):
         assert by_text[page] == "page_number"
@@ -241,7 +241,7 @@ def test_toc_tables_and_long_opening_blocks_are_not_noise() -> None:
     assert drop_reasons(blocks, sections) == {}
 
 
-def test_oversized_toc_section_keeps_subheadings() -> None:
+def test_toc_section_drops_only_toc_entries() -> None:
     sections = {
         "root": _section("root", "document", 1, None),
         "toc": _section("toc", "table_of_contents", 2),
@@ -258,8 +258,14 @@ def test_oversized_toc_section_keeps_subheadings() -> None:
     ]
     reasons = drop_reasons(blocks, sections)
     assert set(reasons) == {"b0", "b1"}
-    small = drop_reasons(blocks[:20], sections)
-    assert len(small) == 20
+    # Short prose before the first item (v5 dropped it in TOCs of up to 100
+    # short lines): forward-looking bullets, "Where You Can Find..." stay.
+    small = drop_reasons(
+        [*blocks[:2], SourceBlock("w", 99, "toc", "paragraph",
+                                  "•fluctuations in our effective tax rate;")],
+        sections,
+    )  # fmt: skip
+    assert set(small) == {"b0", "b1"}
 
 
 def test_running_headers_need_page_breaks_or_a_counter() -> None:
@@ -289,3 +295,31 @@ def test_running_headers_need_page_breaks_or_a_counter() -> None:
     assert "Example Corp and Subsidiaries" in dropped
     assert any(t.startswith("Example Corp | Form 10-K") for t in dropped)
     assert "US, Canada - Named Storm" not in dropped
+
+
+def test_repeated_subheading_away_from_page_breaks_stays() -> None:
+    sections = {
+        "root": _section("root", "document", 1, None),
+        **{s: _section(s, "item", 1000 + i) for i, s in enumerate("abc")},
+    }
+    texts: list[tuple[str, str]] = []
+    for page, section in enumerate("aabbccaabb", start=10):
+        texts += [
+            (section, "Body text of the page goes on for a while here."),
+            (section, "More Personal Computing"),  # a segment heading
+            (section, "(a)"),
+            (section, "Our segment consists of devices and gaming."),
+            (section, "Body text of the page goes on for a while here, again."),
+            (section, str(page)),
+        ]
+    blocks = [
+        SourceBlock(f"b{i}", 10 + i, s, "paragraph", t)
+        for i, (s, t) in enumerate(texts)
+    ]
+    reasons = drop_reasons(blocks, sections)
+    dropped = {
+        texts[int(k[1:])][1] for k, v in reasons.items() if v == "running_header"
+    }
+    # Within 3 blocks of a page number, but real text lies between (v5
+    # dropped both); markers never count.
+    assert dropped == set()

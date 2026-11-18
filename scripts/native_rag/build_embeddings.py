@@ -13,8 +13,20 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from src.llm import get_embedder
 from src.rag_engine.embedding.audit import audit_embeddings
-from src.rag_engine.embedding.pipeline import run_native_rag_embeddings
+from src.rag_engine.embedding.pipeline import (
+    BATCH_SIZE,
+    CONCURRENCY,
+    Throughput,
+    run_native_rag_embeddings,
+)
 from src.utils.logger import configure_logging
+
+
+def positive(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"{value} is not a positive integer")
+    return number
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,9 +46,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--concurrency",
-        type=int,
-        default=4,
-        help="Request groups sent at once to the embedding server (default 4)",
+        type=positive,
+        default=CONCURRENCY,
+        help=f"Requests in flight (default {CONCURRENCY})",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=positive,
+        default=BATCH_SIZE,
+        help=f"Chunks per request (default {BATCH_SIZE})",
     )
     parser.add_argument(
         "--limit", type=int, default=None, help="Embed at most this many chunks"
@@ -71,7 +89,7 @@ def main() -> int:
             args.gold_dir,
             embedder,
             datetime.now(UTC),
-            concurrency=args.concurrency,
+            throughput=Throughput(args.concurrency, args.batch_size),
             limit=args.limit,
         )
         print(json.dumps(asdict(summary), indent=2))

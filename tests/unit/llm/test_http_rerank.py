@@ -4,7 +4,12 @@ import httpx
 import pytest
 
 from src.llm.config import RerankProfile
-from src.llm.providers.http_rerank import HttpReranker, create_client
+from src.llm.providers.http_rerank import (
+    QWEN3_DEFAULT_INSTRUCTION,
+    HttpReranker,
+    create_client,
+    formatted,
+)
 from src.llm.types import LLMResponseError, RerankResult
 from tests.llm_support import RecordingServer
 
@@ -107,3 +112,43 @@ def test_client_sends_the_profile_key_only(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.delenv("RERANK_DEFAULT_API_KEY")
     assert "Authorization" not in create_client(PROFILE).headers
+
+
+def test_qwen3_prompt_format_wraps_query_and_documents() -> None:
+    server = RecordingServer([(200, results((0, 0.99)))])
+    profile = PROFILE.model_copy(
+        update={"prompt_format": "qwen3", "instruction": "Judge it"}
+    )
+    transport = httpx.MockTransport(server.handler(httpx.Response))
+    client = httpx.Client(base_url="http://vllm.test/v1", transport=transport)
+    HttpReranker(profile, client).rerank("Q?", ["doc"])
+    body = server.last_json
+    assert isinstance(body, dict)
+    assert body["query"].startswith("<|im_start|>system\nJudge whether the Document")
+    assert body["query"].endswith("<Instruct>: Judge it\n<Query>: Q?\n")
+    assert body["documents"] == [
+        "<Document>: doc<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    ]
+    default = formatted(PROFILE.model_copy(update={"prompt_format": "qwen3"}), "Q", [])
+    assert QWEN3_DEFAULT_INSTRUCTION in default[0]
+    assert formatted(PROFILE, "Q", ["d"]) == ("Q", ["d"])
+
+
+def test_instruction_needs_a_prompt_format() -> None:
+    with pytest.raises(ValueError, match="instruction needs a prompt_format"):
+        RerankProfile(
+            kind="rerank",
+            name="x",
+            provider="http_rerank",
+            model="m",
+            instruction="Judge it",
+        )
+
+
+def test_non_json_reply_is_a_response_error() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, text="<html>tunnel offline</html>")
+    )
+    client = httpx.Client(base_url="http://vllm.test/v1", transport=transport)
+    with pytest.raises(LLMResponseError, match="not JSON"):
+        HttpReranker(PROFILE, client).rerank("q", ["a"])

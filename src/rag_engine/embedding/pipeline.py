@@ -37,9 +37,20 @@ from src.utils.timer import timed_operation
 
 logger = get_logger(__name__)
 
-# Chunks per request group; `concurrency` groups are sent at once (the server
-# batches concurrent requests), then their vectors are written in order.
-CHUNKS_PER_GROUP = 128
+# One request = BATCH_SIZE chunks; CONCURRENCY requests in flight (a load
+# balancer spreads them over GPUs); vectors are kept in input order.
+BATCH_SIZE = 64
+CONCURRENCY = 8
+
+
+@dataclass(frozen=True)
+class Throughput:
+    """Requests in flight and chunks per request (None: module defaults)."""
+
+    concurrency: int | None = None
+    batch_size: int | None = None
+
+
 ROWS_PER_COMMIT = 4096
 
 
@@ -163,14 +174,15 @@ class _Run:
     embedder: EmbeddingModel
     processed_at: datetime
     concurrency: int
+    batch_size: int
     summary: EmbeddingsSummary
     rows: list[EmbeddingRecord] = field(default_factory=list)
     dimensions: int | None = None
 
     def embed(self, pending: Sequence[_Pending]) -> None:
         groups = [
-            pending[i : i + CHUNKS_PER_GROUP]
-            for i in range(0, len(pending), CHUNKS_PER_GROUP)
+            pending[i : i + self.batch_size]
+            for i in range(0, len(pending), self.batch_size)
         ]
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
             results = list(
@@ -286,7 +298,7 @@ def _embed_all(
 def _embed_years(
     run: _Run, chunks: Table, years: Sequence[int], limit: int | None
 ) -> None:
-    group = CHUNKS_PER_GROUP * run.concurrency
+    group = run.batch_size * run.concurrency
     for year in years:
         stored, _ = stored_hashes(run.table, run.embedder.model, year)
         buffer: list[_Pending] = []
@@ -306,7 +318,7 @@ def run_native_rag_embeddings(
     embedder: EmbeddingModel,
     processed_at: datetime,
     *,
-    concurrency: int = 4,
+    throughput: Throughput | None = None,
     limit: int | None = None,
 ) -> EmbeddingsSummary:
     """Embed every chunk of `native_rag.chunks` that has no vector of this
@@ -315,11 +327,14 @@ def run_native_rag_embeddings(
     The embedded string is the chunk's `context + "\\n\\n" + text`, as counted
     by the chunker; documents get no instruction (queries do, at search time).
     Vectors are L2-normalized and written in verified commits of
-    ROWS_PER_COMMIT rows, so an interrupted run (the Colab tunnel closing)
+    ROWS_PER_COMMIT rows, so an interrupted run (a tunnel closing)
     resumes where it stopped: a server failure ends the run with status
     `interrupted` and the vectors made so far committed. Stored vectors whose
     chunk is gone or changed, or of another size, reject the run before any
     request: purge the table and embed again.
+    Requests carry `batch_size` chunks (default BATCH_SIZE), `concurrency`
+    at once (default CONCURRENCY); timeout and
+    retries (with backoff) come from the profile (`timeout_s`, `max_retries`).
     `limit` caps the chunks embedded this run (trial runs).
     """
 
@@ -330,7 +345,8 @@ def run_native_rag_embeddings(
         run_args = {
             "embedder": embedder,
             "processed_at": processed_at,
-            "concurrency": concurrency,
+            "concurrency": (throughput and throughput.concurrency) or CONCURRENCY,
+            "batch_size": (throughput and throughput.batch_size) or BATCH_SIZE,
         }
         interrupted = False
         try:
@@ -342,7 +358,7 @@ def run_native_rag_embeddings(
             interrupted = True
             summary.problems.append(
                 f"embedding server failed ({type(error).__name__}: {str(error)[:300]}); "
-                "vectors made so far are kept: check the server (a new Colab tunnel "
+                "vectors made so far are kept: check the server (a new tunnel "
                 "URL goes in .env) and run again to continue"
             )
         except Exception as error:

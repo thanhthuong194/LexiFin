@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import logging
 import sys
 from datetime import date
 from pathlib import Path
@@ -57,19 +58,19 @@ FIXTURE_ROWS: dict[str, tuple[int, str]] = {
         "7a7d386b5f1bb3f39a12d4ba4590ccedd0e2a41a0f205ccd56dd3e58051608d4",
     ),
     "sec_filings.sections": (
-        3,
+        4,
         "e53dfa41277e2f7d29836cb002cde7459e71262720e89fa29502caf7a531f7d5",
     ),
     "sec_filings.content_blocks": (
-        3,
+        4,
         "73b19b3b1b32d21c9905f1b10b54aa6a96a31e10b48cc08e30c66d01ef920dc5",
     ),
     "sec_filings.document_tables": (
-        1,
+        2,
         "5be7d16c45da8e740308ea3b6c25c39030be679095f799da93c75e327e002c46",
     ),
     "sec_filings.document_table_cells": (
-        1,
+        2,
         "46606c5da07733d89e9b21425b60dcfba6e2490933057da551e465f2edde6237",
     ),
     "sec_filings.document_links": (
@@ -97,7 +98,7 @@ FIXTURE_ROWS: dict[str, tuple[int, str]] = {
         "790e3b024c61f9a81dbff7dbfb30560f9a88131fc2f461c1cb55545d9847d6b6",
     ),
     "sec_filings.xbrl_facts": (
-        1,
+        2,
         "80990c6684e766b22b7a76e0e239013ab826cc4be1c6d6b0b38c9507b8eaa8ee",
     ),
     "sec_filings.xbrl_dimensions": (
@@ -649,7 +650,14 @@ def _sample_query(
             *arguments,
         ],
     )
-    status = query_silver.main()
+    # As on the command line, where nothing configures logging: INFO logs of
+    # an earlier test's configuration must not mix into the CSV on stdout.
+    capsys.readouterr()  # drop earlier output (table reads log to stdout)
+    logging.disable(logging.INFO)
+    try:
+        status = query_silver.main()
+    finally:
+        logging.disable(logging.NOTSET)
     return status, list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
 
 

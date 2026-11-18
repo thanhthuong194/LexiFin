@@ -9,6 +9,8 @@ from `native_rag.chunks` + `native_rag.embeddings` at any time.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -68,10 +70,10 @@ DATETIME_FIELDS = ("filing_date", "period_end_date")
 TENANT_FIELD = "cik"
 
 
-# Version of what a point is built from besides the chunk text: payload
-# fields and the BM25 vector (tokenizer, stopwords, AVG_DOC_WORDS). Bump it
-# when either changes: chunk hashes do not change, so an incremental load into
-# the old collection would skip every point.
+# Version of the BM25 vector (tokenizer, stopwords, AVG_DOC_WORDS, weights).
+# Bump it when that changes: neither chunk hashes nor point digests change,
+# so an incremental load into the old collection would skip every point.
+# Payload changes need no bump: `point_sha256` covers them.
 INDEX_VERSION = 1
 
 
@@ -88,43 +90,65 @@ def rfc3339(day: date | None) -> str | None:
     return f"{day.isoformat()}T00:00:00Z" if day else None
 
 
-def payload(chunk: dict[str, Any], corpus: Corpus) -> dict[str, Any]:
-    """Point payload from a `native_rag.chunks` row: filter, citation and
-    context-expansion fields, the text, and the hash it was built from."""
+# Payload fields copied from a `native_rag.chunks` row (dates are converted).
+_COPIED = (
+    "chunk_id",
+    "filing_id",
+    "document_id",
+    "section_id",
+    "cik",
+    "tickers",
+    "company_name",
+    "form",
+    "document_type",
+    "fiscal_year",
+    "fiscal_period",
+    "section_topic",
+    "section_title",
+    "subheading",
+    "chunk_kind",
+    "table_title",
+    "chunk_ordinal",
+    "part",
+    "part_count",
+    "accession_number",
+    "sec_url",
+    "token_count",
+    "chunk_sha256",
+)
+# Chunk columns a point digest needs (the text is covered by `chunk_sha256`).
+DIGEST_COLUMNS = (*_COPIED, "filing_date", "period_end_date")
 
-    keys = (
-        "chunk_id",
-        "filing_id",
-        "document_id",
-        "section_id",
-        "cik",
-        "tickers",
-        "company_name",
-        "form",
-        "document_type",
-        "fiscal_year",
-        "fiscal_period",
-        "section_topic",
-        "section_title",
-        "subheading",
-        "chunk_kind",
-        "table_title",
-        "chunk_ordinal",
-        "part",
-        "part_count",
-        "accession_number",
-        "sec_url",
-        "context",
-        "text",
-        "token_count",
-        "chunk_sha256",
-    )
-    found = {key: chunk[key] for key in keys}
+
+def _metadata(chunk: dict[str, Any], corpus: Corpus) -> dict[str, Any]:
+    found = {key: chunk[key] for key in _COPIED}
     found["filing_date"] = rfc3339(chunk["filing_date"])
     found["period_end_date"] = rfc3339(chunk["period_end_date"])
     found["corpus"] = corpus.name
     found["jurisdiction"] = corpus.jurisdiction
     found["language"] = corpus.language
+    return found
+
+
+def point_digest(chunk: dict[str, Any], corpus: Corpus) -> str:
+    """SHA-256 of everything a point holds besides its vectors' math: the
+    payload with the text standing in as `chunk_sha256` (which also fixes
+    the dense and BM25 inputs). A payload change without a text change
+    (Silver metadata rebuilt) changes it, so the load rewrites the point."""
+
+    text = json.dumps(_metadata(chunk, corpus), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def payload(chunk: dict[str, Any], corpus: Corpus) -> dict[str, Any]:
+    """Point payload from a `native_rag.chunks` row: filter, citation and
+    context-expansion fields, the text, the hash it was built from, and the
+    point digest the load compares."""
+
+    found = _metadata(chunk, corpus)
+    found["context"] = chunk["context"]
+    found["text"] = chunk["text"]
+    found["point_sha256"] = point_digest(chunk, corpus)
     return found
 
 
@@ -226,6 +250,10 @@ def collection_problems(
         "dense on disk": bool(dense.on_disk) if dense else None,
         "sparse IDF": sparse.modifier == models.Modifier.IDF if sparse else None,
         "quantized": config.quantization_config is not None,
+        "payload on disk": bool(params.on_disk_payload),
+        "sparse on disk": bool(sparse.index.on_disk)
+        if sparse and sparse.index
+        else None,
         "hnsw m": _hnsw(dense, config).m,
         "hnsw ef_construct": _hnsw(dense, config).ef_construct,
     }
@@ -235,6 +263,8 @@ def collection_problems(
         "dense on disk": settings.large,
         "sparse IDF": True,
         "quantized": settings.large,
+        "payload on disk": settings.large,
+        "sparse on disk": settings.large,
         "hnsw m": settings.hnsw_m,
         "hnsw ef_construct": settings.hnsw_ef_construct,
     }

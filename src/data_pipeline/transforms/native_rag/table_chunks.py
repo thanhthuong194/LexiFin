@@ -23,7 +23,15 @@ _MONTH = re.compile(
 # Cells glued to their neighbour: currency signs before, closers after.
 _LEADING = frozenset({"$", "€", "£", "¥", "("})
 _TRAILING = frozenset({"%", ")", ")%", "%)", "x", "bps"})
+_EXHIBIT_NUMBER = re.compile(r"^\d+(\.\d+)+")
 _TOC_ROW = re.compile(r"^(part|item)\s+[ivx\d]", re.IGNORECASE)
+# Rows of an 8-K's contents table besides its items (`SIGNATURES | 4`).
+_TOC_EXTRA_ROW = re.compile(
+    r"^(signatures?|exhibits?(\s+index)?|exhibit\s+\d)", re.IGNORECASE
+)
+# A contents table lists exhibits by number alone (`EXHIBIT 4.2`); an exhibit
+# index row carries a description.
+_BARE_EXHIBIT = re.compile(r"^exhibit\s+\d+(\.\d+)*$", re.IGNORECASE)
 _PAGE = re.compile(r"^([a-z]-)?\d{1,3}$|^[ivxl]{1,6}$", re.IGNORECASE)
 _SIGNATURE = re.compile(r"^(/s/|by:)", re.IGNORECASE)
 
@@ -70,7 +78,8 @@ def _rows(cells: Sequence[Cell]) -> list[list[Cell]]:
 def classify_table(cells: Sequence[Cell]) -> TableKind:
     """How a table is read.
 
-    `toc`: no `$` cell, and most non-empty rows (at least 3) are TOC rows
+    `toc`: no `$` cell, and most non-empty rows (at least 3, or both of 2)
+    are TOC rows
     (`_is_toc_row`): a table of contents outside a TOC section, so a small
     data table whose values look like page numbers stays data. `signature`:
     a cell starts
@@ -84,7 +93,10 @@ def classify_table(cells: Sequence[Cell]) -> TableKind:
         return "layout"
     has_currency = any(c.text.strip() in _LEADING for row in rows for c in row)
     toc_rows = sum(_is_toc_row(row) for row in rows)
-    if len(rows) >= 3 and not has_currency and toc_rows * 2 > len(rows):
+    if not has_currency and (
+        (len(rows) >= 3 and toc_rows * 2 > len(rows))
+        or (len(rows) == 2 and toc_rows == 2)  # `ITEM 5.02 ... 3` / `SIGNATURES 4`
+    ):
         return "toc"
     if any(_SIGNATURE.match(cell.text.strip()) for row in rows for cell in row):
         return "signature"
@@ -98,17 +110,21 @@ TOC_LABEL_MIN_CHARS = 20
 
 
 def _is_toc_row(row: Sequence[Cell]) -> bool:
-    """A row starting with PART/ITEM, or a long text label (at least 20
-    chars) followed only by a page number (`Consolidated Balance Sheets | 45`)."""
+    """A row starting with PART/ITEM; a long text label (at least 20 chars)
+    followed only by a page number (`Consolidated Balance Sheets | 45`); or
+    SIGNATURES / EXHIBIT followed by a page number, or `EXHIBIT 4.2` alone
+    (8-K contents tables)."""
 
     first = row[0].text.strip()
-    if _TOC_ROW.match(first):
+    if _TOC_ROW.match(first) or (len(row) == 1 and _BARE_EXHIBIT.match(first)):
         return True
-    return (
+    paged = (
         len(row) >= 2
         and _PAGE.match(row[-1].text.strip()) is not None
-        and len(first) >= TOC_LABEL_MIN_CHARS
         and not any(is_value(cell.text) for cell in row[:-1])
+    )
+    return paged and (
+        len(first) >= TOC_LABEL_MIN_CHARS or bool(_TOC_EXTRA_ROW.match(first))
     )
 
 
@@ -172,12 +188,14 @@ def render_table(cells: Sequence[Cell]) -> RenderedTable:
     rows = _rows(cells)
     label_column = min(cell.column for row in rows for cell in row)
     leading, header_rows = _header(rows, label_column)
-    groups, notes = _groups(
+    groups, notes, label_head = _groups(
         header_rows, label_column, _first_value_column(rows, label_column)
     )
     header_lines = [*leading, *notes]
     if groups:
-        header_lines.append(" | ".join(["", *(label for _, _, label in groups)]))
+        header_lines.append(
+            " | ".join([label_head, *(label for _, _, label in groups)])
+        )
     body = rows[len(leading) + len(header_rows) :]
     return RenderedTable(
         tuple(header_lines),
@@ -194,7 +212,11 @@ def _header(
         if any(is_value(cell.text) for cell in row):
             break
         has_label = any(cell.column == label_column for cell in row)
-        if header_rows and has_label:
+        if (
+            header_rows
+            and has_label
+            and not _labelled_header(row, label_column, header_rows)
+        ):
             break
         if all(cell.column == label_column for cell in row):
             leading.append(" ".join(cell.text.strip() for cell in row))
@@ -205,23 +227,61 @@ def _header(
     return leading, header_rows
 
 
+def _labelled_header(
+    row: Sequence[Cell], label_column: int, above: Sequence[Sequence[Cell]]
+) -> bool:
+    """A lower header row that also has text in the label column (`(In
+    millions) | Fair Value | Unrealized Losses` under `Less than 12 Months`):
+    some header cell above spans two or more of its cells. A text row that
+    maps one to one onto the columns (`Class A | GOOGL | Nasdaq`, exhibit
+    index rows, `December 31, 2022 | 11.6 years`) is data, and so is any
+    row once a header row above has its own label-column text (`Exhibit
+    Number`), or whose label is an exhibit number (`10.06.1`)."""
+
+    cells = [cell for cell in row if cell.column != label_column]
+    uppers = [u for header in above for u in header if u.column != label_column]
+    # Two or more such cells: one wide cell (`(In millions)` over the date
+    # columns) is a note, not a grouping row.
+    if len(cells) >= 2 and all(
+        sum(cell.column <= u.column <= cell.last_column for u in uppers) >= 2
+        for cell in cells
+    ):
+        # Each cell spans several columns above (`Year Ended June 30, | 2024 |
+        # 2023` under `Shares | Amount` pairs): a grouping header row.
+        return True
+    label = " ".join(c.text.strip() for c in row if c.column == label_column)
+    if _EXHIBIT_NUMBER.match(label) or any(
+        cell.column == label_column for header in above for cell in header
+    ):
+        return False
+    return any(
+        sum(upper.column <= cell.column <= upper.last_column for cell in cells) >= 2
+        for header in above
+        for upper in header
+        if upper.column != label_column
+    )
+
+
 def _groups(
     header_rows: Sequence[list[Cell]], label_column: int, first_value: int
-) -> tuple[list[tuple[int, int, str]], list[str]]:
+) -> tuple[list[tuple[int, int, str]], list[str], str]:
     """Output columns from the header row with the most cells (the last on
-    ties), prefixed by the header cells above that cover them; single-cell
-    rows below it (units such as `($ in millions)`) become notes."""
+    ties), prefixed by the header cells above that cover them. A header row
+    below it with several cells splits the columns it falls under (`Common
+    Stock` over `Shares | Amount`: two columns; v5 merged their values into
+    one slot); a single-cell row below it (units such as `($ in millions)`)
+    becomes a note. Also returns that row's label-column text (`Exhibit`,
+    `(In millions)`), the header of the label column."""
 
     if not header_rows:
-        return [], []
+        return [], [], ""
     position = max(range(len(header_rows)), key=lambda i: (len(header_rows[i]), i))
-    notes = [
-        " ".join(cell.text.strip() for cell in row)
-        for row in header_rows[position + 1 :]
-    ]
+    notes: list[str] = []
+    label_head = ""
     groups: list[tuple[int, int, str]] = []
     for cell in header_rows[position]:
         if cell.column == label_column and cell.last_column < first_value:
+            label_head = cell.text.strip()  # `(In millions)`, `Exhibit`
             continue
         parts = [
             upper.text.strip()
@@ -233,7 +293,57 @@ def _groups(
         groups.append(
             (cell.column, cell.last_column, " ".join([*parts, cell.text.strip()]))
         )
-    return groups, notes
+    for row in header_rows[position + 1 :]:
+        lower = [
+            cell
+            for cell in row
+            if not (cell.column == label_column and cell.last_column < first_value)
+        ]
+        if len(lower) < 2:
+            notes.append(" ".join(cell.text.strip() for cell in row))
+            continue
+        groups = _refine(groups, lower)
+        label = " ".join(c.text.strip() for c in row if c not in lower)
+        if label:
+            notes.append(label)  # `(In millions)` over the label column
+    return groups, notes, label_head
+
+
+def _refine(
+    groups: Sequence[tuple[int, int, str]], lower: Sequence[Cell]
+) -> list[tuple[int, int, str]]:
+    """Split each column by the lower header cells starting inside it (one
+    cell only extends its label); a cell under no column becomes one."""
+
+    refined: list[tuple[int, int, str]] = []
+    used: set[int] = set()
+    for first, last, label in groups:
+        wider = [
+            c
+            for c in lower
+            if c.column <= first
+            and last <= c.last_column
+            and c.last_column - c.column > last - first
+        ]
+        if wider:  # a year over `Shares | Amount`: `2024 Shares`, `2024 Amount`
+            used.update(id(c) for c in wider)
+            refined.append((first, last, f"{wider[0].text.strip()} {label}".strip()))
+            continue
+        inside = [c for c in lower if first <= c.column <= last]
+        used.update(id(c) for c in inside)
+        if len(inside) == 1:
+            refined.append((first, last, f"{label} {inside[0].text.strip()}".strip()))
+        elif inside:
+            refined += [
+                (c.column, c.last_column, f"{label} {c.text.strip()}".strip())
+                for c in inside
+            ]
+        else:
+            refined.append((first, last, label))
+    refined += [
+        (c.column, c.last_column, c.text.strip()) for c in lower if id(c) not in used
+    ]
+    return sorted(refined, key=lambda group: group[0])
 
 
 def _is_label(column: int, text: str, first: int, label_column: int) -> bool:

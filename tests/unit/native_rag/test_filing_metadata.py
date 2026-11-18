@@ -40,15 +40,17 @@ def test_canonical_names_are_stable_and_keep_renames() -> None:
         "d": "Meta Platforms, Inc.",
     }
     chosen = _canonical_names(rows, names)
+    # The earliest filing's spelling, even upper case: a later filing never
+    # renames chunks already stored.
     assert chosen == {
-        "a": "Microsoft Corporation",
-        "b": "Microsoft Corporation",
-        "c": "Microsoft Corporation",
+        "a": "MICROSOFT CORP",
+        "b": "MICROSOFT CORP",
+        "c": "MICROSOFT CORP",
         "d": "Meta Platforms, Inc.",
     }
     later = [*rows, {"filing_id": "e", "cik": "1", "filing_date": date(2026, 1, 1)}]
     assert _canonical_names(later, {**names, "e": "Microsoft Corp."})["a"] == (
-        "Microsoft Corporation"
+        "MICROSOFT CORP"
     )
 
 

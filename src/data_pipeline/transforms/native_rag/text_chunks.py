@@ -4,7 +4,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from src.data_pipeline.transforms.native_rag.noise import COMPANY_SUFFIX
+from src.data_pipeline.transforms.native_rag.noise import COMPANY_SUFFIX, MARKER_ONLY
 from src.data_pipeline.transforms.native_rag.sentences import split_sentences
 
 TITLE_MAX_CHARS = 120
@@ -16,14 +16,16 @@ JOINER = "\n"
 def is_title_like(text: str) -> bool:
     """A short standalone line that reads as a subheading.
 
-    At most 120 chars and 12 words, contains a letter, and does not end in
-    sentence or clause punctuation (`.`, `,`, `;`, `:`), except a company
-    suffix (`Amazon.com, Inc.`).
+    At most 120 chars and 12 words, contains a letter, is not a lone
+    footnote marker (`(c)`), and does not end in sentence or clause
+    punctuation (`.`, `,`, `;`, `:`), except a company suffix
+    (`Amazon.com, Inc.`).
     """
 
     stripped = text.strip()
     return (
         0 < len(stripped) <= TITLE_MAX_CHARS
+        and not MARKER_ONLY.match(stripped)
         and len(stripped.split()) <= TITLE_MAX_WORDS
         and bool(_LETTER.search(stripped))
         and (stripped[-1] not in ".,;:" or bool(COMPANY_SUFFIX.search(stripped)))
@@ -92,10 +94,14 @@ def chunk_paragraphs(
     1. Topic units: a title-like paragraph opens a unit and names its
        subheading; paragraphs before the first title keep `subheading` (the
        one in force where the run starts).
-    2. A unit under `min_tokens` merges whole into the next unit, else into
-       the previous one, when the result fits; otherwise it stays short. The
-       merged unit keeps the first unit's subheading. A unit that is only its
-       title line keeps the subheading in force before it.
+    2. A unit that is only title lines (a category heading over the next
+       heading, "Exhibit 99.1" over the release title) joins the next unit
+       even when that unit will be split, under the next unit's subheading
+       (the closer one). Any other unit under `min_tokens` merges whole into
+       the next unit, else into the previous one, when the result fits;
+       otherwise it stays short; the merged unit keeps the first unit's
+       subheading. A unit left as only its title line keeps the subheading in
+       force before it.
     3. A unit that fits is one chunk; a longer one is cut between paragraphs
        into balanced parts; a paragraph that alone exceeds the budget is cut
        by sentences (`_split_paragraph`) and never packed with neighbours.
@@ -139,6 +145,16 @@ def _merge_short(units: list[_Unit], sizing: Sizing) -> list[_Unit]:
     index = 0
     while index < len(units):
         unit = units[index]
+        if (
+            index + 1 < len(units)
+            and all(p.title_like for p in unit.paragraphs)
+            and sizing.size(unit.text()) < sizing.min_tokens
+        ):
+            following = units[index + 1]
+            units[index : index + 2] = [
+                _Unit(following.subheading, unit.paragraphs + following.paragraphs)
+            ]
+            continue
         if len(units) > 1 and sizing.size(unit.text()) < sizing.min_tokens:
             if index + 1 < len(units):
                 merged = _Unit(
@@ -180,8 +196,20 @@ def _split_unit(unit: _Unit, sizing: Sizing) -> list[TextChunk]:
         if sizing.size(paragraph.text) > budget or not sizing.fits(
             unit.subheading, paragraph.text
         ):
+            long = paragraph
+            if run and all(p.title_like for p in run):
+                # Title lines right above a paragraph cut by sentences open
+                # its first part instead of standing alone.
+                ids = [b for p in [*run, paragraph] for b in p.block_ids]
+                long = Paragraph(
+                    ids[0],
+                    JOINER.join([*(p.text for p in run), paragraph.text]),
+                    False,
+                    tuple(dict.fromkeys(ids[1:])),
+                )
+                run.clear()
             flush()
-            chunks.extend(_split_paragraph(paragraph, unit.subheading, sizing))
+            chunks.extend(_split_paragraph(long, unit.subheading, sizing))
         else:
             run.append(paragraph)
     flush()

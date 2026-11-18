@@ -11,6 +11,7 @@ from src.data_pipeline.transforms.sec_filings.html_dom import (
     is_hidden,
     is_link,
     normalize_text,
+    spacing_sides,
 )
 from src.data_pipeline.transforms.sec_filings.html_tables import (
     PhysicalCell,
@@ -142,6 +143,8 @@ class _BlockWalk:
             return False
         if is_block_container(tag):
             self.open(element, tag)
+        elif spacing_sides(element)[0]:
+            self.add(" ")  # CSS gap before an inline run: "(1) Goodwill"
         self.link_depth += is_link(element, tag)
         self.add(" " if tag == "br" else element.text)
         return False
@@ -159,6 +162,8 @@ class _BlockWalk:
             self.link_depth -= is_link(element, tag)
             if is_block_container(tag):
                 self.close()
+            elif spacing_sides(element)[1]:
+                self.add(" ")
         self.add(element.tail)
 
     def _flush(self, container: _OpenContainer) -> None:
@@ -189,7 +194,7 @@ def extract_blocks(root: etree._Element) -> ExtractedBlocks:
     Every visible text segment outside tables belongs to its nearest block
     container (h1-h6, p, li, pre, blockquote, div or another block element);
     inline elements such as span or ix:nonNumeric add their text to that
-    container. A child container splits its parent's text into separate runs,
+    container, separated by a space when their style sets a horizontal gap. A child container splits its parent's text into separate runs,
     so no text is emitted twice and document order is kept. Each `<table>`
     with a visible cell is one `table` block; a nested table is its own block.
     Hidden elements contribute nothing, but the text after them still counts.

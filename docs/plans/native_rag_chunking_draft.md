@@ -1,5 +1,7 @@
 # Native RAG: chunking spec
 
+Historical (pre-implementation plan); current rules: `docs/data/native_rag_model.md`.
+
 Status 2026-11-16: implemented (as-built reference: `docs/data/native_rag_model.md`). Scope is chunking only (Silver -> `native_rag.chunks`). Embedding, Qdrant, retrieval, eval and GraphRAG come later; LLM-as-judge is built in a separate session. Teacher-facing summary: section B4 of `docs/reports/silver_improvements_report.html`.
 
 ## 1. Decisions
@@ -77,7 +79,7 @@ Table properties: `lexifin.rules-version`, tokenizer revision + SHA-256, Silver 
 
 ## 7. Operation
 
-- `uv run python scripts/native_rag/build_chunks.py --data-dir <dir>`; stage list in `pipelines/native_rag/gold_stages.py`.
+- `uv run python scripts/native_rag/build_chunks.py --data-dir <dir>`.
 - Incremental: skip documents with complete chunks; documents with zero chunks re-examined each run.
 - Logs via `src/utils/logger.py` (`native_rag_chunks_started`, `_batch_committed`, `_document_rejected`, `_completed`, with `run_id`); phases timed with `timed_operation`; final summary printed.
 - Audit (`quality/native_rag/audit.py`): unique keys, complete ordinals and parts; FKs to Silver, one section per chunk; coverage (chunked ∪ noise blocks = all narrative blocks, split parts rebuild the block, all table rows present); token cap; hash recompute; exact rebuild of the latest 10-K/10-Q/8-K; WARN on chunks < 16 tokens, documents without chunks, > 30% filtered.
@@ -96,20 +98,19 @@ src/data_pipeline/storage/native_rag/chunks.py       Iceberg table spec
 src/data_pipeline/transforms/native_rag/
     tokenizer.py  section_topics.py  noise.py  sentences.py
     context.py    table_chunks.py    text_chunks.py
-src/data_pipeline/pipelines/native_rag/{gold_stages,filing_metadata,chunks}.py
+src/data_pipeline/pipelines/native_rag/{filing_metadata,chunks}.py
 src/data_pipeline/quality/native_rag/audit.py
 scripts/native_rag/build_chunks.py
 tests/unit/native_rag/, tests/integration/native_rag/
 docs/data/native_rag_model.md
 ```
-`src/data_pipeline/transforms/gold/.gitkeep` to be removed (ask first).
 
 ## 9. Build order
 
 1. Gold catalog: `open_gold_catalog` in `storage/iceberg.py`.
 2. Contract + table spec of `chunks`.
 3. Pure transforms, each with unit tests: tokenizer -> section_topics -> noise -> sentences -> context -> table_chunks -> text_chunks.
-4. Pipeline: filing_metadata (company, filing, dei) -> chunks (read, chunk, write, incremental) -> gold_stages.
+4. Pipeline: filing_metadata (company, filing, dei) -> chunks (read, chunk, write, incremental).
 5. `scripts/native_rag/build_chunks.py`.
 6. Audit.
 7. Integration test with pinned digest.

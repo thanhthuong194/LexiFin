@@ -96,7 +96,8 @@ def fact_records(
 
     `references` holds the instance's stored context and unit refs; a fact
     whose refs are not among them raises XbrlCoreMismatch. `locations` are
-    the (block_id, cell_id) of each fact. The count is of facts whose value
+    the (block_id, cell_id) of each fact; a fact with continuations spans
+    several blocks and gets neither. The count is of facts whose value
     the processor could not normalize, or whose numeric value is not an exact
     plain decimal: those keep their raw value and get no normalized or
     numeric value.
@@ -104,13 +105,15 @@ def fact_records(
 
     context_refs, unit_refs = references
     records, unusable = [], 0
-    for order, (fact, (block_id, cell_id)) in enumerate(
+    for order, (fact, location) in enumerate(
         zip(facts, locations, strict=True), start=1
     ):
         if fact.context_ref not in context_refs:
             raise XbrlCoreMismatch(
                 f"fact {order}: context {fact.context_ref!r} is not in xbrl_contexts"
             )
+        # Continued text spans several blocks: no single location.
+        block_id, cell_id = (None, None) if fact.continuation_refs else location
         numeric = None
         if fact.fact_kind == "numeric" and fact.normalized_value is not None:
             numeric = canonical_decimal(fact.normalized_value)

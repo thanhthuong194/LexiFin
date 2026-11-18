@@ -11,6 +11,19 @@ from structlog.stdlib import BoundLogger
 from structlog.typing import EventDict, Processor
 
 
+class _StdoutHandler(logging.Handler):
+    """Writes to `sys.stdout` as it is when a record is emitted, not when
+    logging was configured: a replaced stdout (pytest capture, a redirect)
+    still receives the logs."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            sys.stdout.write(self.format(record) + "\n")
+            sys.stdout.flush()
+        except (OSError, ValueError):  # closed or broken stream: report, never raise
+            self.handleError(record)
+
+
 def configure_logging(
     *,
     service: str = "lexifin",
@@ -28,7 +41,7 @@ def configure_logging(
         raise ValueError(f"Invalid log level: {level}")  # noqa: TRY004
 
     logging.basicConfig(
-        format="%(message)s", level=log_level, stream=sys.stdout, force=True
+        format="%(message)s", level=log_level, handlers=[_StdoutHandler()], force=True
     )
 
     def add_app_context(

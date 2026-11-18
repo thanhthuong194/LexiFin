@@ -15,6 +15,12 @@ _INLINE_XBRL_NAMESPACE = "http://www.xbrl.org/2013/inlinexbrl"
 _HIDDEN_STYLE = re.compile(
     r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\b"
 )
+# Inline spacing that renders a gap between runs (Workiva "(1)<span
+# style=padding-left:15pt>Goodwill"); a number before any unit, > 0.
+_HORIZONTAL_SPACING = re.compile(
+    r"(?:^|;)\s*(?:padding|margin)-(left|right)\s*:\s*\+?(\d*\.?\d+)"
+)
+_INLINE_BLOCK = re.compile(r"(?:^|;)\s*display\s*:\s*inline-block\b")
 # Zero-width characters that carry no content; ZWJ/ZWNJ are kept because they
 # change how some scripts and emoji render.
 _ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u2060\ufeff"))
@@ -83,6 +89,22 @@ def is_hidden(element: etree._Element, tag: str) -> bool:
     return bool(_HIDDEN_STYLE.search((element.get("style") or "").lower()))
 
 
+def spacing_sides(element: etree._Element) -> tuple[bool, bool]:
+    """Whether an inline element's style puts a visible gap (before, after) its text.
+
+    Left padding/margin gives a gap before, right padding/margin after, and
+    `display:inline-block` both.
+    """
+
+    style = (element.get("style") or "").lower()
+    if not style:
+        return False, False
+    if _INLINE_BLOCK.search(style):
+        return True, True
+    sides = {side for side, value in _HORIZONTAL_SPACING.findall(style) if float(value)}
+    return "left" in sides, "right" in sides
+
+
 def is_link(element: etree._Element, tag: str) -> bool:
     """Whether an element is a hyperlink (`<a href>`)."""
 
@@ -113,8 +135,8 @@ def visible_text(element: etree._Element) -> tuple[str, str]:
 
     Hidden subtrees and nested tables with a visible cell contribute nothing
     (such a table is represented on its own); the text of a nested table
-    without cells stays with the element. Block-level children and `<br>`
-    separate words.
+    without cells stays with the element. Block-level children, `<br>` and
+    inline children with horizontal spacing separate words.
     """
 
     pieces: list[str] = []
@@ -131,14 +153,17 @@ def visible_text(element: etree._Element) -> tuple[str, str]:
                 walker.skip_subtree()
                 continue
             link_depth += is_link(node, tag)
-            text = " " if tag in BLOCK_LEVEL_TAGS or tag == "br" else ""
-            text += node.text or ""
+            separated = tag in BLOCK_LEVEL_TAGS or tag == "br"
+            spaced = node is not element and spacing_sides(node)[0]
+            text = (" " if separated or spaced else "") + (node.text or "")
         else:
             if node is element:
                 continue
             if not skipped:
                 link_depth -= is_link(node, tag)
-            text = (" " if tag in BLOCK_LEVEL_TAGS else "") + (node.tail or "")
+            spaced = not skipped and spacing_sides(node)[1]
+            separated = tag in BLOCK_LEVEL_TAGS or spaced
+            text = (" " if separated else "") + (node.tail or "")
         pieces.append(text)
         if link_depth:
             link_pieces.append(text)

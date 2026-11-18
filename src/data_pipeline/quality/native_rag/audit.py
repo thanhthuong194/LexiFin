@@ -44,7 +44,8 @@ logger = get_logger(__name__)
 Status = Literal["PASS", "WARN", "FAIL", "SKIP"]
 # Documents whose share of characters outside every chunk exceeds this get a WARN.
 UNCOVERED_WARN_SHARE = 0.30
-SMALL_CHUNK_TOKENS = 16
+# Chunk bodies (prefix excluded) shorter than this get a WARN ("None." is fine).
+SMALL_BODY_CHARS = 20
 SAMPLE_ROWS = 5
 
 
@@ -125,8 +126,11 @@ class _YearChunks:
         default_factory=lambda: defaultdict(list)
     )
     covered: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
-    # Occurrences of each block in chunks that are not part of a split chain.
-    unsplit: Counter[str] = field(default_factory=Counter)
+    # The chunk groups each block is in: one table (all its parts), one split
+    # paragraph chain, or one plain chunk.
+    groups: dict[str, set[tuple[str, str]]] = field(
+        default_factory=lambda: defaultdict(set)
+    )
     block_sections: list[tuple[str, str, str]] = field(default_factory=list)
 
 
@@ -135,7 +139,7 @@ def _check_row(row: dict[str, Any], max_tokens: int, found: _Findings) -> None:
     found.rows += 1
     if row["token_count"] > max_tokens:
         found.over_cap.append(chunk_id)
-    if row["token_count"] < SMALL_CHUNK_TOKENS:
+    if len(row["text"].strip()) < SMALL_BODY_CHARS:
         found.small.append(chunk_id)
     if row["chunk_sha256"] != chunk_sha256(row["context"], row["text"]):
         found.bad_hash.append(chunk_id)
@@ -155,10 +159,16 @@ def _scan_year_chunks(
         chunks.ordinals[document_id].append(
             (row["chunk_ordinal"], row["document_chunk_count"])
         )
+        if row["table_id"]:
+            group = ("table", row["table_id"])
+        elif row["part"]:
+            chain = row["chunk_ordinal"] - row["part"] + 1
+            group = ("split", f"{document_id}:{chain}")
+        else:
+            group = ("chunk", row["chunk_id"])
         for block_id in row["block_ids"]:
             chunks.covered[document_id].add(block_id)
-            if row["part"] is None:
-                chunks.unsplit[block_id] += 1
+            chunks.groups[block_id].add(group)
             chunks.block_sections.append((row["chunk_id"], block_id, row["section_id"]))
         _check_row(row, max_tokens, found)
         if document_id in sample:
@@ -211,10 +221,14 @@ def _audit_year(
         for chunk, block, section in chunks.block_sections
         if block_section.get(block) != section
     ]
-    # A layout table's rows may continue in the next chunk; any other block
-    # outside a split chain is in exactly one chunk.
+    # Every block is in one group: one table's parts, one split chain, or
+    # one chunk. Only a layout table's rows (a table block read as text, no
+    # `table_id`) may continue in the next text chunks.
     found.repeated_blocks += sorted(
-        block for block, n in chunks.unsplit.items() if n > 1 and block not in tables
+        block
+        for block, groups in chunks.groups.items()
+        if len(groups) > 1
+        and not (block in tables and all(kind != "table" for kind, _ in groups))
     )
     found.without_chunks += sorted(
         d
@@ -342,7 +356,7 @@ def _report_findings(
     report.add(
         "small_chunks",
         found.small,
-        f"chunks under {SMALL_CHUNK_TOKENS} tokens",
+        f"chunk bodies under {SMALL_BODY_CHARS} characters",
         warn=True,
     )
     report.add(
@@ -359,7 +373,7 @@ def _report_findings(
     report.add(
         "block_in_one_chunk",
         found.repeated_blocks,
-        "a non-table block outside a split chain is in exactly one chunk",
+        "every block is in one table, one split chain or one chunk",
     )
     report.add(
         "documents_without_chunks",

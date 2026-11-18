@@ -94,3 +94,16 @@ def test_log_context_is_bound_and_temporary(capsys):
 def test_configure_logging_rejects_invalid_level():
     with pytest.raises(ValueError, match="Invalid log level"):
         configure_logging(level="INVALID")
+
+
+def test_logs_follow_a_stdout_replaced_after_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    import sys
+
+    configure_logging()
+    replaced = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", replaced)
+    get_logger("test").info("after_redirect")
+    assert "after_redirect" in replaced.getvalue()

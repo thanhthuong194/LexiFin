@@ -12,6 +12,7 @@ from src.data_pipeline.contracts.sec_filings.xbrl_core import (
     CLARK_QNAME,
     canonical_sha256,
 )
+from src.data_pipeline.contracts.sec_filings.xbrl_networks import plain_decimal
 
 FactKind = Literal["numeric", "non_numeric", "fraction"]
 
@@ -94,13 +95,16 @@ def fact_sha256(values: dict[str, Any]) -> str:
 
 
 def canonical_decimal(value: str) -> str | None:
-    """The exact plain-notation form of a finite decimal, or None if it is not one."""
+    """The exact plain form of a finite decimal, or None if it is not one.
+
+    Insignificant zeros are dropped and -0 becomes 0 ("11.80" -> "11.8").
+    """
 
     try:
         number = Decimal(value)
     except InvalidOperation:
         return None
-    return format(number, "f") if number.is_finite() else None
+    return plain_decimal(number) if number.is_finite() else None
 
 
 class XbrlFactRecord(ContractModel):

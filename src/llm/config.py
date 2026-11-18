@@ -20,10 +20,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from dotenv import load_dotenv
+import structlog
+from dotenv import dotenv_values, load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from src.llm.types import LLMConfigError
+
+logger = structlog.get_logger(__name__)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PROFILES_PATH = REPOSITORY_ROOT / "config" / "llm_profiles.toml"
@@ -39,10 +42,17 @@ class _Profile(BaseModel):
     kind: Kind
     name: str
     model: str = Field(min_length=1)
+    # Name the server knows the model by when it differs from `model`
+    # (Cloudflare `@cf/...`); `model` stays the identity stored with results.
+    served_model: str | None = Field(default=None, min_length=1)
     timeout_s: float = Field(default=120.0, gt=0)
     max_retries: int = Field(default=3, ge=0)
     # Merged into every request body as is (provider-specific features).
     options: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def request_model(self) -> str:
+        return self.served_model or self.model
 
     @property
     def env_prefix(self) -> str:
@@ -76,6 +86,19 @@ class EmbeddingProfile(_Profile):
 
 class RerankProfile(_Profile):
     provider: Literal["http_rerank"]
+    # Input layout the model was trained on. "qwen3": Qwen3-Reranker is a
+    # yes/no judge (vLLM serves it as a classifier) and scores bare text
+    # almost at random; query and documents get its chat template. None:
+    # sent as is (bge, Jina, Cohere...).
+    prompt_format: Literal["qwen3"] | None = None
+    # Task line of instruction-following formats (Qwen3 `<Instruct>`).
+    instruction: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _check_instruction(self) -> RerankProfile:
+        if self.instruction and not self.prompt_format:
+            raise ValueError("instruction needs a prompt_format that uses it")
+        return self
 
 
 Profile = ChatProfile | EmbeddingProfile | RerankProfile
@@ -103,9 +126,19 @@ class Profiles:
 
 
 def load_environment() -> None:
-    """Load the repository `.env` (variables already set win)."""
+    """Load the repository `.env` (variables already set win). A variable set
+    in the shell with another value than `.env` is logged by name: a stale
+    export hides a new tunnel URL pasted into `.env`."""
 
-    load_dotenv(REPOSITORY_ROOT / ".env", override=False)
+    path = REPOSITORY_ROOT / ".env"
+    stale = sorted(
+        key
+        for key, value in dotenv_values(path).items()
+        if key in os.environ and value is not None and os.environ[key] != value
+    )
+    if stale:
+        logger.warning("llm_env_differs_from_dotenv", variables=stale)
+    load_dotenv(path, override=False)
 
 
 def profiles_path() -> Path:

@@ -8,7 +8,7 @@ from itertools import groupby
 from src.data_pipeline.contracts.sec_filings.document_tables import table_id_for
 from src.data_pipeline.transforms.native_rag.blocks import SourceBlock, SourceSection
 from src.data_pipeline.transforms.native_rag.context import embedded_text
-from src.data_pipeline.transforms.native_rag.noise import drop_reasons
+from src.data_pipeline.transforms.native_rag.noise import MARKER_ONLY, drop_reasons
 from src.data_pipeline.transforms.native_rag.table_chunks import (
     Cell,
     RenderedTable,
@@ -37,6 +37,17 @@ _LEAD_IN = re.compile(
 # Statement footers: always the end of the table above, never a title.
 _TABLE_FOOTER = re.compile(r"\b(see|refer to) (the )?accompanying\b", re.IGNORECASE)
 _FOOTNOTE = re.compile(r"^\s*(\(\s*[0-9a-z]{1,2}\s*\)|[0-9]{1,2}\)|\*{1,3}|[†‡§])")
+# A company name line over a statement (`NVIDIA CORPORATION AND SUBSIDIARIES`,
+# `Apple Inc.`): part of a table's title, never a subheading (v5 gave 1,598
+# chunks of data/ the company name as subheading).
+_COMPANY_LINE = re.compile(
+    # Whole-line headings that only end in "Company" stay subheadings; "The
+    # Coca-Cola Company" or "THE HOME DEPOT, INC." are still company lines.
+    r"^(?!\s*(about\s+.*|.*\b(the|our)\s+company)\s*$)"
+    r".*\b(inc|incorporated|corp|corporation|co|company|ltd|plc|llc)\b\.?"
+    r"(\s+and\s+(its\s+)?(consolidated\s+)?subsidiaries)?\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -130,6 +141,7 @@ def chunk_document(
             items.extend(_read_block(block, document.cells_by_table, params, dropped))
         if fragmented:
             items = _defragment(items)
+        items = _join_markers(items)
         chunks.extend(builder.section(document.sections[section_id], items))
     return DocumentChunks(chunks, dropped)
 
@@ -248,7 +260,11 @@ class _Builder:
             title = self._title_lines(run)
             chunks.extend(self._text(section, run, subheading, sizing))
             subheading = _subheading_after(run, subheading)
-            heading = next((line.text for line in title if line.title_like), None)
+            # The title line closest to the table names it (`Consolidated
+            # Balance Sheets`, not the company line above).
+            heading = next(
+                (line.text for line in reversed(title) if _is_heading(line)), None
+            )
             subheading = heading or subheading
             run = []
             footnotes, index = self._footnotes(items, index + 1)
@@ -483,10 +499,45 @@ def _label(title: str | None, position: int, count: int) -> str:
     return f"{title} ({part})" if title else part
 
 
+def _is_heading(paragraph: Paragraph) -> bool:
+    return paragraph.title_like and not _COMPANY_LINE.search(paragraph.text)
+
+
 def _subheading_after(run: Sequence[Paragraph], current: str | None) -> str | None:
-    """The subheading in force after a run: its last title-like paragraph."""
+    """The subheading in force after a run: its last title-like paragraph
+    that is not a company name line."""
 
     for paragraph in reversed(run):
-        if paragraph.title_like:
+        if _is_heading(paragraph):
             return paragraph.text
     return current
+
+
+def _join_markers(items: Sequence[Paragraph | _Table]) -> list[Paragraph | _Table]:
+    """A lone footnote marker (`(a)`) joins the paragraph after it, so the
+    note reads `(a) Includes ...` and is found as the table's footnote."""
+
+    result: list[Paragraph | _Table] = []
+    index = 0
+    while index < len(items):
+        item = items[index]
+        following = items[index + 1] if index + 1 < len(items) else None
+        if (
+            isinstance(item, Paragraph)
+            and isinstance(following, Paragraph)
+            and MARKER_ONLY.match(item.text)
+            and following.block_id != item.block_id
+        ):
+            result.append(
+                Paragraph(
+                    item.block_id,
+                    f"{item.text.strip()} {following.text}",
+                    False,
+                    (*item.extra_block_ids, *following.block_ids),
+                )
+            )
+            index += 2
+            continue
+        result.append(item)
+        index += 1
+    return result

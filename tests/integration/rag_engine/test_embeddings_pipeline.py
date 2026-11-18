@@ -17,7 +17,11 @@ from src.data_pipeline.transforms.native_rag.context import embedded_text
 from src.llm.types import LLMProviderError
 from src.rag_engine.embedding import pipeline
 from src.rag_engine.embedding.audit import audit_embeddings
-from src.rag_engine.embedding.pipeline import normalized, run_native_rag_embeddings
+from src.rag_engine.embedding.pipeline import (
+    Throughput,
+    normalized,
+    run_native_rag_embeddings,
+)
 from tests.native_rag_support import (
     NOW,
     FakeEmbedder,
@@ -32,7 +36,7 @@ pytestmark = pytest.mark.integration
 @pytest.fixture(autouse=True)
 def _small_groups(monkeypatch: pytest.MonkeyPatch) -> None:
     # Several request groups per call and several commits per run.
-    monkeypatch.setattr(pipeline, "CHUNKS_PER_GROUP", 2)
+    monkeypatch.setattr(pipeline, "BATCH_SIZE", 2)
     monkeypatch.setattr(pipeline, "ROWS_PER_COMMIT", 3)
 
 
@@ -50,7 +54,9 @@ def test_embed_resume_audit_and_stale(tmp_path: Path) -> None:
     assert (trial.status, trial.chunks_embedded) == ("completed", 2)
     assert audit_embeddings(tmp_path, embedder.model).status == "WARN"
 
-    rest = run_native_rag_embeddings(tmp_path, embedder, NOW, concurrency=2)
+    rest = run_native_rag_embeddings(
+        tmp_path, embedder, NOW, throughput=Throughput(concurrency=2)
+    )
     assert (rest.chunks_total, rest.chunks_skipped, rest.chunks_embedded) == (7, 2, 5)
     assert sorted(embedder.texts) == sorted(
         embedded_text(c.context, c.text) for c in chunks
@@ -117,7 +123,7 @@ def test_server_failure_keeps_vectors_and_resumes(tmp_path: Path) -> None:
     # concurrency 1: one group of up to 2 chunks per request, in order; 2024
     # has 3 chunks (requests 1-2, committed at 3 rows), 2025 fails at once.
     broken = run_native_rag_embeddings(
-        tmp_path, FailingEmbedder(fail_at=3), NOW, concurrency=1
+        tmp_path, FailingEmbedder(fail_at=3), NOW, throughput=Throughput(concurrency=1)
     )
     assert broken.status == "interrupted"
     assert "run again" in broken.problems[0]
@@ -138,7 +144,9 @@ def test_failed_verification_never_appends_twice(
 
     monkeypatch.setattr(pipeline, "verify_append", broken_verify)
     with pytest.raises(RuntimeError, match="read failed"):
-        run_native_rag_embeddings(tmp_path, FakeEmbedder(), NOW, concurrency=1)
+        run_native_rag_embeddings(
+            tmp_path, FakeEmbedder(), NOW, throughput=Throughput(concurrency=1)
+        )
     ids = [r["embedding_id"] for r in _stored(tmp_path)]
     assert len(ids) == len(set(ids)) == 3  # the first commit, written once
 

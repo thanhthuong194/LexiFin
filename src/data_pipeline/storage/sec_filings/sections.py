@@ -12,6 +12,7 @@ SECTIONS_TABLE = "sec_filings.sections"
 # Version 2 (2026-11-06): section headings that are links, 10-Q PART II
 # inferred from restarting items, TOC heading lines and index PARTs dropped,
 # 8-K items opened by layout tables.
+# v4: CSS-spaced inline runs split, 8-K sub-item codes, EXHIBIT INDEX in PART IV.
 SECTIONS_SPEC = SilverTableSpec(
-    SECTIONS_TABLE, SECTIONS_ARROW_SCHEMA, FILING_YEAR_PARTITION, rules_version=3
+    SECTIONS_TABLE, SECTIONS_ARROW_SCHEMA, FILING_YEAR_PARTITION, rules_version=4
 )

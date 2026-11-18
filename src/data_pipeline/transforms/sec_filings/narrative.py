@@ -30,8 +30,12 @@ _PART = re.compile(r"PART\s+(IV|I{1,3})(?![A-Z0-9])(.*)", re.IGNORECASE | re.DOT
 _PERIODIC_ITEM = re.compile(
     r"ITEM\s+(\d{1,2}[A-Z]?)(?![A-Z0-9]|\.\d)(.*)", re.IGNORECASE | re.DOTALL
 )
+# 8-K items, optionally naming sub-paragraphs: "Item 5.02(c)", "5.02(b) and (c)".
+_SUB_PARAGRAPH = r"\s*\([a-z0-9]{1,3}\)"
 _CURRENT_ITEM = re.compile(
-    r"ITEM\s+(\d{1,2}\.\d{2})(?!\d)(.*)", re.IGNORECASE | re.DOTALL
+    rf"ITEM\s+(\d{{1,2}}\.\d{{2}})(?!\d)"
+    rf"(?:{_SUB_PARAGRAPH}(?:\s*(?:,|and|&)\s*\([a-z0-9]{{1,3}}\))*)?(.*)",
+    re.IGNORECASE | re.DOTALL,
 )
 _STANDALONE_HEADINGS: dict[str, tuple[SectionKind, str]] = {
     "SIGNATURE": ("signature", "SIGNATURES"),
@@ -367,7 +371,9 @@ def _section_spans(
 
     PART is a root child; a 10-K/10-Q ITEM belongs to the open PART (level 2)
     or else to the root; every other section is a root child. SIGNATURES,
-    EXHIBIT INDEX and TABLE OF CONTENTS close the open PART.
+    EXHIBIT INDEX and TABLE OF CONTENTS close the open PART, except an
+    EXHIBIT INDEX followed by another ITEM (NVIDIA: inside PART IV before
+    ITEM 16), which belongs to the open PART.
     """
 
     spans = [
@@ -377,12 +383,19 @@ def _section_spans(
     for ordinal, heading in enumerate(headings, start=2):
         block = blocks[heading.block_index]
         level, parent = 1, 1
+        following = headings[ordinal - 1] if ordinal - 1 < len(headings) else None
         if heading.kind == "part":
             open_part = ordinal
-        elif heading.kind == "item":
-            if open_part is not None:
-                level, parent = 2, open_part
-        else:
+        elif open_part is not None and (
+            heading.kind == "item"
+            or (
+                heading.kind == "exhibit_index"
+                and following is not None
+                and following.kind == "item"
+            )
+        ):
+            level, parent = 2, open_part
+        elif heading.kind != "item":
             open_part = None
         spans.append(
             _SectionSpan(

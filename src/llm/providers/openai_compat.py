@@ -57,7 +57,7 @@ class OpenAIChat(ChatAdapter):
     @override
     def _complete(self, messages: list[Message], options: ChatOptions) -> Completion:
         request: dict[str, Any] = {
-            "model": self.model,
+            "model": self.profile.request_model,
             "messages": _messages(options.system, messages),
             "max_completion_tokens": self.max_tokens(options),
         }
@@ -207,7 +207,7 @@ class OpenAIEmbedding(BatchedEmbedding):
 
     @override
     def _embed_batch(self, texts: list[str], task: EmbeddingTask) -> list[list[float]]:
-        request: dict[str, Any] = {"model": self.model, "input": texts}
+        request: dict[str, Any] = {"model": self.profile.request_model, "input": texts}
         if self.profile.dimensions:
             request["dimensions"] = self.profile.dimensions
         extra = self.profile.options

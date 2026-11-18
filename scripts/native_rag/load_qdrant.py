@@ -36,6 +36,8 @@ from src.utils.logger import configure_logging
 # Seconds per Qdrant request: an upsert of 512 points with text payloads can
 # take long while the optimizers run.
 QDRANT_TIMEOUT = 120
+INDEX_TIMEOUT = 3600
+LARGE_INDEX_TIMEOUT = 14400
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,8 +86,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--index-timeout",
         type=int,
-        default=3600,
-        help="Seconds to wait for indexing before the audit (default 3600)",
+        help="Seconds to wait for indexing before the audit (default 3600; "
+        "14400 with --large: HNSW over millions of points takes hours)",
     )
     return parser.parse_args()
 
@@ -141,7 +143,10 @@ def main() -> int:
             return 0
         name = summary.collection
     if not embedded:
-        print(f"collection: {wait_until_indexed(client, name, args.index_timeout)}")
+        timeout = args.index_timeout or (
+            LARGE_INDEX_TIMEOUT if args.large else INDEX_TIMEOUT
+        )
+        print(f"collection: {wait_until_indexed(client, name, timeout)}")
     report = audit_qdrant(
         args.gold_dir,
         client,

@@ -270,6 +270,7 @@ def test_embeddings_batch_order_instruction_and_dimensions() -> None:
         name="default",
         provider="openai_compat",
         model="Qwen/Qwen3-Embedding-0.6B",
+        served_model="@cf/qwen/qwen3-embedding-0.6b",
         batch_size=2,
         dimensions=2,
         query_instruction="Find filings",
@@ -279,6 +280,11 @@ def test_embeddings_batch_order_instruction_and_dimensions() -> None:
     documents = embedder.embed_documents(["a", "b", "c"])
     queries = embedder.embed_queries(["revenue?"])
 
+    # The server gets its own name; results keep the canonical one.
+    assert embedder.model == "Qwen/Qwen3-Embedding-0.6B"
+    assert {r["json"]["model"] for r in server.requests} == {
+        "@cf/qwen/qwen3-embedding-0.6b"
+    }
     assert documents == [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
     assert queries == [[0.5, 0.5]]
     assert [r["json"]["input"] for r in server.requests] == [

@@ -280,18 +280,19 @@ def _canonical_names(
 ) -> dict[str, str]:
     """One spelling per company name: filings of a CIK whose names differ only
     in case, punctuation or suffix (`MICROSOFT CORP`, `Microsoft Corporation`)
-    get the spelling of the earliest filing, preferring mixed case; a real
-    rename (another key) keeps its own name. New filings never change the
-    choice, so chunks stored earlier keep matching."""
+    get the spelling of the earliest filing; a real rename (another key)
+    keeps its own name. Only the earliest filing decides (v5 preferred mixed
+    case, so a later mixed-case filing renamed chunks already stored), so new
+    filings never change the choice and chunks stored earlier keep matching."""
 
-    first: dict[tuple[str, str], tuple[bool, date, str, str]] = {}
+    first: dict[tuple[str, str], tuple[date, str, str]] = {}
     for row in rows:
         name = " ".join(names[row["filing_id"]].split())
         group = (row["cik"], _name_key(name))
-        rank = (name == name.upper(), row["filing_date"], row["filing_id"], name)
+        rank = (row["filing_date"], row["filing_id"], name)
         if group not in first or rank < first[group]:
             first[group] = rank
-    chosen = {group: rank[3] for group, rank in first.items()}
+    chosen = {group: rank[2] for group, rank in first.items()}
     result: dict[str, str] = {}
     for row in rows:
         name = " ".join(names[row["filing_id"]].split())

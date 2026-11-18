@@ -16,16 +16,25 @@ from src.data_pipeline.storage.native_rag.chunks import CHUNKS_TABLE
 from src.data_pipeline.storage.native_rag.embeddings import EMBEDDINGS_TABLE
 from src.data_pipeline.transforms.native_rag.context import embedded_text
 from src.rag_engine.embedding.pipeline import table_years
+from src.rag_engine.indexing.companies import (
+    collection_companies,
+    gold_names,
+    stored_companies,
+)
 from src.rag_engine.indexing.pipeline import (
     chunks_in,
     data_files,
     file_rows,
+    outside_years,
+    stored_points,
     vector_hashes,
     vectors_of,
+    year_points,
 )
 from src.rag_engine.indexing.qdrant_store import (
     DATETIME_FIELDS,
     DENSE,
+    DIGEST_COLUMNS,
     INTEGER_FIELDS,
     KEYWORD_FIELDS,
     SPARSE,
@@ -34,6 +43,7 @@ from src.rag_engine.indexing.qdrant_store import (
     Corpus,
     is_large,
     payload,
+    point_digest,
     point_id,
     search_params,
 )
@@ -67,27 +77,54 @@ class _Expected:
     points: int = 0
     # (rank, year, chunk_id) of the `size` chunks ranking first by hash.
     ranked: list[tuple[str, int, str]] = field(default_factory=list)
+    # Points missing, extra or with another digest than Gold implies.
+    point_problems: list[str] = field(default_factory=list)
 
 
 def _rank(chunk_id: str) -> str:
     return hashlib.sha256(chunk_id.encode()).hexdigest()
 
 
-def _expected(chunks: Table, embeddings: Table, model_id: str, size: int) -> _Expected:
-    """Points Gold implies (chunks with a current vector), from hashes only,
-    and which chunks to sample."""
+def _expected(
+    chunks: Table, embeddings: Table, request: AuditRequest, client: QdrantClient
+) -> _Expected:
+    """Points Gold implies (chunks with a current vector), compared with the
+    collection's points year by year (ID and point digest, no text or vector
+    read), and which chunks to sample."""
 
     found = _Expected()
     for year in table_years(chunks, embeddings):
-        hashes = vector_hashes(embeddings, model_id, year)
+        hashes = vector_hashes(embeddings, request.model_id, year)
+        wanted: dict[str, str] = {}
         for path in data_files(chunks, year):
-            for row in file_rows(chunks, path, ("chunk_id", "chunk_sha256")):
+            for row in file_rows(chunks, path, DIGEST_COLUMNS):
                 if hashes.get(row["chunk_id"]) != row["chunk_sha256"]:
                     continue
                 found.points += 1
+                wanted[point_id(row["chunk_id"])] = point_digest(row, request.corpus)
                 entry = (_rank(row["chunk_id"]), year, row["chunk_id"])
-                if len(found.ranked) < size or entry[0] < found.ranked[-1][0]:
-                    found.ranked = sorted([*found.ranked, entry])[:size]
+                if len(found.ranked) < request.sample or entry[0] < found.ranked[-1][0]:
+                    found.ranked = sorted([*found.ranked, entry])[: request.sample]
+        stored = stored_points(client, request.collection, year_points(year))
+        found.point_problems += [
+            f"{year}: {pid} missing" for pid in sorted(wanted.keys() - stored.keys())
+        ]
+        found.point_problems += [
+            f"{year}: {pid} not in Gold"
+            for pid in sorted(stored.keys() - wanted.keys())
+        ]
+        found.point_problems += [
+            f"{year}: {pid} differs from Gold"
+            for pid in sorted(wanted.keys() & stored.keys())
+            if wanted[pid] != stored[pid]
+        ]
+    outside = client.count(
+        request.collection,
+        count_filter=outside_years(table_years(chunks, embeddings)),
+        exact=True,
+    ).count
+    if outside:
+        found.point_problems.append(f"{outside} points of years Gold does not have")
     return found
 
 
@@ -203,6 +240,19 @@ def _dense(
     return [str(p.id) for p in points]
 
 
+def _same_text(client: QdrantClient, name: str, top: str, item: _Sample) -> bool:
+    """The top hit is the chunk itself, or a chunk with the same embedded
+    text (identical vectors rank in any order)."""
+
+    if top == point_id(item.chunk["chunk_id"]):
+        return True
+    found = client.retrieve(name, ids=[top], with_payload=["chunk_sha256"])
+    return (
+        bool(found)
+        and (found[0].payload or {}).get("chunk_sha256") == item.chunk["chunk_sha256"]
+    )
+
+
 def _hybrid_hits(
     client: QdrantClient, name: str, item: _Sample
 ) -> list[tuple[str, Any]]:
@@ -269,7 +319,7 @@ def _search_checks(
         chunk_id = item.chunk["chunk_id"]
         own = point_id(chunk_id)
         approximate = _dense(client, name, item.vector, settings, exact=False)
-        if not approximate or approximate[0] != own:
+        if not approximate or not _same_text(client, name, approximate[0], item):
             self_misses.append(chunk_id)
         exact = set(_dense(client, name, item.vector, settings, exact=True))
         recalls[chunk_id] = len(exact & set(approximate)) / max(len(exact), 1)
@@ -303,15 +353,41 @@ def _search_checks(
     report.add("ann_recall", problems, f"{detail}; mean {mean:.3f}")
 
 
+def _company_problems(
+    client: QdrantClient, name: str, names: dict[str, set[str]]
+) -> list[str]:
+    """The stored directory equals the one the collection's points give now
+    (companies, chunk counts, names, tickers, latest filing date)."""
+
+    wanted = collection_companies(client, name, names)
+    listed = {row["cik"]: row for row in stored_companies(client, name)}
+    problems = [
+        f"{cik}: not in the directory" for cik in sorted(wanted.keys() - listed.keys())
+    ]
+    problems += [f"{cik}: no point" for cik in sorted(listed.keys() - wanted.keys())]
+    problems += [
+        f"{cik}: {key} {listed[cik].get(key)!r} != {row[key]!r}"
+        for cik, row in sorted(wanted.items())
+        if cik in listed
+        for key in row
+        if listed[cik].get(key) != row[key]
+    ]
+    return problems
+
+
 def audit_qdrant(
     gold_dir: Path, client: QdrantClient, request: AuditRequest
 ) -> AuditReport:
     """Audit a loaded collection against Gold (read-only on both sides).
 
     Checks: the collection exists; point count equals Gold's chunks with a
-    current vector; payload indexes (server); sampled points hold Gold's
+    current vector; every point is such a chunk with Gold's point digest
+    (IDs and digests compared year by year, no point outside Gold's years);
+    the company directory equals one recomputed from the points; payload
+    indexes (server); sampled points hold Gold's
     payload, dense vector (cosine >= 0.999) and BM25 sparse vector (indices
-    and weights); each sampled vector finds its own point first; a hybrid
+    and weights); each sampled vector finds its own point (or one with the
+    same text) first; a hybrid
     dense + BM25 query filtered by the chunk's `cik` returns it and only that
     company; HNSW top-10 against exact top-10 (mean recall >= 0.95, each
     query >= 0.7), skipped while HNSW is not built or on embedded Qdrant. An
@@ -328,8 +404,9 @@ def audit_qdrant(
     with open_gold_catalog_read_only(gold_dir) as gold:
         chunks = gold.load_table(CHUNKS_TABLE)
         embeddings = gold.load_table(EMBEDDINGS_TABLE)
-        expected = _expected(chunks, embeddings, request.model_id, request.sample)
+        expected = _expected(chunks, embeddings, request, client)
         sample = _samples(chunks, embeddings, request.model_id, expected)
+        names = gold_names(chunks)
     count = client.count(name, exact=True).count
     report.add(
         "point_count",
@@ -337,6 +414,16 @@ def audit_qdrant(
         if count == expected.points
         else [f"{count} points, Gold has {expected.points}"],
         f"{count} points",
+    )
+    report.add(
+        "point_digests",
+        expected.point_problems,
+        "every point is a current Gold chunk with its payload (ID + point digest)",
+    )
+    report.add(
+        "companies",
+        _company_problems(client, name, names),
+        "the directory equals one recomputed from the collection's points",
     )
     if request.embedded:
         report.skip(

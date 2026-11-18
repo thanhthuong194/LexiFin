@@ -2,15 +2,31 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
+from pydantic import ValidationError
 from qdrant_client import QdrantClient, models
+from qdrant_client.common.client_exceptions import ResourceExhaustedResponse
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from src.data_pipeline.storage.iceberg import open_gold_catalog
 from src.data_pipeline.storage.native_rag.embeddings import EMBEDDINGS_TABLE
 from src.rag_engine.embedding.pipeline import run_native_rag_embeddings
+from src.rag_engine.indexing import pipeline as pipeline_module
 from src.rag_engine.indexing.audit import AuditRequest, audit_qdrant
-from src.rag_engine.indexing.pipeline import LoadRequest, run_qdrant_load
+from src.rag_engine.indexing.companies import (
+    companies_collection,
+    company_point_id,
+    stored_companies,
+)
+from src.rag_engine.indexing.pipeline import (
+    LoadRequest,
+    run_qdrant_load,
+    vector_index,
+    vectors_in,
+)
 from src.rag_engine.indexing.qdrant_store import (
     DENSE,
     SEC_FILINGS,
@@ -21,6 +37,7 @@ from src.rag_engine.indexing.qdrant_store import (
     point_id,
     switch_alias,
 )
+from src.rag_engine.indexing.retry import retried, transient
 from src.rag_engine.indexing.sparse import document_vector, query_vector, terms
 from tests.native_rag_support import (
     NOW,
@@ -258,3 +275,184 @@ def test_points_of_years_gold_dropped_are_deleted(tmp_path: Path) -> None:
     run = run_qdrant_load(tmp_path, client, request)
     assert run.points_deleted == 3
     assert client.count(COLLECTION, exact=True).count == 4
+
+
+def test_company_directory_is_loaded_and_audited(tmp_path: Path) -> None:
+    chunks = [
+        *gold_chunks(),
+        gold_chunk("dB", 1, 1, date(2025, 3, 1), "Other company", cik="0000000002"),
+    ]
+    _gold(tmp_path, chunks)
+    client = QdrantClient(":memory:")
+    run = run_qdrant_load(
+        tmp_path, client, LoadRequest(model_id=MODEL, collection=COLLECTION)
+    )
+    assert run.companies == 2
+    rows = {row["cik"]: row for row in stored_companies(client, COLLECTION)}
+    assert rows["0000320193"]["chunk_count"] == 7
+    assert rows["0000000002"]["latest_filing_date"] == "2025-03-01"
+    assert _audit(tmp_path, client)["companies"] == "PASS"
+    client.delete(
+        companies_collection(COLLECTION),
+        points_selector=models.PointIdsList(points=[company_point_id("0000000002")]),
+    )
+    assert _audit(tmp_path, client)["companies"] == "FAIL"
+    # The next load writes the directory again and drops companies Gold lost.
+    _gold(tmp_path, gold_chunks())
+    assert (
+        run_qdrant_load(
+            tmp_path, client, LoadRequest(model_id=MODEL, collection=COLLECTION)
+        ).companies
+        == 1
+    )
+    assert [r["cik"] for r in stored_companies(client, COLLECTION)] == ["0000320193"]
+    assert _audit(tmp_path, client)["companies"] == "PASS"
+
+
+def test_company_directory_lists_loaded_points_only(tmp_path: Path) -> None:
+    _gold(tmp_path)
+    # A new company's chunk without a vector yet: the load is incomplete.
+    write_chunks(
+        tmp_path,
+        [
+            *gold_chunks(),
+            gold_chunk("dN", 1, 1, date(2025, 6, 1), "New", cik="0000000009"),
+        ],
+    )
+    client = QdrantClient(":memory:")
+    run = run_qdrant_load(
+        tmp_path, client, LoadRequest(model_id=MODEL, collection=COLLECTION)
+    )
+    assert run.status == "incomplete" and run.companies == 1
+    assert [r["cik"] for r in stored_companies(client, COLLECTION)] == ["0000320193"]
+
+
+def test_vectors_are_read_only_from_the_files_holding_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chunks = [
+        gold_chunk("dBig", i, 250, date(2024, 3, 1), f"Paragraph number {i}")
+        for i in range(1, 251)
+    ]
+    write_chunks(tmp_path, chunks)
+    with open_gold_catalog(tmp_path) as gold:
+        gold.create_namespace_if_not_exists("native_rag")
+    for _ in range(3):  # three commits: three embeddings files
+        run_native_rag_embeddings(tmp_path, FakeEmbedder(), NOW, limit=100)
+    with open_gold_catalog(tmp_path) as gold:
+        embeddings = gold.load_table(EMBEDDINGS_TABLE)
+        index = vector_index(embeddings, MODEL, 2024)
+        assert len(index.hashes) == 250 and len(set(index.files.values())) == 3
+        read: list[list[str]] = []
+        original = pipeline_module.scan_batches
+
+        def recording(table: Any, columns: Any = None, **kwargs: Any) -> Any:
+            read.append(list(kwargs.get("files", [])))
+            return original(table, columns, **kwargs)
+
+        monkeypatch.setattr(pipeline_module, "scan_batches", recording)
+        first_file = min(index.files.values())
+        wanted = {c for c, f in index.files.items() if f == first_file}
+        assert len(wanted) > 0
+        vectors = vectors_in(embeddings, MODEL, index, wanted)
+        assert read == [[first_file]] and set(vectors.rows) == wanted
+        many = set(index.hashes)  # over PyIceberg's 200-value pruning limit
+        assert len(vectors_in(embeddings, MODEL, index, many).rows) == 250
+    client = QdrantClient(":memory:")
+    monkeypatch.undo()
+    run = run_qdrant_load(
+        tmp_path, client, LoadRequest(model_id=MODEL, collection=COLLECTION)
+    )
+    assert (run.status, run.points_upserted) == ("completed", 250)
+
+
+def test_payload_change_without_text_change_rewrites_the_point(tmp_path: Path) -> None:
+    _gold(tmp_path)
+    client = QdrantClient(":memory:")
+    request = LoadRequest(model_id=MODEL, collection=COLLECTION)
+    run_qdrant_load(tmp_path, client, request)
+    changed = gold_chunks()
+    changed[0] = changed[0].model_copy(update={"section_topic": "risk_factors"})
+    write_chunks(tmp_path, changed)  # same text: the vectors stay current
+    run = run_qdrant_load(tmp_path, client, request)
+    assert (run.points_upserted, run.points_skipped) == (1, 6)
+    point = client.retrieve(COLLECTION, ids=[point_id("d24:chunk:000001")])[0]
+    assert point.payload is not None
+    assert point.payload["section_topic"] == "risk_factors"
+    assert set(_audit(tmp_path, client).values()) == {"PASS", "SKIP"}
+
+
+def test_point_digests_catch_a_swap_the_count_misses(tmp_path: Path) -> None:
+    _gold(tmp_path)
+    client = QdrantClient(":memory:")
+    run_qdrant_load(
+        tmp_path, client, LoadRequest(model_id=MODEL, collection=COLLECTION)
+    )
+    stale = client.retrieve(
+        COLLECTION, ids=[point_id("d25:chunk:000004")], with_vectors=True
+    )[0]
+    client.delete(COLLECTION, points_selector=models.PointIdsList(points=[stale.id]))
+    assert isinstance(stale.vector, dict)
+    client.upsert(
+        COLLECTION,
+        [models.PointStruct(id=point_id("gone:chunk:000001"), vector=stale.vector,
+                            payload=stale.payload)],
+    )  # fmt: skip
+    statuses = _audit(tmp_path, client)
+    assert statuses["point_count"] == "PASS" and statuses["point_digests"] == "FAIL"
+
+
+def test_retry_only_transient_errors() -> None:
+    delays: list[float] = []
+    calls: list[int] = []
+
+    def flaky() -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            raise UnexpectedResponse(503, "busy", b"", httpx.Headers())
+        if len(calls) == 2:
+            raise ResourceExhaustedResponse("slow down", 7)
+        return "ok"
+
+    assert retried(flaky, "flaky", sleep=delays.append) == "ok"
+    assert delays == [2.0, 7.0]  # backoff, then the server's Retry-After
+
+    def bad_request() -> None:
+        raise UnexpectedResponse(400, "bad", b"", httpx.Headers())
+
+    with pytest.raises(UnexpectedResponse):
+        retried(bad_request, "bad", sleep=delays.append)
+    assert transient(ResponseHandlingException(httpx.ConnectError("down")))
+    try:
+        models.CountResult.model_validate({"count": "many"})
+    except ValidationError as error:
+        assert not transient(ResponseHandlingException(error))
+
+
+def test_bare_os_errors_are_retried() -> None:
+    delays: list[float] = []
+    calls: list[int] = []
+
+    def flaky() -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionResetError("reset")
+        return "ok"
+
+    assert retried(flaky, "flaky", sleep=delays.append) == "ok" and delays == [2.0]
+
+
+def test_points_survive_while_their_vectors_are_re_embedded(tmp_path: Path) -> None:
+    _gold(tmp_path)
+    client = QdrantClient(":memory:")
+    request = LoadRequest(model_id=MODEL, collection=COLLECTION)
+    run_qdrant_load(tmp_path, client, request)
+    with open_gold_catalog(tmp_path) as gold:
+        gold.purge_table(EMBEDDINGS_TABLE)  # vectors purged, chunks unchanged
+    gold_dir = tmp_path
+    with open_gold_catalog(gold_dir) as gold:
+        gold.create_namespace_if_not_exists("native_rag")
+    run_native_rag_embeddings(gold_dir, FakeEmbedder(), NOW, limit=2)
+    run = run_qdrant_load(tmp_path, client, request)
+    assert run.status == "incomplete" and run.points_deleted == 0
+    assert client.count(COLLECTION, exact=True).count == 7
