@@ -194,19 +194,25 @@ def qdrant_filter(search: SearchFilter) -> models.Filter | None:
                     must=[
                         _match("form", [_EVENT_FORM]),
                         models.Filter(
-                            should=[
-                                models.FieldCondition(
-                                    key="filing_date",
-                                    range=models.DatetimeRange(gte=w.start, lte=w.end),
-                                )
-                                for w in search.windows
-                            ]
+                            should=[_window_condition(w) for w in search.windows]
                         ),
                     ]
                 )
             )
         must.append(models.Filter(should=branches))
     return models.Filter(must=must) if must else None
+
+
+def _window_condition(window: Window) -> models.Condition:
+    """8-Ks filed in the window, by its company only when it has one."""
+
+    filed = models.FieldCondition(
+        key="filing_date",
+        range=models.DatetimeRange(gte=window.start, lte=window.end),
+    )
+    if window.cik is None:
+        return filed
+    return models.Filter(must=[filed, _match("cik", [window.cik])])
 
 
 def _with(base: models.Filter | None, extra: models.Condition) -> models.Filter:

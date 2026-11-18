@@ -253,6 +253,25 @@ def test_period_filter_matches_periodic_forms_and_8k_windows() -> None:
     assert relaxed.ciks == search.ciks and not relaxed.has_period
 
 
+def test_a_company_window_admits_only_that_company_8ks() -> None:
+    apple, msft = "0000320193", "0000789019"
+    found = qdrant_filter(
+        SearchFilter(
+            ciks=(apple, msft),
+            fiscal_years=(2024,),
+            windows=(
+                Window(date(2024, 8, 1), date(2024, 12, 31), 2024, apple),
+                Window(date(2024, 5, 1), date(2024, 10, 31), 2024),
+            ),
+        )
+    )
+    assert found is not None
+    should = found.model_dump(mode="json", exclude_none=True)["must"][1]["should"]
+    windows = should[-1]["must"][1]["should"]
+    assert windows[0]["must"][1] == {"key": "cik", "match": {"value": apple}}
+    assert windows[1]["key"] == "filing_date"  # fallback window: any company
+
+
 def test_name_beats_a_conflicting_ticker() -> None:
     meta = COMPANIES.resolve("Meta Platforms", "AAPL")
     assert meta is not None and meta.cik == "0001326801"
