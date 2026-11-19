@@ -573,6 +573,43 @@ def test_note_before_a_shown_below_lead_in_joins_the_table() -> None:
     assert result.chunks[1].table_title == lead_in
 
 
+def _notes_between_tables(rows: list[tuple[str, str]]) -> DocumentInput:
+    """Two data tables with a layout table of `rows` (marker, text) between."""
+
+    document = _two_tables([])
+    first, last = document.blocks
+    notes = SourceBlock("d:block:000009", 2, "root", "table", "notes")
+    cells = {
+        **document.cells_by_table,
+        "d:block:000009:table": [
+            Cell(r, c, 1, text)
+            for r, row in enumerate(rows, start=1)
+            for c, text in enumerate(row, start=1)
+            if text
+        ],
+    }
+    blocks = [first, notes, SourceBlock(last.block_id, 3, "root", "table", last.text)]
+    return DocumentInput(blocks, document.sections, cells, document.context)
+
+
+def test_a_layout_table_of_notes_is_never_split() -> None:
+    params = ChunkParams(max_tokens=200, min_unit_tokens=16, small_table_chars=5)
+    # 500-company v6: rows past `max_footnotes` and a title row after notes
+    # went to other chunks than the rest of their layout table.
+    six = [(f"({m})", f"Note {m}.") for m in "abcdef"]
+    result = chunk_document(_notes_between_tables(six), COUNTER, params)
+    assert [c.block_ids for c in result.chunks] == [
+        ("d:block:000001", "d:block:000009"),
+        ("d:block:000002",),
+    ]
+    assert result.chunks[0].text.endswith("(e) Note e.\n(f) Note f.")
+    mixed = [("(2)", "Comparable basis excludes items."), ("EPS Guidance", "")]
+    result = chunk_document(_notes_between_tables(mixed), COUNTER, params)
+    assert [c.chunk_kind for c in result.chunks] == ["table", "text", "table"]
+    assert result.chunks[1].block_ids == ("d:block:000009",)
+    assert result.chunks[2].table_title is None
+
+
 def test_title_only_unit_joins_the_next_unit_under_its_subheading() -> None:
     paragraphs = _paragraphs(
         "Legal and Regulatory Risks",  # category heading over a risk heading

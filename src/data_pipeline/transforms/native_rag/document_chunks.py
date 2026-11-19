@@ -311,7 +311,7 @@ class _Builder:
     ) -> tuple[list[Paragraph], int]:
         notes: list[Paragraph] = []
         index = start
-        while index < len(items) and len(notes) < self._params.max_footnotes:
+        while index < len(items):
             paragraph = items[index]
             if (
                 not isinstance(paragraph, Paragraph)
@@ -319,8 +319,24 @@ class _Builder:
                 or not _FOOTNOTE.match(paragraph.text)
             ):
                 break
+            # The cap counts notes, but a layout table of notes stays whole.
+            if len(notes) >= self._params.max_footnotes and (
+                paragraph.block_id != notes[-1].block_id
+            ):
+                break
             notes.append(paragraph)
             index += 1
+        # A layout table's rows go whole or not at all: stopping inside one
+        # at a row that is not a note gives all its rows back to the text.
+        following = items[index] if index < len(items) else None
+        if (
+            notes
+            and isinstance(following, Paragraph)
+            and following.block_id == notes[-1].block_id
+        ):
+            while notes and notes[-1].block_id == following.block_id:
+                notes.pop()
+                index -= 1
         return notes, index
 
     def _trailing(

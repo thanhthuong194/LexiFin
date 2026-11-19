@@ -30,11 +30,12 @@ CHUNKS_TABLE = "native_rag.chunks"
 # contents tables are TOC; lower header rows split table columns; a table's
 # subheading is its title line closest to it, never a company name line; a
 # title-only unit joins the next unit; EX-99 labels are shortened in the
-# prefix; company names come from the earliest filing only.
+# prefix; company names come from the earliest filing only. v7: a layout table
+# of notes after a table is never split across chunks.
 CHUNKS_SPEC = SilverTableSpec(
     CHUNKS_TABLE,
     CHUNKS_ARROW_SCHEMA,
     FILING_YEAR_PARTITION,
-    rules_version=6,
+    rules_version=7,
     layer="gold",
 )
