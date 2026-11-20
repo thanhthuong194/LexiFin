@@ -531,18 +531,23 @@ def _subheading_after(run: Sequence[Paragraph], current: str | None) -> str | No
 
 def _join_markers(items: Sequence[Paragraph | _Table]) -> list[Paragraph | _Table]:
     """A lone footnote marker (`(a)`) joins the paragraph after it, so the
-    note reads `(a) Includes ...` and is found as the table's footnote."""
+    note reads `(a) Includes ...` and is found as the table's footnote. It
+    never takes the first row of a layout table: its rows stay together."""
 
     result: list[Paragraph | _Table] = []
     index = 0
     while index < len(items):
         item = items[index]
         following = items[index + 1] if index + 1 < len(items) else None
+        after = items[index + 2] if index + 2 < len(items) else None
         if (
             isinstance(item, Paragraph)
             and isinstance(following, Paragraph)
             and MARKER_ONLY.match(item.text)
             and following.block_id != item.block_id
+            and not (
+                isinstance(after, Paragraph) and after.block_id == following.block_id
+            )
         ):
             result.append(
                 Paragraph(

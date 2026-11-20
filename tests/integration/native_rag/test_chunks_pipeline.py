@@ -34,9 +34,9 @@ FILINGS = [
 # Rows digest of `native_rag.chunks` built from FILINGS with WordCounter and
 # default parameters, at CHUNKS_SPEC.rules_version. A different digest means
 # the same Silver now gives different chunks: bump the rules version.
-# v6 and v7 changed no fixture row (their rules fix layouts the fixture lacks).
+# v6, v7 and v8 changed no fixture row (their rules fix layouts the fixture lacks).
 FIXTURE_CHUNKS = (
-    7,
+    8,
     "5a0bb996e6d94d9eb5d4715e87c8a2a1933773b76d9547a677f1331deb7a5eb0",
 )
 PROCESSED_AT = datetime(2026, 11, 16, tzinfo=UTC)

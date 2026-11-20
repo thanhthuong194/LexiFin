@@ -610,6 +610,21 @@ def test_a_layout_table_of_notes_is_never_split() -> None:
     assert result.chunks[2].table_title is None
 
 
+def test_a_marker_never_takes_a_layout_tables_first_row() -> None:
+    params = ChunkParams(max_tokens=200, min_unit_tokens=16, small_table_chars=5)
+    # 500-company v7: a page number "(ii)" under a TOC table took "Schedules",
+    # the first row of the next layout table, into the TOC's chunk.
+    document = _notes_between_tables([("Schedules", ""), ("Schedule I", "Address")])
+    first, rows, last = document.blocks
+    page = SourceBlock("d:block:000008", 2, "root", "table", "(ii)")
+    cells = {**document.cells_by_table, "d:block:000008:table": [Cell(1, 1, 1, "(ii)")]}
+    document = DocumentInput([first, page, rows, last], document.sections, cells,
+                             document.context)  # fmt: skip
+    result = chunk_document(document, COUNTER, params)
+    owners = [b for c in result.chunks for b in dict.fromkeys(c.block_ids)]
+    assert owners.count(rows.block_id) == 1
+
+
 def test_title_only_unit_joins_the_next_unit_under_its_subheading() -> None:
     paragraphs = _paragraphs(
         "Legal and Regulatory Risks",  # category heading over a risk heading
