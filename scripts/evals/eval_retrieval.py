@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
         description="Score retrieval against a frozen question set, or compare runs"
     )
     parser.add_argument(
-        "--questions", type=Path, default=EVALS / "sets" / "v1.1" / "questions.jsonl"
+        "--questions", type=Path, default=EVALS / "sets" / "v1.2" / "questions.jsonl"
     )
     parser.add_argument("--data-dir", type=Path, default=REPOSITORY_ROOT / "data")
     parser.add_argument("--gold-dir", type=Path, help="Default: --data-dir")
@@ -108,7 +108,7 @@ def run(args: argparse.Namespace) -> int:
     if today is None:
         print("no set.json next to the questions: pass --today", file=sys.stderr)
         return 2
-    relevance, version = evidence_chunks(args.gold_dir, questions)
+    relevance, original, version = evidence_chunks(args.gold_dir, questions)
     if manifest and manifest.chunks_rules_version not in (None, version):
         print(
             f"set sampled from chunks v{manifest.chunks_rules_version}, Gold is "
@@ -175,7 +175,7 @@ def run(args: argparse.Namespace) -> int:
             partial(filter_admits, retriever.client),
             query_model=retriever.chat is not None,
         )
-        collect(probe, todo, relevance, run_dir / "results.jsonl")
+        collect(probe, todo, relevance, run_dir / "results.jsonl", original)
     scoring = write_outputs(run_dir, config, questions, relevance)
     for language in args.languages:
         scores = means(s for s in scoring.scored if s.row["language"] == language)

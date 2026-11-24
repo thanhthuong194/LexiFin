@@ -1,10 +1,12 @@
 """Read a question once before search: language, per-corpus search text,
 corpora, companies, periods, forms, topics.
 
-One structured call to the query model (`[chat.query]`) does it all; when
-there is no model or it fails, rules give the same plan without translation
-(the multilingual embedding still matches; BM25 then only matches names and
-numbers). The model's values are checked against each corpus's vocabulary,
+One structured call to the query model (`[chat.query]`) does it all; its
+schema has one required search text per corpus language (`analysis_model`),
+and a text missing or left in the question's language is translated by a
+second short call. When there is no model or it fails, rules give the same
+plan without translation (the multilingual embedding still matches; BM25
+then only matches names and numbers). The model's values are checked against each corpus's vocabulary,
 and an unknown value is dropped rather than failing the plan.
 """
 
@@ -13,11 +15,12 @@ from __future__ import annotations
 import calendar as calendar_module
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
-from typing import Literal
+from functools import cache
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 from src.llm import ChatModel, ChatOptions, LLMError, Message, generate_structured
 from src.rag_engine.retrieval.corpora import CorpusProfile
@@ -34,9 +37,16 @@ class CompanyMention(BaseModel):
     ticker: str | None = Field(description="US stock ticker if known, e.g. GOOGL")
 
 
-class SearchText(BaseModel):
-    language: str = Field(description="ISO 639-1 code of a collection language")
-    text: str = Field(description="The question, complete and standalone")
+class SearchTexts(BaseModel):
+    """The question per corpus language: one field per language, named by
+    its ISO 639-1 code (`analysis_model` adds them)."""
+
+
+_LANGUAGE_NAMES = {"en": "English", "vi": "Vietnamese"}
+
+
+def _language_name(code: str) -> str:
+    return _LANGUAGE_NAMES.get(code, code)
 
 
 class QueryAnalysis(BaseModel):
@@ -44,8 +54,9 @@ class QueryAnalysis(BaseModel):
 
     language: str = Field(description="ISO 639-1 code of the question, e.g. vi, en")
     corpora: list[str] = Field(description="Collections that can answer it")
-    searches: list[SearchText] = Field(
-        description="One search query per language of the chosen collections"
+    searches: SearchTexts = Field(
+        default_factory=SearchTexts,
+        description="The question in each collection language",
     )
     companies: list[CompanyMention]
     fiscal_years: list[int]
@@ -62,6 +73,28 @@ class QueryAnalysis(BaseModel):
         description="YYYY-MM of each month the user names as when a filing was "
         "filed or an event happened",
     )
+
+
+@cache
+def analysis_model(languages: tuple[str, ...]) -> type[QueryAnalysis]:
+    """`QueryAnalysis` whose `searches` requires one text per language, so a
+    strict schema cannot leave a corpus without its search text."""
+
+    fields: dict[str, Any] = {
+        code: (
+            str,
+            Field(
+                description=f"The question written in {_language_name(code)}, "
+                "whatever language the user wrote in"
+            ),
+        )
+        for code in languages
+    }
+    texts = create_model("SearchTexts", __base__=SearchTexts, **fields)
+    model: type[QueryAnalysis] = create_model(
+        "QueryAnalysis", __base__=QueryAnalysis, searches=(texts, ...)
+    )
+    return model
 
 
 @dataclass(frozen=True)
@@ -103,7 +136,12 @@ class QueryPlan:
         return bool(self.fiscal_years or self.fiscal_periods or self.filed_months)
 
 
+def _languages(corpora: Mapping[str, CorpusProfile]) -> tuple[str, ...]:
+    return tuple(sorted({p.language for p in corpora.values()}))
+
+
 def _system_prompt(corpora: Mapping[str, CorpusProfile], today: date) -> str:
+    languages = _languages(corpora)
     lines = [
         (
             "You prepare a user's question for search over document collections. "
@@ -125,12 +163,16 @@ def _system_prompt(corpora: Mapping[str, CorpusProfile], today: date) -> str:
         "- language: ISO 639-1 code of the question.",
         "- corpora: names of the collections that can answer it (all when unsure).",
         (
-            "- searches: for each language of the chosen collections, the question "
-            "as one complete, standalone question in that language (a question, not "
-            "keywords: the reranker judges passages against it). Translate faithfully, "
-            "use the words filings use (doanh thu -> revenue / net sales, lợi nhuận -> "
-            "net income, rủi ro -> risk factors), say what pronouns refer to, keep "
-            "names, numbers and periods. Never answer the question."
+            "- searches: one field per collection language, named by its code "
+            f"({', '.join(languages)}). Each holds the question written in THAT "
+            "language, whatever language the user wrote in: a Vietnamese question "
+            "gets an English text in `en`. One complete, standalone question (a "
+            "question, not keywords: the reranker judges passages against it). "
+            "Translate faithfully, use the words filings use (doanh thu -> revenue "
+            "/ net sales, lợi nhuận -> net income, rủi ro -> risk factors), say what "
+            "pronouns refer to, write official company names instead of tickers "
+            "(Apple Inc., not AAPL), keep numbers and periods. Never answer the "
+            "question."
         ),
         (
             "- companies: every company the question is about, with its official name "
@@ -208,13 +250,81 @@ def analyze_query(
         analysis, _ = generate_structured(
             chat,
             [Message.user(question)],
-            QueryAnalysis,
+            analysis_model(_languages(corpora)),
             ChatOptions(system=_system_prompt(corpora, today)),
         )
     except LLMError as error:
         reason = f"query model failed ({type(error).__name__}: {error}): rules"
         return rule_plan(question, corpora, notes=(reason[:300],))
-    return checked_plan(question, analysis, corpora)
+    return with_search_texts(checked_plan(question, analysis, corpora), corpora, chat)
+
+
+def _translation_prompt(language: str) -> str:
+    return (
+        f"Rewrite the user's question in {_language_name(language)} for searching "
+        "company filings: one complete, standalone question. Translate faithfully, "
+        "use the words filings use (doanh thu -> revenue / net sales, lợi nhuận -> "
+        "net income, vốn chủ sở hữu -> stockholders' equity), write official "
+        "company names instead of tickers, keep numbers and periods. Reply with "
+        "the question only; never answer it."
+    )
+
+
+def with_search_texts(
+    plan: QueryPlan, corpora: Mapping[str, CorpusProfile], chat: ChatModel
+) -> QueryPlan:
+    """`plan` with a search text for each language of its corpora: a missing
+    one is translated by a short call (none when the question is already in
+    that language); when that fails too, search uses the question itself
+    (noted)."""
+
+    texts = dict(plan.texts)
+    notes = list(plan.notes)
+    asked_in = _question_language(plan.question)
+    for language in _languages({c: corpora[c] for c in plan.corpora}):
+        if texts.get(language) or language == asked_in:
+            continue
+        text, reason = _translate(chat, plan.question, language)
+        if text and _in_language(text, language, plan.question):
+            texts[language] = text
+            notes.append(f"{language} search text translated separately")
+        else:
+            notes.append(
+                f"no {language} search text ({reason}): the question is searched"[:300]
+            )
+    if texts == dict(plan.texts):
+        return replace(plan, notes=tuple(notes))
+    return replace(plan, texts=texts, notes=tuple(notes))
+
+
+def _translate(chat: ChatModel, question: str, language: str) -> tuple[str, str]:
+    """The model's translation (empty when the call failed), and how the
+    call ended."""
+
+    try:
+        reply = chat.generate(
+            [Message.user(question)], ChatOptions(system=_translation_prompt(language))
+        )
+    except LLMError as error:
+        return "", f"{type(error).__name__}: {error}"
+    text = reply.text.strip() if reply.stop_reason == "end" else ""
+    return text, f"stop {reply.stop_reason}"
+
+
+def _in_language(text: str, language: str, question: str) -> bool:
+    """False when `text` is plainly not in `language`: Vietnamese letters in
+    a text for an English corpus, or the question copied unchanged into
+    another language's field."""
+
+    if language == "en" and _VIETNAMESE.search(text):
+        return False
+    return language == _question_language(question) or (
+        text.strip() != question.strip()
+    )
+
+
+def _question_language(question: str) -> str:
+    return "vi" if _VIETNAMESE.search(question) else "en"
 
 
 def checked_plan(
@@ -232,11 +342,18 @@ def checked_plan(
     chosen = chosen or tuple(corpora)
     profiles = [corpora[c] for c in chosen]
     languages = {p.language for p in profiles}
-    texts = {
-        s.language.lower(): s.text.strip()
-        for s in analysis.searches
-        if s.language.lower() in languages and s.text.strip()
+    proposed = {
+        code.lower(): str(text).strip()
+        for code, text in analysis.searches.model_dump().items()
+        if str(text).strip()
     }
+    texts = {
+        code: text
+        for code, text in proposed.items()
+        if code in languages and _in_language(text, code, question)
+    }
+    if wrong := sorted((set(proposed) & languages) - set(texts)):
+        notes.append(f"search texts not in their language dropped: {wrong}")
     forms = {f for p in profiles for f in p.forms}
     topics = {t for p in profiles for t in p.topics}
     plan_forms = _known((_form(f) for f in analysis.forms), forms)
@@ -883,7 +1000,7 @@ def rule_plan(
     )
     forms = {f for p in corpora.values() for f in p.forms}
     topics = tuple(dict.fromkeys(t for rx, t in _TOPIC_WORDS if rx.search(question)))
-    language = "vi" if _VIETNAMESE.search(question) else "en"
+    language = _question_language(question)
     # Dates' periods are calendar ones; otherwise a plain year or part of
     # it is, a named quarter, fiscal year or year end is not.
     named_year = bool(words.year_ends) or (words.full_year and "FY" in kept)

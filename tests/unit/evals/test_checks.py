@@ -18,14 +18,15 @@ from src.evals.checks import (
     load_drafts,
     names_company,
     render_report,
-    value_tokens,
     widen_evidence,
 )
 from src.evals.testset import (
     CompanyRef,
     DraftQuestion,
+    EvalQuestion,
     EvalTask,
     Evidence,
+    ExpectedFilters,
     TaskPassage,
     XbrlFact,
 )
@@ -262,7 +263,9 @@ def test_widen_evidence_with_same_label_and_value() -> None:
 
     widen_evidence(result, [numeric_task()], load, read)
     added = result.questions[0].evidence_groups[0][-1]
-    assert added == Evidence(block_id="c1", quote="Net income | 90,001 | 88,136")
+    assert added == Evidence(
+        block_id="c1", quote="Net income | 90,001 | 88,136", widened=True
+    )
     assert result.widened == {"v1-t1": 1} and asked == [{"h1", "c1"}]
     assert loaded == [{MSFT.cik}]
     assert "| v1-t1 | 1 |" in render_report(result)
@@ -304,6 +307,59 @@ def test_widen_evidence_uses_the_most_specific_value() -> None:
     chunks = [company_chunk(later, "c1")]
     widen_evidence(result, [lookup], lambda c: chunks, lambda i, d: blocks)
     assert not result.widened
+
+
+def test_widen_evidence_per_group_with_each_company_and_note_references() -> None:
+    equity = "Total stockholders’ equity | 93,404 | 120,564"
+    eps = "Diluted net income per share (Note 12) | $2.12 | $7.99"
+    compare = task(
+        question_type="compare_companies",
+        data_kind="table",
+        companies=(MSFT, GOOG),
+        passages=(
+            passage(("b4",), text=equity),
+            passage(("g4",), text=eps, cik=GOOG.cik, company_name=GOOG.name),
+        ),
+    )
+    question = EvalQuestion(
+        id="v1-t1",
+        task_id="t1",
+        question_en="Compare Microsoft's equity with Alphabet's diluted EPS.",
+        question_vi="So sánh vốn chủ sở hữu của Microsoft với EPS pha loãng của Alphabet.",
+        reference_answer="Microsoft: $120,564 million; Alphabet: $7.99 per share.",
+        answerable=True,
+        question_type="compare_companies",
+        data_kind="table",
+        persona="analyst",
+        mention_style="name",
+        companies=(MSFT, GOOG),
+        evidence_groups=(
+            (Evidence(block_id="b4", quote=equity),),
+            (Evidence(block_id="g4", quote=eps),),
+        ),
+        expected=ExpectedFilters(ciks=(MSFT.cik, GOOG.cik)),
+    )
+    rows = {
+        "c1": equity,  # the 10-Q twin of the release row
+        # Without "(Note 12)": the same row in the release.
+        "c2": "Diluted net income per share | $2.12 | $5.90 | $7.99",
+        "c3": "Diluted net income per share | $2.12 | $7.99",  # another company
+        # $7.99 alone (3 significant digits): another period or share class.
+        "c4": "Diluted net income per share | $8.01 | $7.99",
+    }
+    blocks = {b: Block.of(text, "table") for b, text in rows.items()}
+    chunks = [
+        company_chunk(rows["c1"], "c1"),
+        company_chunk(rows["c2"], "c2", cik=GOOG.cik),
+        company_chunk(rows["c3"], "c3"),
+        company_chunk(rows["c4"], "c4", cik=GOOG.cik),
+    ]
+    result = CheckResult(questions=[question])
+    widen_evidence(result, [compare], lambda c: chunks, lambda i, d: blocks)
+    first, second = result.questions[0].evidence_groups
+    assert [e.block_id for e in first] == ["b4", "c1"]
+    assert [e.block_id for e in second] == ["g4", "c2"]
+    assert result.widened == {"v1-t1": 2}
 
 
 def test_skip_draft() -> None:
@@ -399,31 +455,6 @@ def test_names_company(text: str, company: CompanyRef, named: bool) -> None:
     assert names_company(text, company) is named
 
 
-@pytest.mark.parametrize(
-    ("text", "value", "decimals", "found"),
-    [
-        ("Revenue was $245,122 million.", "245122000000", "-6", True),
-        ("Revenue was $245.1 billion.", "245122000000", "-6", True),
-        ("Revenue was 245,122 (in millions).", "245122000000", "-6", True),
-        ("Revenue was about $245 billion.", "245122000000", "-6", True),
-        ("Revenue was about $47 billion.", "46752000000", "-6", False),
-        ("Diluted EPS was $11.80.", "11.8", "2", True),
-        ("The tax rate was 18%.", "0.18", "2", True),
-        ("Accrued expenses | (1,558)", "-1558000000", "-6", True),
-        ("Accrued expenses fell to 1,558", "-1558000000", "-6", False),
-        ("Accrued expenses | (1,558)", "1558000000", "-6", False),
-        ("Repurchases | — | 0", "0", "-6", True),
-    ],
-)  # fmt: skip
-def test_value_tokens(text: str, value: str, decimals: str, found: bool) -> None:
-    assert bool(value_tokens(text, value, decimals)) is found
-
-
-def test_value_sign_words() -> None:
-    answer = "A net loss of $1,558 million."
-    assert value_tokens(answer, "-1558000000", "-6", sign_words=True) == ["1,558"]
-
-
 def test_copy_scores_skip_numbers_names_and_period_words() -> None:
     run_length, share = copy_scores(
         "Microsoft revenue for the fiscal year ended June 2024?", task()
@@ -443,12 +474,6 @@ def test_load_drafts_reports_bad_lines(tmp_path: Path) -> None:
     )
     drafts, errors = load_drafts([folder])
     assert len(drafts) == 1 and errors[0].message.startswith(f"{folder / 'a.jsonl'}:2:")
-
-
-def test_quote_value_ignores_table_sign() -> None:
-    row = "Additions to property and equipment | (28,107) | (23,886)"
-    assert value_tokens(row, "28107000000", "-6") == []
-    assert value_tokens(row, "28107000000", "-6", any_sign=True) == ["28,107"]
 
 
 def answer_warnings(answer: str, *passages: TaskPassage) -> list[str]:

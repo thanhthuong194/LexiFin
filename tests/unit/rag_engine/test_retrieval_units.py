@@ -7,11 +7,14 @@ from typing import Any, get_args
 import pytest
 
 from src.data_pipeline.transforms.native_rag.section_topics import SectionTopic
+from src.llm import Message
+from src.llm.structured import strict_json_schema
 from src.rag_engine.retrieval.companies import CompanyIndex, normalize_name
 from src.rag_engine.retrieval.corpora import CORPORA, SEC_FILINGS_PROFILE
 from src.rag_engine.retrieval.dedup import dedupe
 from src.rag_engine.retrieval.query import (
     QueryAnalysis,
+    analysis_model,
     analyze_query,
     checked_plan,
     rule_plan,
@@ -117,7 +120,7 @@ def _analysis(**overrides: Any) -> QueryAnalysis:
     values: dict[str, Any] = {
         "language": "vi",
         "corpora": ["sec_filings"],
-        "searches": [{"language": "en", "text": "What was Apple's Q2 2024 revenue?"}],
+        "searches": {"en": "What was Apple's Q2 2024 revenue?"},
         "companies": [{"name": "Apple Inc.", "ticker": "aapl"}],
         "fiscal_years": [2024],
         "fiscal_periods": ["q2"],
@@ -126,7 +129,7 @@ def _analysis(**overrides: Any) -> QueryAnalysis:
         "wants_latest": False,
         "period_basis": "fiscal",
     }
-    return QueryAnalysis.model_validate(values | overrides)
+    return analysis_model(("en",)).model_validate(values | overrides)
 
 
 def test_checked_plan_keeps_known_values_only() -> None:
@@ -152,7 +155,10 @@ def test_checked_plan_keeps_known_values_only() -> None:
     assert not plan.wants_latest  # a period was named
     assert any("vn_law" in note for note in plan.notes)
     assert any("topics" in note for note in plan.notes)
-    no_corpus = checked_plan("q", _analysis(corpora=[], searches=[]), CORPORA)
+    empty = QueryAnalysis.model_validate(
+        _analysis(corpora=[]).model_dump() | {"searches": {}}
+    )
+    no_corpus = checked_plan("q", empty, CORPORA)
     assert no_corpus.corpora == ("sec_filings",) and no_corpus.text_for("en") == "q"
 
 
@@ -174,6 +180,48 @@ def test_analyze_query_with_model_and_fallbacks() -> None:
         ("risk_factors",),
     )
     assert analyze_query("x", CORPORA, None, TODAY).notes == ("no query model: rules",)
+
+
+def test_schema_requires_a_search_text_per_corpus_language() -> None:
+    schema = strict_json_schema(analysis_model(("en", "vi")))
+    texts = schema["$defs"]["SearchTexts"]
+    assert texts["required"] == ["en", "vi"] and "searches" in schema["required"]
+    assert "Vietnamese" in texts["properties"]["vi"]["description"]
+
+
+def test_untranslated_search_text_is_translated_separately() -> None:
+    question = "Doanh thu quý 2/2024 của Apple là bao nhiêu?"
+    english = "What were Apple Inc.'s net sales in Q2 2024?"
+    # The model copies the Vietnamese question into the English field.
+    chat = FakeChat(
+        [reply(_analysis(searches={"en": question}).model_dump_json()), reply(english)]
+    )
+    plan = analyze_query(question, CORPORA, chat, TODAY)
+    assert plan.source == "llm" and plan.text_for("en") == english
+    assert any("not in their language dropped: ['en']" in n for n in plan.notes)
+    assert any("translated separately" in n for n in plan.notes)
+    messages, options = chat.calls[1]
+    assert messages[0] == Message.user(question)
+    assert options is not None and options.output_schema is None
+    assert options.system is not None and "in English" in options.system
+    # A translation still in Vietnamese is not used: the question is searched.
+    failed = analyze_query(
+        question,
+        CORPORA,
+        FakeChat(
+            [reply(_analysis(searches={"en": ""}).model_dump_json()), reply(question)]
+        ),
+        TODAY,
+    )
+    assert failed.text_for("en") == question and not failed.texts
+    assert any("no en search text" in n for n in failed.notes)
+
+
+def test_english_question_keeps_its_own_text_without_a_second_call() -> None:
+    question = "What was Apple's Q2 2024 revenue?"
+    chat = FakeChat([reply(_analysis(language="en").model_dump_json())])
+    plan = analyze_query(question, CORPORA, chat, TODAY)
+    assert plan.texts == {"en": question} and len(chat.calls) == 1
 
 
 @pytest.mark.parametrize(

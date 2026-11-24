@@ -182,7 +182,7 @@ def test_context_query_and_unanswerable_metrics(tmp_path: Path) -> None:
         [
             (answerable, "vi", result([("k", ["c3"], 0, True)], language="en",
                                       passages=[passage(1, ("k", "c0"))])),
-            (outside, "en", result(ciks=(), unresolved=["Tesla"])),
+            (outside, "en", result(ciks=(), unresolved=["Tesla"], language="vi")),
             (no_period, "en", result([("z", [], 0, True)], passages=[passage(1, ("z",))])),
         ],
         relevance,
@@ -195,6 +195,10 @@ def test_context_query_and_unanswerable_metrics(tmp_path: Path) -> None:
     assert first["query.filter_admits_evidence"] == 0.0
     assert first["query.language"] == 0.0
     assert first["query.company"] == 1.0
+    # An English plan searches its own words; a Vietnamese one without an
+    # English text searched the question itself.
+    assert first["query.search_text"] == 1.0
+    assert second["query.search_text"] == 0.0
     assert second["query.unknown_flagged"] == 1.0
     assert second["unanswerable.rejected"] == 1.0
     assert "post.hit_rate@8" not in second
@@ -279,18 +283,33 @@ def test_evidence_chunks_from_gold(tmp_path: Path) -> None:
     write_chunks(tmp_path, gold_chunks())
     assert evidence_chunks(tmp_path, [question("u", 0)]) == (
         {},
+        {},
         CHUNKS_SPEC.rules_version,
     )
     found = EvalQuestion.model_validate(
         question("q1").model_dump()
         | {
             "evidence_groups": [
-                [{"block_id": "d24:block:000002", "quote": "REVENUE  note 2"}]
+                [
+                    {"block_id": "d24:block:000002", "quote": "REVENUE  note 2"},
+                    {
+                        "block_id": "d24:block:000002",
+                        "quote": "REVENUE",
+                        "widened": True,
+                    },
+                ]
             ]
         }
     )
-    relevance, _ = evidence_chunks(tmp_path, [found])
+    relevance, original, _ = evidence_chunks(tmp_path, [found])
     assert [len(g) for g in relevance["q1"]] == [1]
+    assert original == relevance  # the widened row is in the same chunk here
+    own = EvalQuestion.model_validate(
+        found.model_dump()
+        | {"evidence_groups": [[found.evidence_groups[0][1].model_dump()]]}
+    )
+    _, original, _ = evidence_chunks(tmp_path, [own])
+    assert original == {"q1": [frozenset()]}  # widened rows only: not admitted
 
 
 def test_outputs_report_and_compare(tmp_path: Path) -> None:

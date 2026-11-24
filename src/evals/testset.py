@@ -183,6 +183,9 @@ class DraftQuestion(_Model):
 class Evidence(_Model):
     block_id: str
     quote: str = Field(min_length=1)  # verbatim; compared after `normalize`
+    # Added by `checks.widen_evidence` (same row elsewhere): counts for
+    # retrieval, not for whether the filters admit the question's evidence.
+    widened: bool = False
 
 
 class ExpectedFilters(_Model):

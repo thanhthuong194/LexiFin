@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -148,7 +149,7 @@ def _analysis(**overrides: Any) -> str:
     values: dict[str, Any] = {
         "language": "en",
         "corpora": ["sec_filings"],
-        "searches": [],
+        "searches": {},
         "companies": [{"name": "Alpha Corp", "ticker": "ALP"}],
         "fiscal_years": [],
         "fiscal_periods": [],
@@ -180,6 +181,9 @@ def _retrieve(
     reranker: Any = None,
     settings: RetrieverSettings | None = None,
 ) -> RetrievalResult:
+    if analysis is not None and not json.loads(analysis)["searches"]:
+        # The schema requires an English text; the question is English.
+        analysis = json.dumps(json.loads(analysis) | {"searches": {"en": question}})
     chat = FakeChat([reply(analysis)]) if analysis is not None else None
     retriever = Retriever(
         client,

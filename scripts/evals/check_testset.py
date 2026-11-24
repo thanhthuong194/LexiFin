@@ -34,7 +34,7 @@ from src.evals.testset import EvalTask, SetManifest, read_jsonl, write_jsonl
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check drafts and build questions")
     parser.add_argument(
-        "--set-dir", type=Path, default=REPOSITORY_ROOT / "evals" / "sets" / "v1.1"
+        "--set-dir", type=Path, default=REPOSITORY_ROOT / "evals" / "sets" / "v1.2"
     )
     parser.add_argument("--data-dir", type=Path, required=True, help="Silver root")
     parser.add_argument("--gold-dir", type=Path, help="Gold root (default: --data-dir)")

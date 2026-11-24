@@ -17,7 +17,6 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -36,6 +35,15 @@ from src.data_pipeline.storage.iceberg import (
 )
 from src.data_pipeline.storage.native_rag.chunks import CHUNKS_TABLE
 from src.data_pipeline.storage.sec_filings.content_blocks import CONTENT_BLOCKS_TABLE
+from src.evals.numbers import (
+    VALUE_MIN_DIGITS,
+    dates,
+    derived,
+    numbers,
+    states,
+    value_tokens,
+    without_dates,
+)
 from src.evals.testset import (
     CompanyRef,
     DraftQuestion,
@@ -60,18 +68,15 @@ COPY_RUN = 5
 COPY_SHARE = 0.8
 COPY_MIN_WORDS = 6
 NEAR_DUPLICATE_JACCARD = 0.8
-# A written number matches a fact when it rounds to it and has at least
-# VALUE_MIN_DIGITS significant digits or is within VALUE_TOLERANCE.
-VALUE_MIN_DIGITS = 3
-VALUE_TOLERANCE = Decimal("0.005")
 SKIP_PREFIX = "SKIP:"
-# Same-company rows that widen numeric/table_lookup evidence must carry a
+# Same-company rows that widen a table-row evidence group must carry a
 # specific label: at least LABEL_MIN_CHARS (normalized) and not generic,
 # unless the value has VALUE_SPECIFIC_DIGITS significant digits.
 LABEL_MIN_CHARS = 6
 GENERIC_LABELS = frozenset({"total", "subtotal", "net", "other", "totals"})
 VALUE_SPECIFIC_DIGITS = 4
-WIDENED_TYPES = frozenset({"numeric", "table_lookup"})
+# Note references and footnote marks in a row label: "(Note 12)", "(1)", "(a)".
+_LABEL_REFERENCE = re.compile(r"\((?:note\s*\d+[a-z]?|\d{1,2}|[a-z])\)", re.IGNORECASE)
 
 PAIRED_TYPES = frozenset({"compare_periods", "compare_companies", "multi_hop"})
 STOPWORDS = frozenset(
@@ -86,39 +91,6 @@ PERIOD_WORDS = frozenset(
      "september", "october", "november", "december", "ended", "ending", "month",
      "months", "fiscal", "year", "years", "quarter", "quarters", "annual"}
 )  # fmt: skip
-_NUMBER = re.compile(
-    r"\$?([(\-−])?\$?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?\)?\s*"
-    r"(%|percent\b|thousand\b|million\b|billion\b|trillion\b|bn\b|[kmb]\b)?",
-    re.IGNORECASE,
-)
-_SCALES = {
-    "%": Decimal("0.01"), "percent": Decimal("0.01"), "k": Decimal(10) ** 3,
-    "thousand": Decimal(10) ** 3, "m": Decimal(10) ** 6,
-    "million": Decimal(10) ** 6, "b": Decimal(10) ** 9, "bn": Decimal(10) ** 9,
-    "billion": Decimal(10) ** 9, "trillion": Decimal(10) ** 12,
-}  # fmt: skip
-# Answer facts: numbers checked only when they carry `$`, a unit, a fraction or
-# a thousands separator, or are at least ANSWER_MIN_NUMBER and not a year.
-ANSWER_MIN_NUMBER = 100
-_YEARS = range(1900, 2101)
-_ANSWER_SCALES = tuple(Decimal(10) ** e for e in (0, 3, 6, 9, 12, -2))
-_MONTHS = {
-    m[:3]: i
-    for i, m in enumerate(
-        ("january", "february", "march", "april", "may", "june", "july",
-         "august", "september", "october", "november", "december"),
-        1,
-    )
-}  # fmt: skip
-_DATE = re.compile(
-    r"\b(?:(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?[ \t\n]+"
-    r"(\d{1,2}),?[ \t\n]+(\d{4})|(\d{4})-(\d{2})-(\d{2}))\b",
-    re.IGNORECASE,
-)
-_NEGATIVE = re.compile(
-    r"\b(loss(es)?|negative|decreas\w*|declin\w*|outflows?|used|deficit)\b|\blỗ\b",
-    re.IGNORECASE,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,10 +362,11 @@ def _value_line(token: str, block: Block, chunks: Sequence[str]) -> list[str]:
 
 
 def _row(line: str) -> tuple[str, str]:
-    """A table line's normalized first cell (label) and its other cells."""
+    """A table line's first cell (label: normalized, without note references
+    or footnote marks) and its other cells."""
 
     label, _, rest = line.partition("|")
-    return normalize(label), rest
+    return normalize(_LABEL_REFERENCE.sub("", label)), rest
 
 
 def _significant(token: str) -> int:
@@ -402,28 +375,64 @@ def _significant(token: str) -> int:
     return len(re.sub(r"\D", "", token).strip("0"))
 
 
-def _seed(question: EvalQuestion, task: EvalTask) -> tuple[str, str] | None:
-    """(label, value) of the question's evidence row: the value with the most
-    significant digits, at least VALUE_MIN_DIGITS (VALUE_SPECIFIC_DIGITS
-    under a short or generic label)."""
+@dataclass(frozen=True, slots=True)
+class _Seed:
+    """A group's evidence row as widening matches it."""
 
-    for evidence in question.evidence_groups[0]:
+    cik: str
+    label: str
+    token: str  # the answer value
+    others: tuple[str, ...]  # the row's other numbers
+
+    def matches(self, cells: str) -> bool:
+        """`cells` show the value; a value with few significant digits (EPS,
+        a ratio) also needs one of the row's other numbers, so the same
+        figure of another period or share class does not match."""
+
+        if not whole_number(self.token).search(cells):
+            return False
+        return _significant(self.token) >= VALUE_SPECIFIC_DIGITS or any(
+            whole_number(o).search(cells) for o in self.others
+        )
+
+
+_CELL_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _seed(
+    group: Sequence[Evidence],
+    answer: str,
+    fact: XbrlFact | None,
+    cik: str,
+    taken: Collection[str] = (),
+) -> _Seed | None:
+    """A group's evidence row and its answer value: with a fact, the cell
+    showing it with the most significant digits; else the cell number the
+    reference `answer` states first (the value asked; the next ones are
+    mostly comparatives), skipping values earlier groups `taken`. At least
+    VALUE_MIN_DIGITS significant digits (VALUE_SPECIFIC_DIGITS under a short
+    or generic label)."""
+
+    for evidence in group:
         label, cells = _row(evidence.quote)
         if not label or not cells:
             continue
-        if task.fact is not None:
-            fact = task.fact
+        row_numbers = _CELL_NUMBER.findall(cells)
+        if fact is not None:
             tokens = value_tokens(cells, fact.value, fact.decimals, any_sign=True)
-        else:  # table_lookup: a cell number the reference answer repeats
-            found = re.findall(r"\d[\d,]*(?:\.\d+)?", cells)
-            tokens = [
-                t for t in found if whole_number(t).search(question.reference_answer)
-            ]
+            best = max(tokens, key=_significant, default="")
+        else:
+            stated = {
+                t: m.start()
+                for t in row_numbers
+                if t not in taken and (m := whole_number(t).search(answer))
+            }
+            best = min(stated, key=stated.__getitem__, default="")
         generic = len(label) < LABEL_MIN_CHARS or label in GENERIC_LABELS
         least = VALUE_SPECIFIC_DIGITS if generic else VALUE_MIN_DIGITS
-        best = max(tokens, key=_significant, default="")
         if best and _significant(best) >= least:
-            return label, best
+            others = tuple(dict.fromkeys(n for n in row_numbers if n != best))
+            return _Seed(cik, label, best, others)
     return None
 
 
@@ -449,49 +458,65 @@ def widen_evidence(
     load_company: CompanyChunkLoader,
     read: BlockLoader,
 ) -> None:
-    """Add, to numeric/table_lookup questions, every same-company chunk row with
-    the evidence row's label and the answer value (comparatives in later
-    filings, 8-K release tables), as (block, row) evidence. `load_company`
-    gets the CIKs of the questions that have a seed row."""
+    """Add, to each evidence group quoting a table row, every chunk row of
+    the group's company with that row's label and the answer value
+    (comparatives in later filings, the 10-Q/10-K twin of an 8-K release
+    table, the same row in a note), as (block, row) evidence. The XBRL fact
+    gives the value of a numeric question's first group. `load_company`
+    gets the CIKs of the groups that have a seed row."""
 
     by_task = {t.task_id: t for t in tasks}
-    seeds: dict[str, tuple[str, str, str]] = {}  # question ID -> cik, label, token
+    seeds: dict[tuple[str, int], _Seed] = {}  # (question ID, group index)
     for question in result.questions:
         task = by_task[question.task_id]
-        if question.question_type in WIDENED_TYPES and (seed := _seed(question, task)):
-            seeds[question.id] = (task.passages[0].cik, *seed)
-    rows = _table_rows(load_company({cik for cik, _, _ in seeds.values()}))
-    found: dict[str, list[tuple[CompanyChunk, str]]] = {}
-    for question_id, (cik, label, token) in seeds.items():
-        pattern = whole_number(token)
-        found[question_id] = [
+        taken: set[str] = set()
+        for index, group in enumerate(question.evidence_groups):
+            fact = task.fact if index == 0 else None
+            cik = _group_cik(group, task)
+            answer = question.reference_answer
+            if seed := _seed(group, answer, fact, cik, taken):
+                seeds[question.id, index] = seed
+                taken.add(seed.token)
+    rows = _table_rows(load_company({s.cik for s in seeds.values()}))
+    found: dict[tuple[str, int], list[tuple[CompanyChunk, str]]] = {}
+    for key, seed in seeds.items():
+        found[key] = [
             (chunk, line)
-            for chunk, line, rest in rows[cik][label]
-            if pattern.search(rest)
+            for chunk, line, rest in rows[seed.cik][seed.label]
+            if seed.matches(rest)
         ]
     hits = [hit for matched in found.values() for hit in matched]
     blocks = read(
         {b for chunk, _ in hits for b in chunk.block_ids},
         {c.filing_date for c, _ in hits},
     )
-    for index, question in enumerate(result.questions):
-        if question.id not in found:
-            continue
-        group = list(question.evidence_groups[0])
-        present = {e.block_id for e in group}
-        for chunk, line in found[question.id]:
-            text = normalize(line)
-            held = [
-                b for b in chunk.block_ids if b in blocks and text in blocks[b].text
-            ]
-            if held and held[0] not in present:
-                group.append(Evidence(block_id=held[0], quote=line))
-                present.add(held[0])
-        if added := len(group) - len(question.evidence_groups[0]):
+    for position, question in enumerate(result.questions):
+        groups = [list(g) for g in question.evidence_groups]
+        for index, grown in enumerate(groups):
+            present = {e.block_id for e in grown}
+            for chunk, line in found.get((question.id, index), ()):
+                text = normalize(line)
+                held = [
+                    b for b in chunk.block_ids if b in blocks and text in blocks[b].text
+                ]
+                if held and held[0] not in present:
+                    grown.append(Evidence(block_id=held[0], quote=line, widened=True))
+                    present.add(held[0])
+        before = sum(len(g) for g in question.evidence_groups)
+        if added := sum(len(g) for g in groups) - before:
             result.widened[question.id] = added
-            groups = (tuple(group), *question.evidence_groups[1:])
-            update = {"evidence_groups": groups}
-            result.questions[index] = question.model_copy(update=update)
+            update = {"evidence_groups": tuple(tuple(g) for g in groups)}
+            result.questions[position] = question.model_copy(update=update)
+
+
+def _group_cik(group: Sequence[Evidence], task: EvalTask) -> str:
+    """CIK of the passage holding the group's first block (each compared
+    company's own passage)."""
+
+    for passage in task.passages:
+        if group[0].block_id in passage.block_ids:
+            return passage.cik
+    return task.passages[0].cik
 
 
 # Wording
@@ -618,122 +643,6 @@ def content_words(text: str, exclude: Collection[str] = ()) -> list[str]:
     ]
 
 
-def value_tokens(
-    text: str,
-    value: str,
-    decimals: str | None,
-    *,
-    sign_words: bool = False,
-    any_sign: bool = False,
-) -> list[str]:
-    """Numbers in `text` (as written) that state `value`, rounded and scaled.
-
-    Sign must agree: a negative value is written `(1,558)` / `-1,558`, or, with
-    `sign_words`, stated positive next to "loss", "decrease", "used"...
-    `any_sign` skips this, for table rows whose sign is presentation (an
-    outflow fact, positive in XBRL, shown as `(28,107)` in a cash-flow row).
-    """
-
-    try:
-        target = Decimal(value)
-    except InvalidOperation:
-        return [value] if value in text else []
-    implicit = [Decimal(1)]
-    if decimals and decimals.lstrip("-").isdigit() and int(decimals) < 0:
-        implicit.append(Decimal(10) ** -int(decimals))
-    worded = sign_words and _NEGATIVE.search(text) is not None
-    tokens: list[str] = []
-    for sign, whole, fraction, unit in _NUMBER.findall(text):
-        written = whole.replace(",", "") + fraction
-        number = Decimal(written)
-        if (number == 0) != (target == 0):
-            continue
-        if (
-            number
-            and not any_sign
-            and (bool(sign) if target > 0 else not (sign or worded))
-        ):
-            continue
-        digits = len(fraction) - 1 if fraction else 0
-        significant = len(written.replace(".", "").lstrip("0"))
-        for scale in [_SCALES[unit.casefold()]] if unit else implicit:
-            error = abs(number * scale - abs(target))
-            rounded = error <= Decimal(5) * Decimal(10) ** (-digits - 1) * scale
-            close = significant >= VALUE_MIN_DIGITS or error <= VALUE_TOLERANCE * abs(
-                target
-            )
-            if rounded and close:
-                tokens.append(whole + fraction)
-                break
-    return tokens
-
-
-def _dates(text: str) -> dict[str, date | None]:
-    """Full dates written in `text` (`June 30, 2024`, `Sept. 28, 2024`,
-    `2024-06-30`; not split over table cells), as written -> date."""
-
-    found: dict[str, date | None] = {}
-    for match in _DATE.finditer(text):
-        month, day, year, iso_year, iso_month, iso_day = match.groups()
-        try:
-            if month:
-                when = date(int(year), _MONTHS[month.casefold()], int(day))
-            else:
-                when = date(int(iso_year), int(iso_month), int(iso_day))
-        except ValueError:
-            when = None
-        found[match.group(0)] = when
-    return found
-
-
-def _numbers(text: str) -> list[tuple[str, Decimal, bool]]:
-    """Numbers in `text` not inside a word (`Q2`, `FY2024`): (as written,
-    value without unit scale, whether it states an amount worth checking)."""
-
-    found: list[tuple[str, Decimal, bool]] = []
-    for match in _NUMBER.finditer(text):
-        start = match.start()
-        if start and (text[start - 1].isalnum() or text[start - 1] in ".,"):
-            continue
-        _, whole, fraction, unit = match.groups()
-        value = Decimal(whole.replace(",", "") + (fraction or ""))
-        marked = "$" in match.group(0) or bool(unit or fraction) or "," in whole
-        checked = value != 0 and (
-            marked or (value >= ANSWER_MIN_NUMBER and int(value) not in _YEARS)
-        )
-        found.append((match.group(0).strip(), value, checked))
-    return found
-
-
-def _states(written: str, values: Iterable[Decimal]) -> bool:
-    """`written` (one answer number) states one of `values`, at any usual
-    scale (units to trillions, or percent points)."""
-
-    return any(
-        value_tokens(written, str(abs(v) * scale), None, any_sign=True)
-        for v in values
-        for scale in _ANSWER_SCALES
-    )
-
-
-def _derived(written: str, operands: Collection[Decimal]) -> bool:
-    """`written` is a sum or difference of two operands, or (a percentage) a
-    ratio or change of two, to its shown rounding."""
-
-    pairs = list(itertools.permutations(operands, 2))
-    if _states(written, {a + b for a, b in pairs} | {a - b for a, b in pairs}):
-        return True
-    percent = re.search(r"(\d[\d,]*)(\.\d+)?\s*(%|percent)", written)
-    if percent is None:
-        return False
-    shown = Decimal(percent.group(1).replace(",", "") + (percent.group(2) or ""))
-    half = Decimal(5) * Decimal(10) ** -(len(percent.group(2) or "."))
-    for a, b in pairs:
-        if b and any(abs(abs(r) * 100 - shown) <= half for r in (a / b, (a - b) / b)):
-            return True
-    return False
-
-
 def answer_facts(task: EvalTask, draft: DraftQuestion, found: _Found) -> None:
     """Warn on numbers and full dates of the reference answer that the
     passages (text or context) do not show. A number may also be a sum,
@@ -744,16 +653,18 @@ def answer_facts(task: EvalTask, draft: DraftQuestion, found: _Found) -> None:
         return
     passages = "\n".join(f"{p.context}\n{p.text}" for p in task.passages)
     answer = draft.reference_answer
-    known_dates = set(_dates(passages).values()) - {None}
-    missing = [w for w, d in _dates(answer).items() if d not in known_dates]
-    numbers = _numbers(_DATE.sub(" ", answer))
-    shown = [v for _, v, _ in _numbers(_DATE.sub(" ", passages))]
-    unknown = [w for w, _, checked in numbers if checked and not _states(w, shown)]
+    known_dates = set(dates(passages).values()) - {None}
+    missing = [w for w, d in dates(answer).items() if d not in known_dates]
+    stated = numbers(without_dates(answer))
+    shown = [n.value for n in numbers(without_dates(passages))]
+    unknown = [n.written for n in stated if n.checked and not states(n.written, shown)]
     if unknown:
         quoted = " ".join(q for group in draft.evidence_quotes for q in group)
-        known = [(w, v, ok) for w, v, ok in numbers if w not in unknown]
-        operands = {v for _, v, ok in [*_numbers(_DATE.sub(" ", quoted)), *known] if ok}
-        missing += [w for w in unknown if not _derived(w, operands)]
+        known = [n for n in stated if n.written not in unknown]
+        operands = {
+            n.value for n in [*numbers(without_dates(quoted)), *known] if n.checked
+        }
+        missing += [w for w in unknown if not derived(w, operands)]
     if missing:
         message = "not in passages: " + "; ".join(dict.fromkeys(missing))
         found.warnings.append(("answer_fact_not_in_passage", message))

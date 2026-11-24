@@ -20,7 +20,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pyarrow as pa
@@ -39,6 +39,7 @@ from src.data_pipeline.storage.iceberg import (
 from src.data_pipeline.storage.native_rag.chunks import CHUNKS_TABLE
 from src.evals.testset import CELL_KEYS, EvalQuestion, Language, normalize
 from src.rag_engine.indexing.qdrant_store import point_id
+from src.rag_engine.retrieval.corpora import CORPORA
 from src.rag_engine.retrieval.factory import SERVER_ERRORS
 from src.rag_engine.retrieval.retriever import RetrievalResult, SearchUsed
 from src.rag_engine.retrieval.search import qdrant_filter
@@ -61,6 +62,7 @@ METRIC_KEYS = (
     "query.filter_admits_evidence",
     "query.language",
     "query.llm_plan",
+    "query.search_text",
     "unanswerable.rejected",
 )
 HEADLINE = ("post.hit_rate@8", "post.mrr@10", "post.recall@8", "context.recall")
@@ -80,8 +82,9 @@ Groups = list[frozenset[str]]  # per evidence group, the chunk IDs matching it
 
 def evidence_chunks(
     gold_dir: Path, questions: Sequence[EvalQuestion]
-) -> tuple[dict[str, Groups], int]:
-    """Question ID -> matching chunks per group, and the chunks rules version.
+) -> tuple[dict[str, Groups], dict[str, Groups], int]:
+    """Question ID -> matching chunks per group, the same for the writer's
+    evidence only (`match_groups`), and the chunks rules version.
     Reads `block_ids` of every chunk, `text` only of chunks holding evidence."""
 
     wanted = sorted({b for q in questions for b in q.evidence_blocks})
@@ -120,21 +123,38 @@ def evidence_chunks(
     relevance = {
         q.id: match_groups(q, holders, texts) for q in questions if q.answerable
     }
-    return relevance, version
+    original = {
+        q.id: match_groups(q, holders, texts, original_only=True)
+        for q in questions
+        if q.answerable
+    }
+    return relevance, original, version
+
+
+class Evidenced(NamedTuple):
+    """A question's matching chunks per evidence group: all evidence, and
+    the writer's own (filters admit the question when these pass)."""
+
+    groups: Groups
+    own: Groups
 
 
 def match_groups(
     question: EvalQuestion,
     holders: Mapping[str, set[str]],
     texts: Mapping[str, str],
+    *,
+    original_only: bool = False,
 ) -> Groups:
     """Per group, the chunks holding one of its blocks and showing its quote
-    (`texts`: chunk ID -> `normalize`d text)."""
+    (`texts`: chunk ID -> `normalize`d text); with `original_only`, of the
+    writer's evidence only, not the rows widening added."""
 
     return [
         frozenset(
             c
             for e in group
+            if not (original_only and e.widened)
             for c in holders.get(e.block_id, ())
             if normalize(e.quote) in texts[c]
         )
@@ -179,7 +199,7 @@ def result_row(
     language: Language,
     result: RetrievalResult,
     probe: Probe,
-    groups: Groups,
+    evidenced: Evidenced,
 ) -> Row:
     def entry(candidate: Mapping[str, Any]) -> list[str]:
         return [candidate["chunk_id"], *candidate["duplicate_chunk_ids"]]
@@ -209,12 +229,19 @@ def result_row(
             "forms": list(plan.forms),
             "topics": list(plan.topics),
             "wants_latest": plan.wants_latest,
+            "filed_months": list(plan.filed_months),
+            "texts": dict(plan.texts),
+            # Corpus languages searched with the question itself, untranslated.
+            "untranslated": sorted(
+                {CORPORA[c].language for c in plan.corpora if c in CORPORA}
+                - {*plan.texts, plan.language}
+            ),
         },
         "companies": result.companies,
         "unresolved_companies": result.unresolved_companies,
         "searches": [asdict(s) for s in result.searches],
         "filter_admits": [
-            probe.admits(result.searches, g) if g else None for g in groups
+            probe.admits(result.searches, g) if g else None for g in evidenced.own
         ],
         "notes": result.notes,
         "timings": result.timings,
@@ -248,6 +275,7 @@ def collect(
     pairs: Iterable[tuple[EvalQuestion, Language]],
     relevance: Mapping[str, Groups],
     path: Path,
+    original: Mapping[str, Groups] | None = None,
 ) -> None:
     """Append one row per pair (flushed, so an interrupted run resumes); a
     server error is recorded and the run goes on."""
@@ -257,7 +285,9 @@ def collect(
             try:
                 result = probe.retrieve(question.text(language))
                 groups = relevance.get(question.id, [])
-                row = result_row(question, language, result, probe, groups)
+                own = (original or relevance).get(question.id, groups)
+                evidenced = Evidenced(groups, own)
+                row = result_row(question, language, result, probe, evidenced)
             except SERVER_ERRORS as error:
                 row = {
                     "question_id": question.id,
@@ -382,6 +412,11 @@ def _row_metrics(
         "query.unknown_flagged": float(flagged) if expected.unknown_companies else None,
         "query.language": float(plan["language"] == row["language"]),
         "query.llm_plan": float(plan["source"] == "llm"),
+        # Every corpus searched in its own language (rows written before
+        # plans kept this: none).
+        "query.search_text": (
+            float(not plan["untranslated"]) if "untranslated" in plan else None
+        ),
         "unanswerable.rejected": float(flagged) if reason == REJECTABLE else None,
     }
     if question.answerable:

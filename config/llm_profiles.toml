@@ -1,61 +1,46 @@
-# LLM profiles for src/llm (get_chat / get_embedder / get_reranker).
-#
-# A profile is [<kind>.<name>]: kind = chat | embedding | rerank, name = a role
-# ("default", "judge", ...). Code asks for the role, so swapping a model is a
-# one-line edit here. [defaults] fills keys a profile leaves out.
-#
-# No URL or key belongs in this file; they live in .env (see .env.example):
-#   openai / anthropic / gemini  -> SDK default URL + OPENAI_API_KEY /
-#                                   ANTHROPIC_API_KEY / GEMINI_API_KEY
-#   openai_compat / http_rerank  -> <KIND>_<NAME>_BASE_URL (+ optional
-#                                   <KIND>_<NAME>_API_KEY), e.g. CHAT_JUDGE_BASE_URL
-#
-# Keys per kind:
-#   all        provider, model, served_model (name sent to the server when it
-#              differs from `model`, which results are stored under),
-#              timeout_s, max_retries,
-#              options (table merged into every request body as is)
-#   chat       max_tokens, temperature (not for anthropic), effort
-#              (anthropic output_config.effort, openai reasoning_effort,
-#              gemini thinking_level)
-#   embedding  batch_size, dimensions (Matryoshka size; omit for the model's
-#              own), query_instruction (Qwen3-Embedding query prefix)
-#   rerank     prompt_format ("qwen3": Qwen3-Reranker chat template; omit for
-#              models that take bare text), instruction (its task line)
+# LLM profiles for src/llm: [<kind>.<name>], kind = chat | embedding | rerank,
+# name = a role. Code asks for the role, so a model swap is an edit here.
+# URLs and keys live only in .env:
+#   openai / anthropic / gemini   -> OPENAI_ / ANTHROPIC_ / GEMINI_API_KEY
+#   openai_compat / http_rerank   -> <KIND>_<NAME>_BASE_URL, _API_KEY
+# `model` is the id results are stored under; `served_model` is the name sent
+# to the server when it differs. `options` is merged into every request body.
 
 [defaults]
 timeout_s = 120
 max_retries = 3
 
-# Gemini API (Google AI Studio free tier: 5 req/min, 20 req/day): GEMINI_API_KEY.
+
+# ---------------------------------------------------------------- chat ----
+
+# Spare model. Google AI Studio free tier (5 req/min, 20 req/day).
 [chat.default]
 provider = "gemini"
 model = "gemini-3.6-flash"
 max_tokens = 16000
 
-# Writes eval questions and RAG answers. Groq free tier (1,000 req/day,
-# 8k tokens/min): CHAT_GENERATOR_BASE_URL, CHAT_GENERATOR_API_KEY.
+# Writes RAG answers.
 [chat.generator]
 provider = "openai_compat"
 model = "openai/gpt-oss-120b"
+served_model = "gpt-oss-120b"
 max_tokens = 8192
 temperature = 0.0
 timeout_s = 300
 
-# Reads a question before retrieval: language, translation, corpora, filters.
-# Same Groq model as the generator, its own keys (quota per key):
-# CHAT_QUERY_BASE_URL, CHAT_QUERY_API_KEY.
+# Reads a question before retrieval (language, translation, companies,
+# filters). Same Cerebras model, own key (quota per key).
 [chat.query]
 provider = "openai_compat"
 model = "openai/gpt-oss-120b"
+served_model = "gpt-oss-120b"
 max_tokens = 4096
 temperature = 0.0
 effort = "low"
 timeout_s = 60
 
-# Grades questions and answers; keep it a different model family from the
-# generator (models favour their own text). NVIDIA API catalog free tier
-# (40 req/min): CHAT_JUDGE_BASE_URL, CHAT_JUDGE_API_KEY.
+# Grades answers. Must be another model family than the generator.
+# NVIDIA API catalog free tier (40 req/min).
 [chat.judge]
 provider = "openai_compat"
 model = "mistralai/mistral-large-4-1t-a52b"
@@ -63,20 +48,23 @@ max_tokens = 8192
 temperature = 0.0
 timeout_s = 300
 
-# Same model family the chunks were token-capped with (Qwen3-Embedding-0.6B):
-# EMBEDDING_DEFAULT_BASE_URL, EMBEDDING_DEFAULT_API_KEY.
+
+# ----------------------------------------------------------- embedding ----
+
+# vLLM on Kaggle (2x T4). Same model the chunks were token-capped with.
 [embedding.default]
 provider = "openai_compat"
 model = "Qwen/Qwen3-Embedding-0.6B"
-# vLLM on Kaggle (2x T4 behind a load balancer). For Cloudflare Workers AI add
-# served_model = "@cf/qwen/qwen3-embedding-0.6b" (vectors stay under `model`).
 batch_size = 64
 query_instruction = "Given a question about SEC filings, retrieve passages that answer it"
 
-# vLLM /rerank: RERANK_DEFAULT_BASE_URL, RERANK_DEFAULT_API_KEY.
+
+# -------------------------------------------------------------- rerank ----
+
+# vLLM /rerank. prompt_format "qwen3": without its chat template
+# Qwen3-Reranker scores almost at random.
 [rerank.default]
 provider = "http_rerank"
 model = "Qwen/Qwen3-Reranker-0.6B"
-# Qwen3-Reranker scores well only inside its chat template.
 prompt_format = "qwen3"
 instruction = "Given a question about SEC filings, judge whether the passage helps answer it"

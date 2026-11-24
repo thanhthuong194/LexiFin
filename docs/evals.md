@@ -1,7 +1,6 @@
 # RAG evaluation
 
-Retrieval is scored against a frozen question set. Answer generation and its
-judging come later and reuse the same set.
+Retrieval and answers are scored against the same frozen question set.
 
 ## Layout
 
@@ -10,8 +9,8 @@ judging come later and reuse the same set.
   `drafts/` (writers' `DraftQuestion`s), `questions.jsonl` (checked
   `EvalQuestion`s), `check_report.md`, `coverage.json`.
 - `evals/runs/`, `evals/cache/` (gitignored): eval runs, query-model replies.
-- Code: `src/evals/` (`testset` schema, `sampling`, `checks`,
-  `retrieval_eval`), scripts in `scripts/evals/`.
+- Code: `src/evals/` (`testset` schema, `sampling`, `checks`, `numbers`,
+  `retrieval_eval`, `answer_eval`, `answer_judge`), scripts in `scripts/evals/`.
 
 ## Flow
 
@@ -22,9 +21,15 @@ judging come later and reuse the same set.
 2. Writers (Claude agents, one batch each) answer every task of their batch
    following the brief below, into `drafts/<batch>.jsonl`; a second agent
    reviews the drafts.
-3. `uv run python scripts/evals/check_testset.py --set-dir evals/sets/v1.1 --data-dir data`:
+3. `uv run python scripts/evals/check_testset.py --set-dir evals/sets/v1.2 --data-dir data`:
    maps quotes to Silver blocks, checks evidence against Silver and Gold,
    flags wording problems; writes `questions.jsonl` only without errors.
+   Every evidence group quoting a table row is widened to the same row of
+   the group's company elsewhere (same label without note references, same
+   answer value: 10-Q/10-K twin of a release table, later comparatives); a
+   value with under 4 significant digits (EPS, ratios) also needs another
+   number of the row. Widened evidence (`widened`) counts for retrieval, not
+   for filter admission.
    A person (or a non-Claude LLM) reviews a sample, shown the full passages,
    not only the quotes; then the set is frozen (never edited; a change is a
    new version).
@@ -36,10 +41,33 @@ judging come later and reuse the same set.
 Evidence is a Silver `block_id` plus a verbatim quote, so a set outlives chunk
 rule changes. A retrieved chunk is relevant when it holds the block and shows
 the quote. Query understanding is scored by whether the filters the retriever
-used admit the evidence chunks, which covers fiscal vs calendar years.
+used admit the evidence chunks, which covers fiscal vs calendar years, and by
+`query.search_text`: every corpus searched in its own language (a Vietnamese
+question with no English text searches English chunks in Vietnamese; v1.1
+baseline: 77/81 such rows, silent before this metric).
+
+v1.2, reranker on (2026-11-24): hit@8 en 0.964 -> 0.976, vi 0.880 -> 0.976
+after per-language search texts (baseline v1.1 rescored on v1.2); 13 -> 4
+failures (t0042 en reads Sept 30 as a 10-K; t0042 vi, t0060 vi ranking;
+t0077 split table loses its title).
+
+## Answers
+
+5. `uv run python scripts/evals/eval_answers.py [--judge] [--limit N]`:
+   retrieves each question in English and Vietnamese, answers with
+   `chat.generator` and scores `answers.jsonl` (metrics in the
+   `src/evals/answer_eval.py` docstring): the expected value stated (XBRL
+   fact exactly, else the reference's first amount at its precision, any
+   sign), refusals of unanswerable questions, false refusals, citations, a
+   cited passage holding evidence, answer language; split by whether
+   retrieval found every evidence group. `--judge` adds `chat.judge`:
+   correctness against the English reference (correct/partial/incorrect,
+   across languages and rounding) and faithfulness against every passage
+   shown (hallucination; citation precision is the deterministic metric).
+   `--rejudge RUN` judges stored answers again.
 
 Model roles stay in different families: Claude writes questions; the answer
-model (later) and the judge (later) must not be Claude.
+model (gpt-oss) and the judge (Mistral) must not be Claude.
 
 ## Writer brief
 
