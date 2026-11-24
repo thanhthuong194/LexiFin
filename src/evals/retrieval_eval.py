@@ -10,6 +10,9 @@ an answer model reads. ranx scores groups, not chunks: each candidate counts
 for the first group it newly covers, so recall@k is group recall and a
 question needing two passages has an ideal DCG the ranking can reach.
 Rows are scored from `results.jsonl` alone, so a run rescores or resumes.
+`post.hard_negative@8` (v2 sets): share of answerable rows whose question
+lists hard negatives where one ranks above the first evidence chunk in the
+delivered top 8 (a chunk matching evidence never counts as a negative).
 """
 
 from __future__ import annotations
@@ -65,10 +68,20 @@ METRIC_KEYS = (
     "query.search_text",
     "unanswerable.rejected",
 )
+HARD_NEGATIVE_K = 8
+HARD_NEGATIVE = f"post.hard_negative@{HARD_NEGATIVE_K}"
+# Shown in the report only when a row has them (v1.x reports unchanged).
+OPTIONAL_KEYS = (HARD_NEGATIVE,)
 HEADLINE = ("post.hit_rate@8", "post.mrr@10", "post.recall@8", "context.recall")
 BREAKDOWNS = ("question_type", "data_kind", *CELL_KEYS)
+# v2 breakdowns (name -> EvalQuestion field), shown only when a question
+# has a value.
+OPTIONAL_BREAKDOWNS = {"tag": "tags", "split": "split"}
 # Columns of a breakdown table, when not HEADLINE.
-BREAKDOWN_COLUMNS = {"reason": ("unanswerable.rejected", "query.unknown_flagged")}
+BREAKDOWN_COLUMNS = {
+    "reason": ("unanswerable.rejected", "query.unknown_flagged"),
+    "tag": (*HEADLINE, HARD_NEGATIVE),
+}
 COMPARE_METRICS = ("hit_rate@8", "mrr@10", "ndcg@10")
 FAILURE_K = 8
 # Only this reason can be seen at retrieval; the others at generation.
@@ -329,6 +342,15 @@ def resume_rows(path: Path) -> list[Row]:
     return kept
 
 
+def select(
+    questions: Sequence[EvalQuestion], split: str | None, limit: int | None
+) -> list[EvalQuestion]:
+    """Questions of `split` (all when None), then the first `limit`."""
+
+    chosen = [q for q in questions if split is None or q.split == split]
+    return chosen[:limit] if limit else chosen
+
+
 def pending(
     questions: Sequence[EvalQuestion],
     languages: Sequence[Language],
@@ -399,6 +421,24 @@ def _group_docs(entries: Sequence[Sequence[str]], groups: Groups) -> dict[str, f
     return docs
 
 
+def hard_negative_hit(
+    entries: Sequence[Sequence[str]], groups: Groups, negatives: frozenset[str]
+) -> float | None:
+    """1 when a hard negative ranks above the first evidence chunk in the
+    top HARD_NEGATIVE_K entries (or shows there without evidence), else 0;
+    None without hard negatives."""
+
+    if not negatives:
+        return None
+    for entry in entries[:HARD_NEGATIVE_K]:
+        found = set(entry)
+        if any(g & found for g in groups):
+            return 0.0
+        if found & negatives:
+            return 1.0
+    return 0.0
+
+
 def _row_metrics(
     question: EvalQuestion, row: Row, groups: Groups
 ) -> dict[str, float | None]:
@@ -430,6 +470,9 @@ def _row_metrics(
             for c in (*p["chunk_ids"], *p["duplicate_chunk_ids"])
         }
         metrics["context.recall"] = sum(1 for g in groups if g & context) / len(groups)
+        negatives = frozenset(question.hard_negative_chunks)
+        if negatives:
+            metrics[HARD_NEGATIVE] = hard_negative_hit(row["post"], groups, negatives)
     return metrics
 
 
@@ -517,10 +560,14 @@ def failures(scoring: Scoring) -> list[Scored]:
 
 def dimension_values(item: Scored, name: str) -> list[str]:
     """Values of a breakdown; a paired value `a|b` counts for each, a CIK
-    shows as its company name."""
+    shows as its company name; a question counts for each of its tags."""
 
     if name in ("question_type", "data_kind"):
         return [str(getattr(item.question, name))]
+    if name == "tag":
+        return list(item.question.tags) or ["(none)"]
+    if name == "split":
+        return [item.question.split or "-"]
     values = item.question.cell.get(name, "-").split("|")
     if name != "cik":
         return values
@@ -551,16 +598,20 @@ def _per_language(
     }
 
 
-def _breakdown(
+def breakdown(
     scored: Sequence[Scored],
     name: str,
     languages: Sequence[str],
+    keys: Sequence[str] | None = None,
 ) -> list[str]:
+    """A `### name` table: per value, questions and per-language means of
+    `keys` (default: BREAKDOWN_COLUMNS of `name`, else HEADLINE)."""
+
     groups: dict[str, list[Scored]] = defaultdict(list)
     for item in scored:
         for value in dimension_values(item, name):
             groups[value].append(item)
-    keys = BREAKDOWN_COLUMNS.get(name, HEADLINE)
+    keys = keys or BREAKDOWN_COLUMNS.get(name, HEADLINE)
     lines = []
     for value, items in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         per = _per_language(items, languages)
@@ -625,11 +676,18 @@ def render_report(config: Mapping[str, Any], scoring: Scoring) -> str:
         if (reason := s.question.cell.get("reason")) and reason != REJECTABLE:
             later[reason].add(s.question.id)
     columns = {**_per_language(scored, languages), "all": means(scored)}
+    shown = [*METRIC_KEYS, *(k for k in OPTIONAL_KEYS if k in columns["all"])]
+    optional = [
+        name
+        for name, field in OPTIONAL_BREAKDOWNS.items()
+        if any(getattr(s.question, field) for s in scored)
+    ]
+    split = f"; split {config['split']}" if config.get("split") else ""
     q = config["questions"]
     lines = [
         f"# Retrieval eval: {config['label']}",
         "",
-        f"- questions: {q['path']} (sha256 {q['sha256'][:12]}, {q['count']}); today {config['today']}",
+        f"- questions: {q['path']} (sha256 {q['sha256'][:12]}, {q['count']}){split}; today {config['today']}",
         f"- Gold chunks rules version {config['chunks_rules_version']}; collections {config.get('collections')}",
         f"- models: {config.get('models')}",
         f"- rows scored {len(scored)}, errors {len(scoring.errors)}, degraded {len(degraded)}",
@@ -646,13 +704,13 @@ def render_report(config: Mapping[str, Any], scoring: Scoring) -> str:
         "",
         *_table(
             ["metric", *columns],
-            ([k, *(_cell(c.get(k)) for c in columns.values())] for k in METRIC_KEYS),
+            ([k, *(_cell(c.get(k)) for c in columns.values())] for k in shown),
         ),
         "## Breakdowns",
         "",
     ]
-    for name in BREAKDOWNS:
-        lines += _breakdown(scored, name, languages)
+    for name in (*BREAKDOWNS, *optional):
+        lines += breakdown(scored, name, languages)
     lines += ["## Timings", "", *_timings(scored, languages)]
     failed = failures(scoring)
     lines += [
@@ -710,18 +768,20 @@ def compare_runs(
     run_dirs: Sequence[Path], stat_test: str = "student", max_p: float = 0.05
 ) -> str:
     """Paired tests of the delivered rankings (`post`) per language. Runs must
-    share the question set, languages and limit, and have scored the same
+    share the question set, languages, split and limit, and have scored the same
     (question, language) pairs; otherwise ValueError."""
 
     configs = [
         json.loads((d / "config.json").read_text(encoding="utf-8")) for d in run_dirs
     ]
     shared = {
-        json.dumps([c["questions"]["sha256"], c["languages"], c.get("limit")])
+        json.dumps(
+            [c["questions"]["sha256"], c["languages"], c.get("split"), c.get("limit")]
+        )
         for c in configs
     }
     if len(shared) > 1:
-        raise ValueError("runs differ in question set, languages or limit")
+        raise ValueError("runs differ in question set, languages, split or limit")
     scored = [
         {
             (r["question_id"], r["language"])

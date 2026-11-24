@@ -10,12 +10,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from src.evals.sampling import (
+    PLANS,
     SampleSettings,
     coverage_summary,
     sample_tasks,
     split_batches,
+    write_tasks,
 )
-from src.evals.testset import SetManifest, dump_json, write_jsonl
+from src.evals.testset import SetManifest, dump_json
 from src.utils.logger import configure_logging
 
 
@@ -30,6 +32,19 @@ def parse_args() -> argparse.Namespace:
         help="Silver root: _catalog/silver.db, silver/ (default: <repo>/data)",
     )
     parser.add_argument("--gold-dir", type=Path, help="Gold root (default: --data-dir)")
+    parser.add_argument(
+        "--bronze-dir",
+        type=Path,
+        help="SEC Bronze (universe snapshots, filings) read by --plan v2 "
+        "(default: <data-dir>/bronze/sec_filings)",
+    )
+    parser.add_argument(
+        "--plan",
+        choices=sorted(PLANS),
+        default="v1",
+        help="v1: 9 types, 100 tasks; v2: 16 types with minimums, sector and "
+        "size strata, tags and hard negatives (use --total 150)",
+    )
     parser.add_argument("--set-id", default="v1")
     parser.add_argument(
         "--out-dir", type=Path, help="Default: <repo>/evals/sets/<set-id>"
@@ -63,11 +78,15 @@ def main() -> int:
         print("--total and --batches must be positive", file=sys.stderr)
         return 2
     configure_logging()
+    as_of: date = args.as_of or datetime.now(UTC).date()
     settings = SampleSettings(
         total=args.total,
         seed=args.seed,
         max_candidates=args.max_candidates,
         max_fact_instances=args.max_fact_instances,
+        plan_id=args.plan,
+        bronze_dir=args.bronze_dir,
+        as_of=as_of,
     )
     tasks, rules_version = sample_tasks(
         args.data_dir, args.gold_dir or args.data_dir, settings
@@ -75,15 +94,15 @@ def main() -> int:
     out: Path = args.out_dir or REPOSITORY_ROOT / "evals" / "sets" / args.set_id
     manifest = SetManifest(
         set_id=args.set_id,
-        as_of=args.as_of or datetime.now(UTC).date(),
+        as_of=as_of,
         seed=args.seed,
         total=len(tasks),
         chunks_rules_version=rules_version,
     )
     dump_json(out / "set.json", manifest.model_dump(mode="json"))
-    write_jsonl(out / "tasks.jsonl", tasks)
+    write_tasks(out / "tasks.jsonl", tasks)
     for number, batch in enumerate(split_batches(tasks, args.batches), start=1):
-        write_jsonl(out / "batches" / f"batch_{number}.jsonl", batch)
+        write_tasks(out / "batches" / f"batch_{number}.jsonl", batch)
     summary = {"tasks": len(tasks), "seed": args.seed, **coverage_summary(tasks)}
     dump_json(out / "coverage.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

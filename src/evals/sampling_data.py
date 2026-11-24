@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 import pyarrow as pa
@@ -16,6 +17,7 @@ import pyarrow.compute as pc
 from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 
+from src.data_pipeline.storage.bronze import SecBronze
 from src.data_pipeline.storage.iceberg import (
     filing_dates_filter,
     iter_rows,
@@ -23,6 +25,9 @@ from src.data_pipeline.storage.iceberg import (
     scan_batches,
     snapshot_total,
     values_filter,
+)
+from src.data_pipeline.storage.sec_filings.filing_entities import (
+    FILING_ENTITIES_TABLE,
 )
 from src.data_pipeline.storage.sec_filings.xbrl_core import (
     XBRL_CONTEXTS_TABLE,
@@ -35,6 +40,10 @@ from src.data_pipeline.storage.sec_filings.xbrl_facts import (
 )
 from src.evals.testset import CompanyRef, XbrlFact
 from src.rag_engine.retrieval.companies import ALIASES, normalize_name
+
+
+def _any(*patterns: str) -> re.Pattern[str]:
+    return re.compile("|".join(patterns), re.IGNORECASE)
 
 
 def _words(text: str) -> frozenset[str]:
@@ -115,6 +124,88 @@ TOPIC_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("nuclear plant decommissioning trusts", ("decommissioning trust", "nuclear")),
     ("timber harvest volumes from its timberlands", ("timberland", "timber harvest")),
 )
+# Generic themes `aggregation` tasks also ask about ("which of these companies
+# discuss tariffs"); with TOPIC_PROBES they form AGGREGATION_PROBES.
+THEME_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("tariffs on imported goods", ("tariff",)),
+    ("artificial intelligence", ("artificial intelligence",)),
+    ("climate change", ("climate change",)),
+    (
+        "labor unions and collective bargaining",
+        ("collective bargaining", "labor union"),
+    ),
+    ("operations or sales in China", ("china",)),
+    ("pandemics such as COVID-19", ("covid-19", "pandemic")),
+    ("foreign currency exchange rates", ("exchange rate",)),
+    ("share repurchase programs", ("repurchase program",)),
+)
+AGGREGATION_PROBES = TOPIC_PROBES + THEME_PROBES
+# 10-K sections `aggregation` and `temporal_change` tasks read.
+SECTION_TOPICS = frozenset({"risk_factors", "business", "mdna"})
+# A stated relationship and the cue that finds it; the cue must be followed
+# by a name within `_CUE_WINDOW` chars (`find_relation`).
+RELATION_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "supplier",
+        _any(
+            r"\b(?:sole|single|key|principal|primary|major) (?:source )?suppliers?\b",
+            r"\b(?:supplied|manufactured) (?:exclusively |primarily )?by\b",
+        ),
+    ),
+    (
+        "customer",
+        _any(
+            r"\b(?:largest|significant|major) customers?\b",
+            r"\baccounted for (?:approximately |about )?\d+(?:\.\d+)?% of\b",
+        ),
+    ),
+    (
+        "competitor",
+        _any(
+            r"\bcompetitors? (?:include|includes|such as)\b",
+            r"\bcompetes? (?:primarily |directly )?with\b",
+        ),
+    ),
+    ("subsidiary", _any(r"\b(?:a )?wholly[- ]owned subsidiar(?:y|ies)\b")),
+    (
+        "partner",
+        _any(
+            r"\b(?:partnership|collaboration|joint venture|strategic alliance) with\b"
+        ),
+    ),
+    (
+        "officer",
+        _any(
+            r"\b(?:appointed|named|elected|promoted) (?:as |to )?(?:the )?"
+            r"(?:company['’]s )?(?:chief|president|executive vice|senior vice"
+            r"|general counsel)",
+            r"\bwill (?:succeed|serve as (?:the |its )?(?:chief|president|executive"
+            r"|senior vice|general counsel))",
+        ),
+    ),
+)
+_CAPITALISED = re.compile(r"\b[A-Z][A-Za-z&'-]+")
+_PERSON = re.compile(r"\b([A-Z][a-z]+)(?: [A-Z]\.)? ([A-Z][a-z]+)\b")
+# Capitalised words that are not a party's name (titles, document words).
+_NOT_NAMES = _words(
+    "We Our Us The Company Company's Item Note In As For This These Such Any "
+    "Each Board Directors Director Program Agreement Agreements Officer Chief "
+    "Executive Vice President Senior General Counsel Financial Operating "
+    "Accounting Marketing Technology Chairman Chair Mr Ms Mrs Dr Inc Corporation "
+    "LLC Our On If Under Section Exhibit Form Annual Report Securities Exchange "
+    "Commission United States January February March April May June July "
+    "August September October November December"
+)
+_CUE_WINDOW = 120
+SNIPPET_REACH = 250
+_EVENT_DATE = re.compile(
+    r"\bOn (?:January|February|March|April|May|June|July|August|September|"
+    r"October|November|December) \d{1,2}, \d{4}\b"
+)
+_ITEM_CODE = re.compile(r"^\s*item\s+(\d\.\d{2})", re.IGNORECASE)
+_STATE_SUFFIX = re.compile(r"\s*/[A-Z]{2,3}/?\s*$")
+_FORMER_NAME = re.compile(r"^\s*FORMER CONFORMED NAME:\s*(.+?)\s*$")
+_NAME_CHANGE = re.compile(r"^\s*DATE OF NAME CHANGE:\s*(\d{8})\s*$")
 # Coverage dimensions, in `ChunkMeta.dims` / `FactCandidate.dims` order.
 CHUNK_DIMS = (
     "cik",
@@ -260,9 +351,16 @@ class ChunkMeta:
     chars: int
     list_lines: int = 0
     text_hash: int = 0  # of its first and last 300 chars: near-duplicates match
+    head_hash: int = 0  # of its first 200 chars: one passage reworded matches
     note: str | None = None  # number of the financial statement note it is in
     note_refs: tuple[str, ...] = ()  # notes its text cites ("see Note 12")
     exhibit_refs: tuple[str, ...] = ()  # exhibits its text cites ("99.1")
+    relation: str | None = None  # RELATION_CUES kind its text states
+    relation_snippet: str | None = None  # the sentence stating it
+    # (index of AGGREGATION_PROBES, its key found) per probe it matches.
+    probes: tuple[tuple[int, str], ...] = ()
+    chunk_ordinal: int = 0
+    dated_event: bool = False  # text has "On <Month> <d>, <yyyy>"
     title: str = field(init=False)  # `_title_key` of its table title / subheading
 
     def __post_init__(self) -> None:
@@ -274,6 +372,22 @@ class ChunkMeta:
     @property
     def doc_class(self) -> str:
         return "EX-99" if self.document_type.startswith("EX-99") else self.form
+
+    @property
+    def item_code(self) -> str | None:
+        """8-K item code of its section (`5.02`), else None."""
+
+        if self.section_topic != "8k_event":
+            return None
+        found = _ITEM_CODE.match(self.section_title)
+        return found.group(1) if found else None
+
+    @property
+    def heading(self) -> str:
+        """`title`, else `item <code>` for 8-K items (hard-negative key)."""
+
+        code = self.item_code
+        return self.title or (f"item {code}" if code else "")
 
     @property
     def year(self) -> int:
@@ -365,6 +479,10 @@ class FactCandidate:
         )
 
 
+# (name, tickers, keys) of a company outside the corpus; see OUTSIDE_COMPANIES.
+OutsideName = tuple[str, tuple[str, ...], tuple[str, ...]]
+
+
 @dataclass
 class CorpusStats:
     """Facts about the whole Gold table, gathered in the first chunk pass."""
@@ -375,9 +493,15 @@ class CorpusStats:
     # Per company: years its chunks mention, indexes of TOPIC_PROBES they match.
     years: dict[str, set[int]] = field(default_factory=lambda: defaultdict(set))
     probe_hits: dict[str, set[int]] = field(default_factory=lambda: defaultdict(set))
-    # Indexes of OUTSIDE_COMPANIES some chunk mentions.
+    # Indexes of `outside` some chunk mentions.
     mentioned: set[int] = field(default_factory=set)
     rows: int = 0
+    outside: Sequence[OutsideName] = OUTSIDE_COMPANIES
+    # (cik, section topic, fiscal year) of 10-K SECTION_TOPICS chunks ->
+    # indexes of AGGREGATION_PROBES they match (a key: the section exists).
+    section_probes: dict[tuple[str, str, int], set[int]] = field(
+        default_factory=lambda: defaultdict(set)
+    )
 
 
 # --- Gold reads ------------------------------------------------------------------
@@ -386,13 +510,13 @@ class CorpusStats:
 _META_FIELDS = _names(
     "chunk_id filing_id document_id cik company_name form document_type "
     "section_topic section_title subheading table_title chunk_kind fiscal_year "
-    "fiscal_period period_end_date filing_date part part_count"
+    "fiscal_period period_end_date filing_date part part_count chunk_ordinal"
 )
 _META_COLUMNS = (*_META_FIELDS, "block_ids", "tickers", "context", "text")
 # Columns `record` reads from every row.
 _STATS_COLUMNS = _names(
     "cik company_name tickers fiscal_year filing_id form fiscal_period "
-    "period_end_date filing_date chunk_kind text"
+    "period_end_date filing_date chunk_kind section_topic text"
 )
 
 
@@ -418,21 +542,80 @@ def keep_text(chunk_kind: str, topic: str, heading: str, text: str) -> bool:
     return not (short and (topic == "controls" or _BOILERPLATE.search(text)))
 
 
+def _snippet(text: str, start: int, end: int) -> str:
+    """The sentence holding `text[start:end]`, cut to whole words at most
+    SNIPPET_REACH chars before and after."""
+
+    left = max(text.rfind(". ", 0, start) + 1, start - SNIPPET_REACH)
+    if left > 0 and text[left - 1] not in ". ":
+        left = text.find(" ", left) + 1  # mid-word cut
+    stops = [i for i in (text.find(". ", end), end + SNIPPET_REACH) if i >= 0]
+    return " ".join(text[left : min(stops) + 1].split())
+
+
+def _named(words: Sequence[str]) -> bool:
+    return any(word not in _NOT_NAMES for word in words)
+
+
+def find_relation(text: str) -> tuple[str, str] | None:
+    """The first RELATION_CUES kind whose cue names a party (a person's two
+    names just before an officer cue, a capitalised name just after the
+    others, never a title or document word), with the sentence stating it."""
+
+    for kind, cue in RELATION_CUES:
+        for match in cue.finditer(text):
+            if kind == "officer":
+                before = text[max(0, match.start() - _CUE_WINDOW) : match.start()]
+                people = _PERSON.finditer(before)
+                if any(_NOT_NAMES.isdisjoint(m.groups()) for m in people):
+                    return kind, _snippet(text, match.start(), match.end())
+                continue
+            after = re.split(r"[.;]", text[match.end() : match.end() + _CUE_WINDOW])[0]
+            if _named(_CAPITALISED.findall(after)):
+                return kind, _snippet(text, match.start(), match.end())
+    return None
+
+
+def matched_probes(
+    text: str, probes: Sequence[tuple[str, tuple[str, ...]]]
+) -> dict[int, str]:
+    """Index of each of `probes` with a key in `text` -> the first key found
+    (lowercase keys)."""
+
+    lower = text.lower()
+    found: dict[int, str] = {}
+    for index, (_, keys) in enumerate(probes):
+        key = next((k for k in keys if k in lower), None)
+        if key is not None:
+            found[index] = key
+    return found
+
+
 def _chunk_meta(row: Mapping[str, Any]) -> ChunkMeta:
     text: str = row["text"]
     note = _NOTE_HEADING.search(row["context"])
+    prose = row["chunk_kind"] == "text"
+    relation = find_relation(text) if prose else None
     return ChunkMeta(
         **{name: row[name] for name in _META_FIELDS},
         block_ids=tuple(row["block_ids"]),
         tickers=tuple(row["tickers"]),
         chars=len(text),
-        list_lines=len(_LIST_LINE.findall(text)) if row["chunk_kind"] == "text" else 0,
+        list_lines=len(_LIST_LINE.findall(text)) if prose else 0,
         text_hash=rank(0, text[:300] + text[-300:]),
+        head_hash=rank(0, text[:200]),
         note=note.group(1) if note else None,
         note_refs=tuple(dict.fromkeys(_NOTE_REF.findall(text))),
         exhibit_refs=tuple(
             dict.fromkeys(exhibit_number(n) for n in _EXHIBIT_REF.findall(text))
         ),
+        relation=relation[0] if relation else None,
+        relation_snippet=relation[1] if relation else None,
+        probes=tuple(sorted(matched_probes(text, AGGREGATION_PROBES).items()))
+        if prose
+        else (),
+        dated_event=row["section_topic"] == "8k_event"
+        and _EVENT_DATE.search(text) is not None,
     )
 
 
@@ -474,22 +657,29 @@ def record(stats: CorpusStats, row: Mapping[str, Any]) -> None:
         for index, (_, keys) in enumerate(TOPIC_PROBES):
             if index not in hits and any(key in lower for key in keys):
                 hits.add(index)
-    for index, (name, _, keys) in enumerate(OUTSIDE_COMPANIES):
+    for index, (name, _, keys) in enumerate(stats.outside):
         if index not in stats.mentioned and any(
             _mentions(text, key) for key in keys or (name,)
         ):
             stats.mentioned.add(index)
+    topic = row.get("section_topic")
+    if row["form"] == "10-K" and topic in SECTION_TOPICS and row["fiscal_year"]:
+        key = (cik, topic, row["fiscal_year"])
+        stats.section_probes[key] |= matched_probes(text, AGGREGATION_PROBES).keys()
 
 
 def read_candidates(
-    chunks: Table, seed: int, max_candidates: int
+    chunks: Table,
+    seed: int,
+    max_candidates: int,
+    outside: Sequence[OutsideName] = OUTSIDE_COMPANIES,
 ) -> tuple[list[ChunkMeta], CorpusStats]:
     """First pass: metadata of a hash sample of chunks, plus corpus stats from
-    every row."""
+    every row (`outside`: companies whose mentions are recorded)."""
 
     total = snapshot_total(chunks, "total-records")
     threshold = (1 << 64) * min(1.0, max_candidates / max(total, 1))
-    stats = CorpusStats(rows=total)
+    stats = CorpusStats(rows=total, outside=outside)
     candidates: list[ChunkMeta] = []
     for batch in scan_batches(chunks, _META_COLUMNS):
         for row in batch.select(_STATS_COLUMNS).to_pylist():
@@ -721,3 +911,116 @@ def read_fact_candidates(
         for key, row in sorted(first.items())
         if key[2] in contexts
     ]
+
+
+# --- company headers (former names, SIC) -------------------------------------------
+
+# (first SIC code, last SIC code, sector named as IVV holdings name it); the
+# first matching range wins, so narrow ranges come before their division.
+_SIC_SECTORS: tuple[tuple[int, int, str], ...] = (
+    (1300, 1399, "Energy"),
+    (1000, 1499, "Materials"),
+    (2830, 2836, "Health Care"),
+    (2900, 2999, "Energy"),
+    (3570, 3579, "Information Technology"),
+    (3600, 3699, "Information Technology"),
+    (3710, 3716, "Consumer Discretionary"),
+    (3840, 3851, "Health Care"),
+    (3800, 3899, "Information Technology"),
+    (2000, 2199, "Consumer Staples"),
+    (2200, 2399, "Consumer Discretionary"),
+    (2700, 2799, "Communication"),
+    (2400, 3499, "Materials"),
+    (3500, 3799, "Industrials"),
+    (3900, 3999, "Consumer Discretionary"),
+    (100, 999, "Consumer Staples"),
+    (1500, 1799, "Industrials"),
+    (4800, 4899, "Communication"),
+    (4900, 4999, "Utilities"),
+    (4000, 5199, "Industrials"),
+    (5400, 5499, "Consumer Staples"),
+    (5200, 5999, "Consumer Discretionary"),
+    (6500, 6553, "Real Estate"),
+    (6798, 6798, "Real Estate"),
+    (6000, 6799, "Financials"),
+    (7370, 7379, "Information Technology"),
+    (7800, 7899, "Communication"),
+    (8000, 8099, "Health Care"),
+    (7000, 7999, "Consumer Discretionary"),
+    (8100, 8999, "Industrials"),
+)
+
+
+def sic_sector(sic: str | None) -> str | None:
+    """A GICS-like sector for an SIC code (fallback when IVV has none)."""
+
+    if not sic or not sic.isdigit():
+        return None
+    code = int(sic)
+    return next((name for low, high, name in _SIC_SECTORS if low <= code <= high), None)
+
+
+@dataclass(frozen=True, slots=True)
+class CompanyHeader:
+    """What a company's latest SEC header says beyond Gold."""
+
+    former_names: tuple[str, ...] = ()  # newest first, current name excluded
+    sic: str | None = None
+    fiscal_year_end: str | None = None  # `MMDD`
+
+
+def former_names(block: str, current: str) -> tuple[str, ...]:
+    """`FORMER CONFORMED NAME`s of an entity block, newest change first;
+    names equal to `current` once a state suffix (`/DE`) is dropped are not
+    former names."""
+
+    found: list[tuple[str, str]] = []
+    name: str | None = None
+    for line in block.splitlines():
+        if matched := _FORMER_NAME.match(line):
+            name = matched.group(1)
+        elif (changed := _NAME_CHANGE.match(line)) and name:
+            found.append((changed.group(1), name))
+            name = None
+    own = normalize_name(_STATE_SUFFIX.sub("", current))
+    names: dict[str, str] = {}
+    for _, raw in sorted(found, reverse=True):
+        key = normalize_name(_STATE_SUFFIX.sub("", raw))
+        if key and key != own and key not in names:
+            names[key] = _STATE_SUFFIX.sub("", raw)
+    return tuple(names.values())
+
+
+_ENTITY_COLUMNS = _names(
+    "filing_id cik entity_role company_name sic fiscal_year_end source_path "
+    "entity_start_byte entity_end_byte"
+)
+
+
+def read_company_headers(
+    silver: Catalog, bronze_root: Path, latest: Mapping[str, str]
+) -> dict[str, CompanyHeader]:
+    """Former names, SIC and fiscal year end of each company (`latest`: cik ->
+    its latest `filing_id`), from the filer block of that filing's SEC header
+    (Silver `filing_entities` offsets into Bronze); one header per company."""
+
+    bronze = SecBronze(bronze_root)
+    table = silver.load_table(FILING_ENTITIES_TABLE)
+    rows = read_rows_in(
+        table, "filing_id", set(latest.values()), columns=_ENTITY_COLUMNS
+    )
+    headers: dict[str, CompanyHeader] = {}
+    for row in sorted(rows, key=lambda r: r["entity_start_byte"]):
+        cik = row["cik"]
+        if row["entity_role"] != "filer" or latest.get(cik) != row["filing_id"]:
+            continue
+        if cik in headers:
+            continue
+        start, end = row["entity_start_byte"], row["entity_end_byte"]
+        with bronze.path(row["source_path"]).open("rb") as handle:
+            handle.seek(start)
+            block = handle.read(end - start).decode("utf-8", errors="replace")
+        headers[cik] = CompanyHeader(
+            former_names(block, row["company_name"]), row["sic"], row["fiscal_year_end"]
+        )
+    return headers

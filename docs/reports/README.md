@@ -6,6 +6,7 @@ Trả lời 6 câu hỏi: dữ liệu được chuẩn hoá từ raw ra sao, l�
 - `silver_scale_slides.html`: 14 slide kèm ghi chú thuyết trình (font tải từ Google Fonts, offline thì dùng font hệ thống).
 - `silver_improvements_report.html` (07/11/2026): A. cải thiện sau báo cáo scale trên Silver 500 công ty (audit 18,4 → 4,8 h, sửa OOM, EX-99, section); B. kế hoạch RAG: thông số kỹ thuật và kết quả dự kiến (ước tính, chưa đo). B4 (13/11/2026): cải tiến chunking sau khảo sát dữ liệu, bộ thí nghiệm A–E, chỉ số dự kiến. C (13/11/2026): kế hoạch GraphRAG (3 lớp, Neo4j, đánh giá, lộ trình, kết quả dự kiến).
 - `graphrag.md` (13/11/2026): GraphRAG là gì, quy mô data, thiết kế 3 lớp (tất định từ Silver, LLM trích có kiểm chứng, tóm tắt nhóm), Neo4j hay NebulaGraph, đánh giá, lộ trình. Bản thảo luận, chưa có code.
+- `native_rag_results.md` (24/11/2026): kết quả native RAG: pipeline và cấu hình, chi phí build 5/500 công ty, lịch sử eval retrieval (v1 → v1.2, hit@8 en/vi 0,976), thử sinh câu trả lời, lỗi và cách sửa, so với dự đoán ở mục B.
 
 Số liệu lấy từ `scripts/sec_filings/benchmark_silver.py` (code `ef316fa`):
 

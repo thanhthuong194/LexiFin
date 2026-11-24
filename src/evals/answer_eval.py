@@ -7,9 +7,18 @@ relevant chunks as the retrieval eval), and an optional judgment. Rows are
 scored from `answers.jsonl` alone. Deterministic metrics (None when not
 applicable):
 
-- `answer.value`: numeric/table_lookup non-refusals state the expected value
-  in any sign (the XBRL fact, else the first amount of the reference answer,
-  at least as precisely as it shows it; `numbers`).
+- `answer.value`: numeric/table_lookup/calc/false_premise non-refusals
+  state the expected value: the XBRL fact (any sign), a computed value
+  (`Computed`: a percent within half its first decimal; a growth, CAGR or
+  difference with its direction, `checks.states_computed_answer`), else
+  the first amount of the reference answer, at least as precisely as it
+  shows it (`numbers`); a false_premise answer without a computed value
+  must also deny the premise (`checks.denies_premise`), and with no amount
+  only that is checked.
+- `answer.order`: ranking non-refusals name the companies of
+  `Computed.order` in order, each placed by its mention nearest its value;
+  reversed only when the question or answer asks for the lowest
+  (`checks.ranking_holds`).
 - `answer.refusal`: unanswerable questions answered with a refusal.
 - `answer.false_refusal`: answerable questions refused (lower is better).
 - `answer.cited`: non-refusals citing a passage.
@@ -31,8 +40,17 @@ from pathlib import Path
 from typing import Any
 
 from src.evals.answer_judge import Judgment
+from src.evals.checks import denies_premise, ranking_holds, states_computed_answer
 from src.evals.numbers import expected_amount, states_expected, text_states
-from src.evals.retrieval_eval import Groups, Row, Scored, load_rows, means, retried
+from src.evals.retrieval_eval import (
+    Groups,
+    Row,
+    Scored,
+    breakdown,
+    load_rows,
+    means,
+    retried,
+)
 from src.evals.testset import EvalQuestion, Language
 from src.llm import LLMError
 from src.rag_engine.generation.answer import Answer
@@ -42,6 +60,7 @@ from src.rag_engine.retrieval.retriever import RetrievalResult
 
 ANSWER_METRICS = (
     "answer.value",
+    "answer.order",
     "answer.refusal",
     "answer.false_refusal",
     "answer.cited",
@@ -50,10 +69,20 @@ ANSWER_METRICS = (
 )
 JUDGE_METRICS = ("judge.correct", "judge.partial", "judge.incorrect", "judge.faithful")
 METRIC_KEYS = (*ANSWER_METRICS, *JUDGE_METRICS)
+# Shown in the report only when a row has them (ranking questions).
+OPTIONAL_KEYS = frozenset({"answer.order"})
+# Columns of the per-type and per-tag tables.
+BREAKDOWN_KEYS = (
+    "answer.value",
+    "answer.refusal",
+    "answer.false_refusal",
+    "answer.citation_evidence",
+    "judge.correct",
+)
 # A row fails these at 1 (the others at 0); partial/incorrect show as judge.correct.
 FAIL_AT_ONE = frozenset({"answer.false_refusal"})
 NOT_FAILURES = frozenset({"judge.partial", "judge.incorrect"})
-VALUE_TYPES = frozenset({"numeric", "table_lookup"})
+VALUE_TYPES = frozenset({"numeric", "table_lookup", "calc", "false_premise"})
 RETRIEVAL_SPLITS = ("found", "missed")
 EXCERPT_CHARS = 160
 JUDGE_FAILED = "judge failed"
@@ -235,8 +264,33 @@ def states_value(question: EvalQuestion, text: str) -> bool | None:
     text = _CITATION.sub(" ", text)
     if question.fact is not None:
         return text_states(text, question.fact.value, question.fact.decimals)
+    computed = question.computed
+    if computed is not None and computed.value is not None:
+        return states_computed_answer(computed, text)
     expected = expected_amount(question.reference_answer)
     return None if expected is None else states_expected(text, expected)
+
+
+def answer_value(question: EvalQuestion, text: str) -> bool | None:
+    """`answer.value` of a non-refusal: `states_value` (a computed change
+    with its direction); a false premise without a computed value must
+    also be denied (only that when there is no value)."""
+
+    stated = states_value(question, text)
+    if question.question_type != "false_premise" or question.computed is not None:
+        return stated
+    return denies_premise(text) and stated is not False
+
+
+def answer_order(question: EvalQuestion, text: str, asked: str) -> bool | None:
+    """`answer.order`: a ranking names its companies in order, reversed
+    only when the question `asked` or the answer wants the lowest (None for
+    other questions)."""
+
+    computed = question.computed
+    if question.question_type != "ranking" or computed is None:
+        return None
+    return ranking_holds(computed, question.companies, text, asked)
 
 
 def _judge_metrics(judgment: Mapping[str, Any] | None) -> dict[str, float | None]:
@@ -262,13 +316,19 @@ def row_metrics(question: EvalQuestion, row: Row) -> dict[str, float | None]:
     passages = row["passages"]
     cited = [passages[n - 1] for n in answer.citations if 0 < n <= len(passages)]
     value = (
-        states_value(question, answer.text)
+        answer_value(question, answer.text)
         if answerable and not refused and question.question_type in VALUE_TYPES
         else None
+    )
+    order = (
+        None
+        if refused
+        else answer_order(question, answer.text, row.get("question", ""))
     )
     vietnamese = is_vietnamese(answer.text)
     return {
         "answer.value": None if value is None else float(value),
+        "answer.order": None if order is None else float(order),
         "answer.refusal": None if answerable else float(refused),
         "answer.false_refusal": float(refused) if answerable else None,
         "answer.cited": None if refused else float(bool(answer.citations)),
@@ -351,13 +411,18 @@ def _table(header: Sequence[str], lines: Iterable[Sequence[str]]) -> list[str]:
 
 def _metric_table(columns: Mapping[str, Sequence[Scored]]) -> list[str]:
     found = {name: means(items) for name, items in columns.items()}
+    keys = [
+        k
+        for k in METRIC_KEYS
+        if k not in OPTIONAL_KEYS or any(k in m for m in found.values())
+    ]
 
     def cell(value: tuple[float, int] | None) -> str:
         return "–" if value is None else f"{value[0]:.3f} ({value[1]})"
 
     return _table(
         ["metric", *columns],
-        ([k, *(cell(m.get(k)) for m in found.values())] for k in METRIC_KEYS),
+        ([k, *(cell(m.get(k)) for m in found.values())] for k in keys),
     )
 
 
@@ -404,10 +469,11 @@ def render_report(
     source = config.get("rejudged_from")
     retry = [r for r in rows if to_retry(r, rejudged=bool(source))]
     rejudged = f"; rejudged from {source}" if source else ""
+    split = f"; split {config['split']}" if config.get("split") else ""
     lines = [
         f"# Answer eval: {config['label']}",
         "",
-        f"- questions: {q['path']} (sha256 {q['sha256'][:12]}, {q['count']}); today {config['today']}",
+        f"- questions: {q['path']} (sha256 {q['sha256'][:12]}, {q['count']}){split}; today {config['today']}",
         f"- models: {config.get('models')}",
         f"- judge: {'yes' if config.get('judge') else 'no'}{rejudged}",
         f"- rows scored {len(scored)}, to retry {len(retry)}",
@@ -424,6 +490,14 @@ def render_report(
         "## By retrieval",
         "",
         *_metric_table(splits),
+        "## Breakdowns",
+        "",
+        *breakdown(scored, "question_type", languages, _breakdown_keys(scored)),
+        *(
+            breakdown(scored, "tag", languages, _breakdown_keys(scored))
+            if any(s.question.tags for s in scored)
+            else []
+        ),
         "## Failing rows",
         "",
         *(_failure_lines(scored) or ["None."]),
@@ -439,6 +513,11 @@ def render_report(
             for r in retry
         ]
     return "\n".join(lines) + "\n"
+
+
+def _breakdown_keys(scored: Sequence[Scored]) -> list[str]:
+    order = any(s.metrics.get("answer.order") is not None for s in scored)
+    return [BREAKDOWN_KEYS[0], *(["answer.order"] * order), *BREAKDOWN_KEYS[1:]]
 
 
 def write_outputs(

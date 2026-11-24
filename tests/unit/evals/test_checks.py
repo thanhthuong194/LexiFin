@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -13,15 +14,21 @@ from src.evals.checks import (
     _Found,
     _value_line,
     answer_facts,
+    assign_splits,
     check_testset,
     copy_scores,
     load_drafts,
     names_company,
+    prune_hard_negatives,
+    question_json,
     render_report,
+    uses_style,
     widen_evidence,
+    write_questions,
 )
 from src.evals.testset import (
     CompanyRef,
+    Computed,
     DraftQuestion,
     EvalQuestion,
     EvalTask,
@@ -559,3 +566,328 @@ def test_answer_facts_skip_unanswerable_and_skip_drafts() -> None:
     assert found.warnings == []
     skip = draft(reference_answer="SKIP: no figure of $9,999 million")
     assert "answer_fact_not_in_passage" not in checks(run([task()], [skip]).warnings)
+
+
+# v2 types
+
+AAPL = CompanyRef(cik="0000320193", name="Apple Inc.", tickers=("AAPL",))
+META = CompanyRef(
+    cik="0001326801",
+    name="Meta Platforms, Inc.",
+    tickers=("META",),
+    former_names=("Facebook Inc",),
+)
+OTHER = "Other passage text about capital expenditures."
+
+
+def operand(value: str, block_ids: tuple[str, ...] = ("b2", "b3")) -> XbrlFact:
+    return XbrlFact(
+        fact_id=f"f{value}",
+        concept="NetIncomeLoss",
+        value=value,
+        unit="iso4217:USD",
+        decimals="-6",
+        period_start=None,
+        period_end=None,
+        instant=None,
+        block_id=block_ids[0],
+        cell_id=None,
+        block_ids=block_ids,
+    )
+
+
+def calc_task() -> EvalTask:
+    computed = Computed(
+        operation="growth",
+        value="21.8006",
+        unit="percent",
+        operands=(operand("88136000000"), operand("72361000000", ("b2",))),
+    )
+    return task(question_type="calc", data_kind="xbrl", computed=computed)
+
+
+ROW = "Net income | 72,361 | 88,136"
+
+
+def test_calc_needs_value_and_every_operand_quoted() -> None:
+    answer = (
+        "Net income grew 21.8% in fiscal 2024, from $72,361 million to $88,136 million."
+    )
+    good = draft(reference_answer=answer, evidence_quotes=((ROW,),))
+    result = run([calc_task()], [good])
+    assert not result.errors
+    question = result.questions[0]
+    assert question.computed == calc_task().computed
+    # 88,136 also shows in b3: alternative evidence for that operand.
+    assert [e.block_id for e in question.evidence_groups[0]] == ["b2", "b3"]
+    rounded = draft(
+        reference_answer="Net income grew 22% in fiscal 2024.",
+        evidence_quotes=((ROW,),),
+    )
+    assert "answer_without_computed" in checks(run([calc_task()], [rounded]).errors)
+    unquoted = draft(reference_answer=answer)
+    assert "operand_not_quoted" in checks(run([calc_task()], [unquoted]).errors)
+    # A growth needs its direction: a word or a sign.
+    flat = draft(
+        reference_answer="Net income moved 21.8% in fiscal 2024.",
+        evidence_quotes=((ROW,),),
+    )
+    assert "answer_without_computed" in checks(run([calc_task()], [flat]).errors)
+    fell = draft(
+        reference_answer="Net income fell 21.8% in fiscal 2024.",
+        evidence_quotes=((ROW,),),
+    )
+    assert "answer_without_computed" in checks(run([calc_task()], [fell]).errors)
+
+
+def ranking_task() -> EvalTask:
+    rows = {"b2": ROW, "g4": "Net income | 100,118", "a4": "Net income | 93,736"}
+    passages = tuple(
+        passage((b,), text=text, cik=c.cik, company_name=c.name, chunk_id=f"k{b}")
+        for (b, text), c in zip(rows.items(), (MSFT, GOOG, AAPL), strict=True)
+    )
+    computed = Computed(
+        operation="ranking",
+        value=None,
+        unit="iso4217:USD",
+        operands=(
+            operand("88136000000", ("b2",)),
+            operand("100118000000", ("g4",)),
+            operand("93736000000", ("a4",)),
+        ),
+        order=(GOOG.cik, AAPL.cik, MSFT.cik),
+    )
+    return task(
+        question_type="ranking",
+        data_kind="xbrl",
+        companies=(MSFT, GOOG, AAPL),
+        passages=passages,
+        computed=computed,
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "error"),
+    [
+        ("Alphabet led with $100,118 million, then Apple ($93,736 million), then Microsoft ($88,136 million).", False),
+        # Reversed only when the lowest is asked for.
+        ("From the lowest: MSFT $88,136 million, AAPL $93,736 million, Google $100,118 million.", False),
+        ("MSFT $88,136 million, AAPL $93,736 million, Google $100,118 million.", True),
+        ("Apple ($93,736 million) led Alphabet ($100,118 million) and Microsoft ($88,136 million).", True),
+        ("Alphabet led with $100,118 million, then Apple with $93,736 million.", True),
+        # Each company placed by the mention nearest its value.
+        ("Unlike Microsoft, Alphabet led with $100,118 million; Apple had $93,736 million and Microsoft $88,136 million.", False),
+    ],
+)  # fmt: skip
+def test_ranking_order(answer: str, error: bool) -> None:
+    blocks = BLOCKS | {
+        "g4": Block.of("Net income\n100,118", "table"),
+        "a4": Block.of("Net income\n93,736", "table"),
+    }
+    chunks = CHUNKS | {"g4": ["Net income | 100,118"], "a4": ["Net income | 93,736"]}
+    quotes = ((ROW,), ("Net income | 100,118",), ("Net income | 93,736",))
+    result = run(
+        [ranking_task()],
+        [draft(reference_answer=answer, evidence_quotes=quotes)],
+        blocks=blocks,
+        chunks=chunks,
+    )
+    assert ("ranking_order" in checks(result.errors)) is error
+    assert checks(result.errors) <= {"ranking_order"}
+
+
+def test_false_premise_reference_denies_it() -> None:
+    premise = task(question_type="false_premise", hint="sales fell in FY2024")
+    denied = draft(reference_answer="Sales did not fall; cloud growth pushed them up.")
+    assert not run([premise], [denied]).warnings
+    affirmed = draft(reference_answer="Cloud growth pushed sales up.")
+    assert "premise_not_denied" in checks(run([premise], [affirmed]).warnings)
+    two = draft(evidence_quotes=((SENTENCE,), (SENTENCE,)))
+    assert "evidence_groups" in checks(run([premise], [two]).errors)
+
+
+def test_computed_false_premise_like_calc() -> None:
+    computed = calc_task().computed
+    premise = task(
+        question_type="false_premise", hint="net income fell", computed=computed
+    )
+    answer = "No, net income rose 21.8% in fiscal 2024, to $88,136 million from $72,361 million."
+    assert not run(
+        [premise], [draft(reference_answer=answer, evidence_quotes=((ROW,),))]
+    ).errors
+    wrong_way = "No, net income fell 21.8% in fiscal 2024."
+    result = run(
+        [premise], [draft(reference_answer=wrong_way, evidence_quotes=((ROW,),))]
+    )
+    assert "answer_without_computed" in checks(result.errors)
+    result = run([premise], [draft(reference_answer=answer)])
+    assert "operand_not_quoted" in checks(result.errors)
+
+
+@pytest.mark.parametrize(
+    ("years", "error"), [((2024, 2023), False), ((2024, 2024), True)]
+)
+def test_temporal_change_needs_two_years(years: tuple[int, int], error: bool) -> None:
+    passages = (
+        passage(fiscal_year=years[0]),
+        passage(("b9",), text=OTHER, fiscal_year=years[1]),
+    )
+    change = task(question_type="temporal_change", passages=passages)
+    quotes = ((SENTENCE,), ("capital expenditures",))
+    result = run([change], [draft(evidence_quotes=quotes)])
+    assert ("temporal_same_year" in checks(result.errors)) is error
+    assert "temporal_same_quote" not in checks(result.warnings)
+
+
+def test_temporal_change_same_quote_warns() -> None:
+    same = passage(("b1",), fiscal_year=2023, chunk_id="k-old")
+    change = task(question_type="temporal_change", passages=(passage(), same))
+    result = run([change], [draft(evidence_quotes=((SENTENCE,), (SENTENCE,)))])
+    assert "temporal_same_quote" in checks(result.warnings)
+
+
+def test_aggregation_one_group_per_company_that_says_it() -> None:
+    google = passage(("b9",), text=OTHER, cik=GOOG.cik, company_name=GOOG.name)
+
+    def aggregate(absent: str = "", *passages: TaskPassage) -> EvalTask:
+        return task(
+            question_type="aggregation",
+            companies=(MSFT, GOOG),
+            passages=passages or (passage(), google),
+            hint="cloud growth",
+            cell={"without_topic": absent},
+        )
+
+    both = ((SENTENCE,), ("capital expenditures",))
+    answer = "Microsoft says so, and Alphabet says so too."
+    assert not run(
+        [aggregate()], [draft(reference_answer=answer, evidence_quotes=both)]
+    ).errors
+    # Alphabet lacks the topic: one group, and the reference must deny it.
+    denied = "Microsoft says so; Alphabet does not."
+    result = run([aggregate(GOOG.cik)], [draft(reference_answer=denied)])
+    assert not result.errors
+    assert not checks(result.warnings) & {
+        "answer_company_missing",
+        "without_topic_affirmed",
+    }
+    affirmed = run([aggregate(GOOG.cik)], [draft(reference_answer=answer)])
+    assert "without_topic_affirmed" in checks(affirmed.warnings)
+    result = run(
+        [aggregate(GOOG.cik)], [draft(reference_answer=denied, evidence_quotes=both)]
+    )
+    assert "evidence_groups" in checks(result.errors)
+    absent_quoted = run([aggregate(MSFT.cik)], [draft(reference_answer=denied)])
+    assert "aggregation_without_topic_quoted" in checks(absent_quoted.errors)
+    missing = run([aggregate(GOOG.cik)], [draft(reference_answer="Microsoft says so.")])
+    assert "answer_company_missing" in checks(missing.warnings)
+    same = aggregate("", passage(), passage(("b9",), text=OTHER))
+    result = run([same], [draft(reference_answer=answer, evidence_quotes=both)])
+    assert "aggregation_company_repeated" in checks(result.errors)
+
+
+@pytest.mark.parametrize(
+    ("form", "topic", "error"),
+    [("8-K", "8k_event", False), ("10-K", "8k_event", True), ("8-K", "ex99", True)],
+)
+def test_event_8k_passage_is_an_item(form: str, topic: str, error: bool) -> None:
+    event = task(
+        question_type="event_8k", passages=(passage(form=form, section_topic=topic),)
+    )
+    result = run([event], [draft()])
+    assert ("event_not_8k_item" in checks(result.errors)) is error
+
+
+def test_former_name_style() -> None:
+    text = "What did Facebook spend on capex in 2021?"
+    assert names_company(text, META) and uses_style(text, META, "former_name")
+    assert not uses_style("What did Meta spend in 2021?", META, "former_name")
+
+
+def test_tags_and_hard_negatives_reach_questions_and_coverage() -> None:
+    tagged = task(tags=("fiscal_calendar",), hard_negative_chunks=("n1",))
+    result = run([tagged], [draft()])
+    question = result.questions[0]
+    assert question.tags == ("fiscal_calendar",)
+    assert question.hard_negative_chunks == ("n1",)
+    assert result.coverage["tag"] == {"fiscal_calendar": 1}
+    assert "tag" not in run([task()], [draft()]).coverage
+
+
+def test_assign_splits_per_question_and_stable() -> None:
+    tagged = [task(f"f{i}", tags=("graph",) if i % 2 else ()) for i in range(40)]
+    questions = run(tagged, [draft(f"f{i}") for i in range(40)]).questions
+    split = assign_splits(questions, seed=1)
+    assert [q.id for q in split] == [q.id for q in questions]
+    dev = sum(q.split == "dev" for q in split)
+    assert 8 <= dev <= 24  # about 40%
+    assert assign_splits(questions, seed=1) == split
+    # Each question decided alone: dropping others moves none.
+    assert assign_splits(questions[5:], seed=1) == split[5:]
+    other = assign_splits(questions, seed=2)
+    assert [q.split for q in other] != [q.split for q in split]
+    report = render_report(CheckResult(questions=split))
+    tests = sum(q.split == "test" for q in split)
+    assert f"| fact | {dev} | {tests} |" in report
+    graph = Counter(q.split for q in split if q.tags)
+    assert f"| graph | {graph['dev']} | {graph['test']} |" in report
+    assert "## Splits" not in render_report(CheckResult(questions=questions))
+
+
+def test_prune_hard_negatives() -> None:
+    tagged = task(hard_negative_chunks=("n1", "n2", "n3"))
+    result = run([tagged], [draft()])
+    texts = {
+        "n1": f"Intro. {SENTENCE}",
+        "n2": "Revenue fell in other regions.",
+        "n3": "",
+    }
+    prune_hard_negatives(result, texts)
+    assert result.questions[0].hard_negative_chunks == ("n2", "n3")
+    assert result.pruned == {"v1-t1": 1}
+    assert "| v1-t1 | 1 |" in render_report(result)
+    numeric = numeric_task().model_copy(update={"hard_negative_chunks": ("n4", "n5")})
+    quote = draft(
+        evidence_quotes=(("Net income | 72,361 | 88,136",),),
+        reference_answer="Net income was $88,136 million in fiscal 2024.",
+    )
+    result = run([numeric], [quote])
+    prune_hard_negatives(
+        result, {"n4": "Net income | 88,136 | 99,000", "n5": "Net income | 90,000"}
+    )
+    assert result.questions[0].hard_negative_chunks == ("n5",)
+
+
+def test_relative_time_tag_and_wording() -> None:
+    relative = draft(
+        question_en="How much did Microsoft's revenue grow last quarter?",
+        question_vi="Doanh thu của Microsoft quý vừa qua tăng bao nhiêu?",
+    )
+    assert "relative_time" in checks(run([task()], [relative]).warnings)
+    tagged = task(tags=("relative_time",))
+    assert "relative_time" not in checks(run([tagged], [relative]).warnings)
+    assert "relative_time" in checks(run([tagged], [draft()]).warnings)
+
+
+def test_question_json_leaves_out_v2_defaults(tmp_path: Path) -> None:
+    v1 = run([task()], [draft()]).questions[0]
+    line = question_json(v1)
+    for key in (
+        "computed",
+        "tags",
+        "hard_negative_chunks",
+        "split",
+        "former_names",
+        "sector",
+    ):
+        assert f'"{key}"' not in line
+    assert EvalQuestion.model_validate_json(line) == v1
+    v2 = run([task(companies=(META,), mention_style="name")], [draft()]).questions[0]
+    v2 = v2.model_copy(update={"split": "test"})
+    line = question_json(v2)
+    assert '"split":"test"' in line and '"former_names":["Facebook Inc"]' in line
+    assert '"sector"' not in line
+    assert EvalQuestion.model_validate_json(line) == v2
+    path = tmp_path / "questions.jsonl"
+    assert write_questions(path, [v1, v2]) == 2
+    assert path.read_text(encoding="utf-8").splitlines() == [question_json(v1), line]

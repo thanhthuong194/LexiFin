@@ -3,13 +3,15 @@
 Each evidence quote is mapped to the Silver blocks of its passage whose text
 contains it, and must show in a current Gold chunk holding that block.
 Errors block the set (missing drafts, quotes not found, en/vi asking about
-different periods); warnings are for a human pass (company, period or
-mention style missing, copied wording, answer numbers or dates not in the
-passages, near duplicates, skipped drafts).
+different periods, a computed answer or ranking order missing, v2 type
+shape); warnings are for a human pass (company, period or mention style
+missing, copied wording, answer numbers or dates not in the passages, a
+false premise not denied, near duplicates, skipped drafts).
 """
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import re
 import unicodedata
@@ -41,16 +43,20 @@ from src.evals.numbers import (
     derived,
     numbers,
     states,
+    states_computed,
+    states_direction,
     value_tokens,
     without_dates,
 )
 from src.evals.testset import (
     CompanyRef,
+    Computed,
     DraftQuestion,
     EvalQuestion,
     EvalTask,
     Evidence,
     ExpectedFilters,
+    Split,
     TaskPassage,
     XbrlFact,
     normalize,
@@ -79,6 +85,37 @@ VALUE_SPECIFIC_DIGITS = 4
 _LABEL_REFERENCE = re.compile(r"\((?:note\s*\d+[a-z]?|\d{1,2}|[a-z])\)", re.IGNORECASE)
 
 PAIRED_TYPES = frozenset({"compare_periods", "compare_companies", "multi_hop"})
+# One evidence group per task passage, each group on its own passage.
+GROUP_PER_PASSAGE = PAIRED_TYPES | {"calc", "ranking", "temporal_change"}
+# Questions whose operands (`Computed.operands`) must each be quoted.
+OPERAND_TYPES = frozenset({"calc", "ranking", "false_premise"})
+# Operations whose sign the answer must state (a direction word or sign).
+SIGNED_OPERATIONS = frozenset({"growth", "cagr", "difference"})
+# A ranking listed lowest first: the question or answer asks for the lowest.
+LOWEST = re.compile(
+    r"\b(lowest|smallest|least|fewest|bottom)\b|thấp nhất|nhỏ nhất|ít nhất",
+    re.IGNORECASE,
+)
+# Period wording relative to `as_of` (tag `relative_time`).
+RELATIVE_TIME = re.compile(
+    r"\b(last|this|past) (fiscal )?(quarter|year)\b|"
+    r"năm ngoái|năm nay|quý này|quý vừa qua|năm vừa qua",
+    re.IGNORECASE,
+)
+# A reference (or answer) refusing a false premise says so.
+PREMISE_DENIAL = re.compile(
+    r"\b(not|no|never|rather|instead|actually|contrary|incorrect|false|wrong|"
+    r"however|in fact|did ?n[o']t|was ?n[o']t|is ?n[o']t)\b|"
+    r"\b(không|chưa|thực tế|ngược lại|sai)\b",
+    re.IGNORECASE,
+)
+# `--assign-splits`: a question is `dev` when sha256(`{seed}:{task_id}`) is
+# below this share of 2**256 (each question on its own: stable as sets grow).
+DEV_SHARE = 0.4
+# EvalQuestion fields added for v2, left out of a question's JSON at their
+# defaults so v1.x `questions.jsonl` stay byte-identical.
+V2_FIELDS = ("computed", "tags", "hard_negative_chunks", "split")
+V2_COMPANY_FIELDS = ("former_names", "sector")
 STOPWORDS = frozenset(
     {"a", "an", "and", "are", "as", "at", "be", "by", "did", "do", "does", "for",
      "from", "had", "has", "have", "how", "in", "is", "it", "its", "of", "on",
@@ -119,6 +156,8 @@ class CheckResult:
     skipped: Counter[str] = field(default_factory=Counter)
     # Question id -> evidence added from other filings (`widen_evidence`).
     widened: dict[str, int] = field(default_factory=dict)
+    # Question id -> hard negatives dropped (`prune_hard_negatives`).
+    pruned: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +236,8 @@ def check_testset(
         groups = evidence(task, draft, blocks, chunks, found)
         wording(task, draft, found)
         answer_facts(task, draft, found)
+        computed_answer(task, draft, found)
+        relative_wording(task, draft, found)
         result.errors += [Issue(task.task_id, c, m) for c, m in found.errors]
         result.warnings += [Issue(task.task_id, c, m) for c, m in found.warnings]
         if found.errors:
@@ -249,10 +290,7 @@ def evidence(
         if quotes:
             found.errors.append(("evidence_unexpected", "unanswerable with quotes"))
         return ()
-    expected = len(task.passages) if task.question_type in PAIRED_TYPES else 1
-    if len(quotes) != expected or not all(quotes):
-        sizes = [len(g) for g in quotes]
-        found.errors.append(("evidence_groups", f"groups {sizes}, expected {expected}"))
+    if not _group_count_fits(task, quotes, found):
         return ()
     passages = _assign(task, quotes, found)
     if passages is None:
@@ -261,9 +299,73 @@ def evidence(
         tuple(e for q in group for e in _quote_evidence(q, p, blocks, chunks, found))
         for group, p in zip(quotes, passages, strict=True)
     )
+    _shape(task, passages, quotes, found)
     if task.fact is not None and not found.errors:
         groups = _with_fact(task.fact, groups, blocks, chunks, found)
+    computed = task.computed if task.question_type in OPERAND_TYPES else None
+    if computed is not None and not found.errors:
+        groups = _with_operands(computed, groups, blocks, chunks, found)
     return groups
+
+
+def _group_count_fits(
+    task: EvalTask, quotes: tuple[tuple[str, ...], ...], found: _Found
+) -> bool:
+    """One group per passage (GROUP_PER_PASSAGE); a computed false premise
+    1 to one per passage; aggregation one per passage of a company that
+    says it (not in `cell["without_topic"]`); else one."""
+
+    allowed = range(1, 2)
+    count = len(task.passages)
+    if task.question_type in GROUP_PER_PASSAGE:
+        allowed = range(count, count + 1)
+    elif task.question_type == "false_premise" and task.computed is not None:
+        allowed = range(1, count + 1)
+    elif task.question_type == "aggregation":
+        saying = count - len(without_topic(task))
+        allowed = range(saying, saying + 1)
+    if len(quotes) in allowed and all(quotes):
+        return True
+    sizes = [len(g) for g in quotes]
+    expected = "-".join(dict.fromkeys(map(str, (allowed[0], allowed[-1]))))
+    found.errors.append(("evidence_groups", f"groups {sizes}, expected {expected}"))
+    return False
+
+
+def without_topic(task: EvalTask) -> frozenset[str]:
+    """CIKs of an aggregation's companies that do not say it (`cell`
+    `without_topic`, `|`-separated)."""
+
+    return frozenset(c for c in task.cell.get("without_topic", "").split("|") if c)
+
+
+def _shape(
+    task: EvalTask,
+    passages: Sequence[TaskPassage],
+    quotes: tuple[tuple[str, ...], ...],
+    found: _Found,
+) -> None:
+    """v2 types: the passages and quotes the groups use fit the type."""
+
+    kind = task.question_type
+    if kind == "temporal_change":
+        years = {p.fiscal_year for p in passages} - {None}
+        if len(years) != len(passages):
+            message = f"fiscal years {[p.fiscal_year for p in passages]}"
+            found.errors.append(("temporal_same_year", message))
+        if len({normalize(" ".join(g)) for g in quotes}) < len(quotes):
+            found.warnings.append(("temporal_same_quote", "groups quote the same text"))
+    elif kind == "aggregation":
+        ciks = [p.cik for p in passages]
+        if len(set(ciks)) != len(ciks):
+            found.errors.append(("aggregation_company_repeated", ", ".join(ciks)))
+        if quoted := sorted(without_topic(task).intersection(ciks)):
+            found.errors.append(("aggregation_without_topic_quoted", ", ".join(quoted)))
+    elif kind == "event_8k":
+        for p in passages:
+            if p.form != "8-K" or p.section_topic != "8k_event":
+                message = f"{p.chunk_id}: {p.form} {p.section_topic}"
+                found.errors.append(("event_not_8k_item", message))
 
 
 def _assign(
@@ -327,26 +429,67 @@ def _with_fact(
     """The fact's group, plus its value in every other block showing the fact."""
 
     group = groups[0]
-    on_fact = [e.quote for e in group if e.block_id == fact.block_id]
-    if not on_fact:
+    if not any(e.block_id == fact.block_id for e in group):
         found.errors.append(("evidence_without_fact", f"no quote on {fact.block_id}"))
         return groups
-    values = [
-        v
-        for q in on_fact
-        for v in value_tokens(q, fact.value, fact.decimals, any_sign=True)
-    ]
+    values = _fact_values(fact, group, {fact.block_id})
     if not values:
         found.errors.append(("quote_without_value", f"no {fact.value} in the quote"))
         return groups
+    return (_with_alternatives(fact, group, values[0], blocks, chunks), *groups[1:])
+
+
+def _with_operands(
+    computed: Computed,
+    groups: tuple[tuple[Evidence, ...], ...],
+    blocks: Mapping[str, Block],
+    chunks: Mapping[str, Sequence[str]],
+    found: _Found,
+) -> tuple[tuple[Evidence, ...], ...]:
+    """Each operand quoted with its value on one of its blocks; its group
+    gains the value in every other block showing it (as `_with_fact`)."""
+
+    grown = list(groups)
+    for operand in computed.operands:
+        for index, group in enumerate(grown):
+            if values := _fact_values(operand, group, set(operand.block_ids)):
+                grown[index] = _with_alternatives(
+                    operand, group, values[0], blocks, chunks
+                )
+                break
+        else:
+            message = f"no quote shows {operand.concept} {operand.value}"
+            found.errors.append(("operand_not_quoted", message))
+    return tuple(grown)
+
+
+def _fact_values(
+    fact: XbrlFact, group: Sequence[Evidence], on: Collection[str]
+) -> list[str]:
+    """The fact's value as written in the group's quotes on blocks `on`."""
+
+    return [
+        v
+        for e in group
+        if e.block_id in on
+        for v in value_tokens(e.quote, fact.value, fact.decimals, any_sign=True)
+    ]
+
+
+def _with_alternatives(
+    fact: XbrlFact,
+    group: tuple[Evidence, ...],
+    token: str,
+    blocks: Mapping[str, Block],
+    chunks: Mapping[str, Sequence[str]],
+) -> tuple[Evidence, ...]:
     present = {e.block_id for e in group}
-    alternatives = tuple(
+    return group + tuple(
         Evidence(block_id=b, quote=line)
         for b in fact.block_ids
         if b not in present and b in blocks
-        for line in _value_line(values[0], blocks[b], chunks.get(b, ()))
+        for line in _value_line(token, blocks[b], chunks.get(b, ()))
     )
-    return (group + alternatives, *groups[1:])
 
 
 def _value_line(token: str, block: Block, chunks: Sequence[str]) -> list[str]:
@@ -471,7 +614,7 @@ def widen_evidence(
         task = by_task[question.task_id]
         taken: set[str] = set()
         for index, group in enumerate(question.evidence_groups):
-            fact = task.fact if index == 0 else None
+            fact = _group_fact(task, index, group)
             cik = _group_cik(group, task)
             answer = question.reference_answer
             if seed := _seed(group, answer, fact, cik, taken):
@@ -507,6 +650,55 @@ def widen_evidence(
             result.widened[question.id] = added
             update = {"evidence_groups": tuple(tuple(g) for g in groups)}
             result.questions[position] = question.model_copy(update=update)
+
+
+def prune_hard_negatives(result: CheckResult, texts: Mapping[str, str]) -> None:
+    """Drop from each question's `hard_negative_chunks` the chunks whose text
+    (`texts`: chunk ID -> raw text) shows an evidence quote or the answer
+    value (the fact, or an operand of `computed`): those are evidence."""
+
+    for position, question in enumerate(result.questions):
+        if not question.hard_negative_chunks:
+            continue
+        kept = tuple(
+            c
+            for c in question.hard_negative_chunks
+            if not _shows_evidence(question, texts.get(c, ""))
+        )
+        if dropped := len(question.hard_negative_chunks) - len(kept):
+            result.pruned[question.id] = dropped
+            update = {"hard_negative_chunks": kept}
+            result.questions[position] = question.model_copy(update=update)
+
+
+def _shows_evidence(question: EvalQuestion, text: str) -> bool:
+    """`text` shows one of the question's quotes, its fact or an operand."""
+
+    packed = normalize(text)
+    if any(normalize(e.quote) in packed for g in question.evidence_groups for e in g):
+        return True
+    values = [question.fact] if question.fact is not None else []
+    if question.computed is not None:
+        values += question.computed.operands
+    return any(
+        value_tokens(line, v.value, v.decimals, any_sign=True)
+        for v in values
+        for line in text.splitlines()
+    )
+
+
+def _group_fact(
+    task: EvalTask, index: int, group: Sequence[Evidence]
+) -> XbrlFact | None:
+    """The fact giving a group's widening value: a numeric question's fact
+    (first group), else the first operand quoted in the group."""
+
+    if task.fact is not None:
+        return task.fact if index == 0 else None
+    if task.computed is None or task.question_type not in OPERAND_TYPES:
+        return None
+    held = {e.block_id for e in group}
+    return next((o for o in task.computed.operands if held & set(o.block_ids)), None)
 
 
 def _group_cik(group: Sequence[Evidence], task: EvalTask) -> str:
@@ -595,9 +787,10 @@ def _has_ticker(text: str, ticker: str) -> bool:
 
 
 def names_company(text: str, company: CompanyRef) -> bool:
-    """Named by a ticker of 3+ letters, its name without legal suffixes, or an alias."""
+    """Named by a ticker of 3+ letters, its name without legal suffixes, an
+    alias or a former name."""
 
-    names = (company.name, *company.aliases)
+    names = (company.name, *company.aliases, *company.former_names)
     return any(_has_ticker(text, t) for t in company.tickers if len(t) > 2) or any(
         _has_phrase(text, normalize_name(n)) for n in names
     )
@@ -608,7 +801,136 @@ def uses_style(text: str, company: CompanyRef, style: str) -> bool:
         return any(_has_ticker(text, t) for t in company.tickers)
     if style == "nickname":
         return any(_has_phrase(text, normalize_name(a)) for a in company.aliases)
+    if style == "former_name":
+        return any(_has_phrase(text, normalize_name(n)) for n in company.former_names)
     return True
+
+
+def _fold(text: str) -> str:
+    """`text` lowercased and ASCII-folded char by char (same length)."""
+
+    return "".join(
+        (unicodedata.normalize("NFKD", c).encode("ascii", "ignore").decode() or " ")[:1]
+        for c in text.lower()
+    )
+
+
+def mention_positions(text: str, company: CompanyRef) -> list[int]:
+    """Offsets in `text` where it names the company (as `names_company`)."""
+
+    folded = _fold(text)
+    found: list[int] = []
+    for name in (company.name, *company.aliases, *company.former_names):
+        if phrase := normalize_name(name):
+            joined = r"[^a-z0-9]+".join(map(re.escape, phrase.split()))
+            pattern = rf"(?<![a-z0-9]){joined}(?![a-z0-9])"
+            found += [m.start() for m in re.finditer(pattern, folded)]
+    for ticker in company.tickers:
+        if len(ticker) > 2:
+            pattern = rf"(?<![A-Za-z0-9]){re.escape(ticker)}(?![A-Za-z0-9])"
+            found += [m.start() for m in re.finditer(pattern, text)]
+    return sorted(set(found))
+
+
+def _company_position(
+    text: str, company: CompanyRef, fact: XbrlFact | None
+) -> int | None:
+    """Where `text` places the company: its mention nearest the first
+    statement of its value (`fact`), else its last mention."""
+
+    mentions = mention_positions(text, company)
+    if not mentions:
+        return None
+    tokens = (
+        []
+        if fact is None
+        else value_tokens(text, fact.value, fact.decimals, any_sign=True)
+    )
+    value = next(
+        (m.start() for t in tokens if (m := whole_number(t).search(text))), None
+    )
+    if value is None:
+        return mentions[-1]
+    return min(mentions, key=lambda m: abs(m - value))
+
+
+def asks_lowest(*texts: str) -> bool:
+    """A question or answer about the lowest (en/vi): a ranking may then
+    list companies lowest first."""
+
+    return any(LOWEST.search(t) for t in texts)
+
+
+def in_order(
+    text: str,
+    companies: Sequence[CompanyRef],
+    facts: Sequence[XbrlFact | None] = (),
+    *,
+    reverse: bool = False,
+) -> bool:
+    """`text` names every company in this order (each placed by its mention
+    nearest its value, `facts` parallel to `companies`), or in the reverse
+    order when `reverse` (the question asks for the lowest)."""
+
+    values = [*facts, *[None] * len(companies)][: len(companies)]
+    found = [
+        _company_position(text, c, f) for c, f in zip(companies, values, strict=True)
+    ]
+    positions = [p for p in found if p is not None]
+    if len(set(positions)) < len(found):
+        return False
+    return positions == sorted(positions) or (
+        reverse and positions == sorted(positions, reverse=True)
+    )
+
+
+def ranking_holds(
+    computed: Computed, companies: Sequence[CompanyRef], text: str, *asked: str
+) -> bool:
+    """`text` ranks every company of `computed.order` in order (reversed
+    only when `text` or the question `asked` wants the lowest). Operands are
+    parallel to `order` when as many."""
+
+    ranked = ranked_companies(computed, companies)
+    if len(ranked) != len(computed.order):
+        return False
+    facts = computed.operands if len(computed.operands) == len(ranked) else ()
+    return in_order(text, ranked, facts, reverse=asks_lowest(text, *asked))
+
+
+def ranked_companies(
+    computed: Computed, companies: Sequence[CompanyRef]
+) -> list[CompanyRef]:
+    """`computed.order` (CIKs) as companies; CIKs not listed are dropped."""
+
+    by_cik = {c.cik: c for c in companies}
+    return [by_cik[cik] for cik in computed.order if cik in by_cik]
+
+
+def denies_premise(text: str) -> bool:
+    """`text` refuses a premise: a negation or correction word (en/vi)."""
+
+    return PREMISE_DENIAL.search(text) is not None
+
+
+def states_computed_answer(computed: Computed, text: str) -> bool | None:
+    """`text` states a computed value (None for a ranking), with the sign of
+    a growth, CAGR or difference (`states_direction`)."""
+
+    if computed.value is None:
+        return None
+    if not states_computed(text, computed.value, computed.unit):
+        return False
+    signed = computed.operation in SIGNED_OPERATIONS
+    return not signed or states_direction(text, computed.value)
+
+
+def _denied_near(text: str, company: CompanyRef) -> bool:
+    """Every sentence naming the company has a negation (`denies_premise`)."""
+
+    sentences = re.split(r"(?<=[.;!?])\s+|\n", text)
+    named = [t for t in sentences if mention_positions(t, company)]
+    return all(denies_premise(t) for t in named)
 
 
 def copy_scores(question: str, task: EvalTask) -> tuple[int, float]:
@@ -670,6 +992,45 @@ def answer_facts(task: EvalTask, draft: DraftQuestion, found: _Found) -> None:
         found.warnings.append(("answer_fact_not_in_passage", message))
 
 
+def computed_answer(task: EvalTask, draft: DraftQuestion, found: _Found) -> None:
+    """Computed answers state the value with its direction; a `ranking`
+    names its companies in order; a `false_premise` reference denies the
+    premise; an `aggregation` names every company, those without the topic
+    with a negation."""
+
+    answer, computed = draft.reference_answer, task.computed
+    if computed is not None and states_computed_answer(computed, answer) is False:
+        message = f"{computed.operation} {computed.value} {computed.unit or ''}"
+        found.errors.append(("answer_without_computed", message.strip()))
+    if task.question_type == "ranking" and computed is not None:
+        asked = (draft.question_en, draft.question_vi)
+        if not ranking_holds(computed, task.companies, answer, *asked):
+            names = ", ".join(
+                c.name for c in ranked_companies(computed, task.companies)
+            )
+            found.errors.append(("ranking_order", f"expected order {names}"))
+    if task.question_type == "false_premise" and not denies_premise(answer):
+        found.warnings.append(("premise_not_denied", task.hint or ""))
+    if task.question_type == "aggregation":
+        absent = without_topic(task)
+        for company in task.companies:
+            if not names_company(answer, company):
+                found.warnings.append(("answer_company_missing", company.name))
+            elif company.cik in absent and not _denied_near(answer, company):
+                found.warnings.append(("without_topic_affirmed", company.name))
+
+
+def relative_wording(task: EvalTask, draft: DraftQuestion, found: _Found) -> None:
+    """Warn when the `relative_time` tag and relative period wording
+    ("last quarter", "năm ngoái") disagree."""
+
+    tagged = "relative_time" in task.tags
+    for language, text in (("en", draft.question_en), ("vi", draft.question_vi)):
+        if tagged != bool(RELATIVE_TIME.search(text)):
+            state = "no relative period" if tagged else "relative period, untagged"
+            found.warnings.append(("relative_time", f"{language}: {state}"))
+
+
 # Questions and report
 
 
@@ -701,7 +1062,65 @@ def build_question(
             unknown_companies=(outside,) if outside else (),
         ),
         cell=task.cell,
+        computed=task.computed,
+        tags=task.tags,
+        hard_negative_chunks=task.hard_negative_chunks,
     )
+
+
+def assign_splits(questions: Sequence[EvalQuestion], seed: int) -> list[EvalQuestion]:
+    """Each question in `dev` when sha256 of `{seed}:{task_id}` is below
+    DEV_SHARE of 2**256, else `test`: decided per question, so adding or
+    dropping questions never moves another one (report shows the balance)."""
+
+    bound = int(DEV_SHARE * 2**256)
+
+    def split(question: EvalQuestion) -> Split:
+        digest = hashlib.sha256(f"{seed}:{question.task_id}".encode()).digest()
+        return "dev" if int.from_bytes(digest) < bound else "test"
+
+    return [q.model_copy(update={"split": split(q)}) for q in questions]
+
+
+def question_json(question: EvalQuestion) -> str:
+    """A question's JSON line, without v2 fields at their defaults (V2_FIELDS,
+    V2_COMPANY_FIELDS), so a v1.x set rewrites byte-identical."""
+
+    return question.model_dump_json(exclude=_unset_fields(question))
+
+
+def write_questions(path: Path, questions: Iterable[EvalQuestion]) -> int:
+    """`questions.jsonl`, as `testset.write_jsonl` (temp file, then rename)
+    with `question_json` lines; returns the count."""
+
+    lines = [question_json(q) + "\n" for q in questions]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text("".join(lines), encoding="utf-8")
+    temporary.replace(path)
+    return len(lines)
+
+
+def _unset_fields(question: EvalQuestion) -> dict[str, bool | dict[int, set[str]]]:
+    defaults = EvalQuestion.model_fields
+    exclude: dict[str, bool | dict[int, set[str]]] = {
+        name: True
+        for name in V2_FIELDS
+        if getattr(question, name)
+        == defaults[name].get_default(call_default_factory=True)
+    }
+    company_defaults = CompanyRef.model_fields
+    companies = {
+        index: {
+            name
+            for name in V2_COMPANY_FIELDS
+            if getattr(company, name) == company_defaults[name].get_default()
+        }
+        for index, company in enumerate(question.companies)
+    }
+    if any(companies.values()):
+        exclude["companies"] = {i: f for i, f in companies.items() if f}
+    return exclude
 
 
 def near_duplicates(questions: Sequence[EvalQuestion]) -> list[Issue]:
@@ -732,6 +1151,8 @@ def coverage(tasks: Iterable[EvalTask]) -> dict[str, Counter[str]]:
             },
             **{f"cell.{k}": [v] for k, v in task.cell.items()},
         }
+        if task.tags:  # v2; v1.x reports keep their dimensions
+            values["tag"] = task.tags
         for dimension, found in values.items():
             counts[dimension].update(str(v) for v in found)
     return dict(counts)
@@ -765,6 +1186,23 @@ def render_report(result: CheckResult) -> str:
         lines += [f"| {q} | {n} |" for q, n in sorted(result.widened.items())]
     else:
         lines.append("None.")
+    if any(q.split for q in result.questions):
+        lines += ["", "## Splits"]
+        for title in ("question type", "tag"):
+            splits = Counter(
+                (v, q.split)
+                for q in result.questions
+                for v in (q.tags if title == "tag" else (q.question_type,))
+            )
+            lines += ["", f"| {title} | dev | test |", "|---|---|---|"]
+            lines += [
+                f"| {v} | {splits[v, 'dev']} | {splits[v, 'test']} |"
+                for v in sorted({v for v, _ in splits})
+            ]
+    if result.pruned:
+        lines += ["", "## Hard negatives dropped (show evidence)", ""]
+        lines += ["| question | dropped |", "|---|---|"]
+        lines += [f"| {q} | {n} |" for q, n in sorted(result.pruned.items())]
     lines += ["", "## Coverage (accepted questions)"]
     for dimension, counts in result.coverage.items():
         lines += ["", f"### {dimension}", "", "| value | questions |", "|---|---|"]
@@ -853,3 +1291,21 @@ def load_company_chunks(gold_dir: Path, ciks: set[str]) -> list[CompanyChunk]:
                 for r in batch.filter(keep).to_pylist()
             ]
     return found
+
+
+def load_chunk_texts(gold_dir: Path, chunk_ids: Collection[str]) -> dict[str, str]:
+    """Raw text of the given Gold chunks (read-only, 2 columns)."""
+
+    ids = sorted(chunk_ids)
+    if not ids:
+        return {}
+    with open_gold_catalog_read_only(gold_dir) as catalog:
+        table = catalog.load_table(CHUNKS_TABLE)
+        rows = read_rows_in(
+            table,
+            "chunk_id",
+            ids,
+            columns=("text",),
+            files=values_filter("chunk_id", ids),
+        )
+    return {r["chunk_id"]: r["text"] for r in rows}

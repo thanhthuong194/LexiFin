@@ -20,6 +20,23 @@ from typing import NamedTuple
 # VALUE_MIN_DIGITS significant digits or is within VALUE_TOLERANCE.
 VALUE_MIN_DIGITS = 3
 VALUE_TOLERANCE = Decimal("0.005")
+# A computed percent (growth, margin, share, CAGR) is stated when written
+# within half its first decimal: 12.3 by `12.3%` or `12.25%`, not `12%`.
+PERCENT_HALF = Decimal("0.05")
+# A computed amount (a difference) rounded this coarsely still states it.
+COMPUTED_MIN_DIGITS = 2
+_UP = re.compile(
+    r"\b(rose|rise[sn]?|increas\w*|grew|grow(s|n|th)?|up|higher|gain(s|ed)?|"
+    r"jump\w*|climb\w*|expand\w*)\b|\btăng\b",
+    re.IGNORECASE,
+)
+_DOWN = re.compile(
+    r"\b(fell|fall(s|en)?|decreas\w*|declin\w*|drop\w*|down|lower|shr[au]nk|"
+    r"reduc\w*|contract\w*)\b|\bgiảm\b|\bsụt\b",
+    re.IGNORECASE,
+)
+_PLUS = re.compile(r"\+\s*\$?\d")
+_MINUS = re.compile(r"(?<![\w-])[-−]\s*\$?\d|\(\$?\d[\d,.]*\)?\s*%")
 # Numbers worth checking carry `$`, a unit, a fraction or a thousands
 # separator, or are at least ANSWER_MIN_NUMBER and not a year.
 ANSWER_MIN_NUMBER = 100
@@ -266,3 +283,47 @@ def states_expected(text: str, expected: Expected) -> bool:
         if n.value
         for scale in ([n.scale] if n.scale != 1 else bare)
     )
+
+
+def states_computed(text: str, value: str, unit: str | None) -> bool:
+    """`text` states a computed answer (`testset.Computed`) in any sign: a
+    percent within PERCENT_HALF points, written with `%` or `percent`; any
+    other unit as `text_states`, or rounded to at least COMPUTED_MIN_DIGITS
+    significant digits (`$5.0 billion` for 5,042 million). The sign is
+    `states_direction`'s."""
+
+    target = abs(Decimal(value))
+    if unit != "percent":
+        if text_states(text, value, None):
+            return True
+        return any(
+            len(n.value.as_tuple().digits) >= COMPUTED_MIN_DIGITS
+            and abs(n.value * n.scale - target) <= _half(n)
+            for t in _readings(text)
+            for n in numbers(t)
+            if n.value
+        )
+    return any(
+        n.scale == _SCALES["%"] and abs(n.value - target) <= PERCENT_HALF
+        for t in _readings(text)
+        for n in numbers(t)
+    )
+
+
+def _half(number: Number) -> Decimal:
+    """Half the last shown digit of `number`, at its unit's scale."""
+
+    exponent = number.value.as_tuple().exponent
+    digits = -exponent if isinstance(exponent, int) and exponent < 0 else 0
+    return Decimal(5) * Decimal(10) ** (-digits - 1) * number.scale
+
+
+def states_direction(text: str, value: str) -> bool:
+    """`text` gives the sign of a change: a direction word (rose, fell; tăng,
+    giảm) or a signed number agreeing with `value`; a zero needs none."""
+
+    number = Decimal(value)
+    if number == 0:
+        return True
+    words, signed = (_UP, _PLUS) if number > 0 else (_DOWN, _MINUS)
+    return words.search(text) is not None or signed.search(text) is not None

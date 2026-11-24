@@ -45,6 +45,12 @@ CONFIG: dict[str, Any] = {
     "models": {"generator": "fake"},
     "judge": True,
 }
+MSFT, AAPL = "0000789019", "0000320193"
+COMPANIES = [
+    {"cik": GOOGL, "name": "Alphabet Inc.", "tickers": ["GOOGL"]},
+    {"cik": MSFT, "name": "Microsoft Corp", "tickers": ["MSFT"]},
+    {"cik": AAPL, "name": "Apple Inc.", "tickers": ["AAPL"], "former_names": ["Apple Computer"]},
+]  # fmt: skip
 
 
 def make_question(
@@ -185,6 +191,7 @@ def test_metrics_of_a_cited_numeric_answer(tmp_path: Path) -> None:
     en, vi = run_rows(fakes, [(q, "en"), (q, "vi")], tmp_path / "a.jsonl")
     assert en["metrics"] == {
         "answer.value": 1.0,
+        "answer.order": None,
         "answer.refusal": None,
         "answer.false_refusal": 0.0,
         "answer.cited": 1.0,
@@ -370,3 +377,94 @@ def test_report_and_scores(tmp_path: Path) -> None:
     assert "  - answer: Chi phí là 30 tỷ USD [1]." in report
     assert "  - judge: judged incorrect" in report
     assert "q2" not in report.split("## Failing rows")[1]
+
+
+def computed_question(question_type: str, computed: dict[str, Any]) -> EvalQuestion:
+    base = make_question("c", "fact", "Revenue grew 12.3% in fiscal 2024.")
+    return EvalQuestion.model_validate(
+        base.model_dump()
+        | {
+            "question_type": question_type,
+            "computed": {"operands": [FACT], "unit": None} | computed,
+            "companies": COMPANIES,
+        }
+    )
+
+
+def test_computed_order_and_false_premise_metrics() -> None:
+    passages: list[dict[str, Any]] = [{"evidence_groups": [0]}]
+
+    def metric(q: EvalQuestion, text: str, key: str, asked: str = "Rank them") -> Any:
+        row = {
+            "language": "en",
+            "question": asked,
+            "passages": passages,
+            "answer": answer(text).model_dump(),
+        }
+        return row_metrics(q, row)[key]
+
+    growth = computed_question(
+        "calc", {"operation": "growth", "value": "12.3456", "unit": "percent"}
+    )
+    assert metric(growth, "It grew 12.3% [1].", "answer.value") == 1.0
+    assert metric(growth, "Tăng 12,35% [1].", "answer.value") == 1.0
+    assert metric(growth, "It grew 12% [1].", "answer.value") == 0.0
+    assert metric(growth, "It fell 12.3% [1].", "answer.value") == 0.0
+    assert metric(growth, "It moved 12.3% [1].", "answer.value") == 0.0
+    assert metric(growth, "It grew 12.3% [1].", "answer.order") is None
+    ranking = computed_question(
+        "ranking", {"operation": "ranking", "value": None, "order": [MSFT, AAPL, GOOGL]}
+    )
+    first = "MSFT led, then Apple, then Alphabet [1]."
+    reverse = "Alphabet, Apple Computer, Microsoft [1]."
+    assert metric(ranking, first, "answer.order") == 1.0
+    assert metric(ranking, reverse, "answer.order") == 0.0
+    assert metric(ranking, reverse, "answer.order", "Which is lowest?") == 1.0
+    assert metric(ranking, "Apple, Microsoft, Alphabet [1].", "answer.order") == 0.0
+    assert metric(ranking, "Microsoft then Apple [1].", "answer.order") == 0.0
+    assert metric(ranking, "MSFT [1].", "answer.value") is None
+    computed_premise = computed_question(
+        "false_premise", {"operation": "growth", "value": "12.3456", "unit": "percent"}
+    )
+    assert metric(computed_premise, "It rose 12.3% [1].", "answer.value") == 1.0
+    denial_only = "No, it did not fall: 12.3% [1]."
+    assert metric(computed_premise, denial_only, "answer.value") == 0.0
+    premise = make_question(
+        "p", "fact", "Revenue did not fall; it rose to $33,712 million."
+    )
+    premise = EvalQuestion.model_validate(
+        premise.model_dump() | {"question_type": "false_premise", "fact": None}
+    )
+    assert metric(premise, "No, it rose to $33.7 billion [1].", "answer.value") == 1.0
+    assert metric(premise, "It fell to $33.7 billion [1].", "answer.value") == 0.0
+    assert metric(premise, "No, it rose to $30 billion [1].", "answer.value") == 0.0
+    direction = EvalQuestion.model_validate(
+        premise.model_dump() | {"reference_answer": "The CEO did not leave."}
+    )
+    assert metric(direction, "Không, CEO vẫn tại vị [1].", "answer.value") == 1.0
+
+
+def test_report_breakdowns_by_type_and_tag(tmp_path: Path) -> None:
+    ranking = computed_question(
+        "ranking", {"operation": "ranking", "value": None, "order": [MSFT, AAPL, GOOGL]}
+    )
+    ranking = EvalQuestion.model_validate(
+        ranking.model_dump() | {"tags": ["graph"], "split": "dev"}
+    )
+    fakes = Fakes(
+        [retrieved([make_passage(1, "c1")])],
+        [answer("Microsoft, Apple, Alphabet [1].")],
+        [judgment()],
+    )
+    collect(
+        fakes.steps(),
+        [(ranking, "en")],
+        {"c": [frozenset({"c1"})]},
+        tmp_path / "answers.jsonl",
+    )
+    write_outputs(tmp_path, CONFIG | {"languages": ["en"], "split": "dev"}, [ranking])
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "| answer.order | 1.000 (1) | 1.000 (1) |" in report
+    assert "### question_type" in report and "| ranking | 1 |" in report
+    assert "### tag" in report and "| graph | 1 |" in report
+    assert "; split dev;" in report

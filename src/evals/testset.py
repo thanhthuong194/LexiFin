@@ -30,15 +30,25 @@ QuestionType = Literal[
     "compare_companies",  # two companies, one period
     "multi_hop",  # two passages of one filing
     "unanswerable",  # the corpus has no answer
+    # v2 types
+    "calc",  # a figure derived from XBRL facts (growth, margin, share, CAGR)
+    "ranking",  # order of 3-4 companies on one XBRL metric and period
+    "temporal_change",  # what changed in one section between two years
+    "event_8k",  # the event of an 8-K item
+    "relation",  # a relationship the text states (supplier, officer...)
+    "aggregation",  # which of N companies say something about a topic
+    "false_premise",  # the question assumes what the filing contradicts
 ]
 DataKind = Literal["text", "table", "xbrl", "none"]
-MentionStyle = Literal["name", "ticker", "nickname"]
+MentionStyle = Literal["name", "ticker", "nickname", "former_name"]
 Source = Literal["passage", "topic"]
 UnanswerableReason = Literal[
     "company_outside_corpus", "period_not_covered", "topic_absent"
 ]
 Language = Literal["en", "vi"]
 LANGUAGES: tuple[Language, ...] = ("en", "vi")
+Split = Literal["dev", "test"]
+Operation = Literal["growth", "margin", "share", "cagr", "difference", "ranking"]
 _SPACES = re.compile(r"[\s|]+")
 
 
@@ -97,6 +107,9 @@ class CompanyRef(_Model):
     tickers: tuple[str, ...] = ()
     # Other names users call it by (`Google` for Alphabet).
     aliases: tuple[str, ...] = ()
+    # Names it filed under before (SEC header `FORMER COMPANY`), newest first.
+    former_names: tuple[str, ...] = ()
+    sector: str | None = None  # GICS sector (IVV holdings), else None
 
 
 class TaskPassage(_Model):
@@ -137,6 +150,28 @@ class XbrlFact(_Model):
     block_ids: tuple[str, ...] = Field(min_length=1)
 
 
+class Computed(_Model):
+    """An answer code derives from XBRL facts (`calc`, `ranking`,
+    `false_premise`): writers word it, never compute it."""
+
+    operation: Operation
+    # Result as a plain decimal string (growth/margin/share/cagr in percent,
+    # difference in the operands' unit); None for `ranking`.
+    value: str | None
+    unit: str | None  # `percent`, or the operands' unit
+    operands: tuple[XbrlFact, ...] = Field(min_length=1)
+    # `ranking`: CIKs from highest to lowest value.
+    order: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _shape(self) -> Computed:
+        if (self.operation == "ranking") != (self.value is None):
+            raise ValueError("ranking has an order and no value; others a value")
+        if (self.operation == "ranking") != bool(self.order):
+            raise ValueError("only ranking has an order")
+        return self
+
+
 class EvalTask(_Model):
     """What a writer gets: a coverage cell and the passages to ask about."""
 
@@ -153,6 +188,12 @@ class EvalTask(_Model):
     hint: str | None = None
     # Coverage dimensions: CELL_KEYS, plus type-specific ones.
     cell: dict[str, str] = Field(default_factory=dict)
+    computed: Computed | None = None
+    # Traps and groups (`fiscal_calendar`, `relative_time`, `graph`...).
+    tags: tuple[str, ...] = ()
+    # Chunks easy to confuse with the evidence (same concept or heading in
+    # another year, segment or company): a run reports hits on them.
+    hard_negative_chunks: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _consistent(self) -> EvalTask:
@@ -163,6 +204,11 @@ class EvalTask(_Model):
             raise ValueError("answerable tasks need passages")
         if (self.question_type == "numeric") != (self.fact is not None):
             raise ValueError("numeric tasks, and only they, carry a fact")
+        computed = self.question_type in ("calc", "ranking")
+        if computed and self.computed is None:
+            raise ValueError("calc and ranking tasks need `computed`")
+        if self.question_type == "false_premise" and not self.hint:
+            raise ValueError("false_premise tasks state the premise in `hint`")
         return self
 
 
@@ -218,6 +264,10 @@ class EvalQuestion(_Model):
     fact: XbrlFact | None = None
     expected: ExpectedFilters
     cell: dict[str, str] = Field(default_factory=dict)
+    computed: Computed | None = None
+    tags: tuple[str, ...] = ()
+    hard_negative_chunks: tuple[str, ...] = ()
+    split: Split | None = None  # v2+: `dev` or `test`; None for v1.x
 
     @model_validator(mode="after")
     def _evidence(self) -> EvalQuestion:

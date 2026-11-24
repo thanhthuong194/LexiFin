@@ -3,6 +3,8 @@
 Reads `<set-dir>/tasks.jsonl` and `<set-dir>/drafts/*.jsonl`, maps evidence
 quotes to Silver blocks and checks them against current Gold chunks, writes
 `questions.jsonl` (only without errors) and `check_report.md`.
+`--assign-splits` (v2+) puts each question in `dev` or `test`, stratified by
+question type and seeded by `set.json`.
 Exit 0 = written (warnings allowed), 1 = errors, 2 = bad arguments.
 """
 
@@ -19,16 +21,20 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 from pydantic import ValidationError
 
 from src.evals.checks import (
+    assign_splits,
     check_testset,
     load_blocks,
+    load_chunk_texts,
     load_chunks,
     load_company_chunks,
     load_drafts,
+    prune_hard_negatives,
     read_blocks,
     render_report,
     widen_evidence,
+    write_questions,
 )
-from src.evals.testset import EvalTask, SetManifest, read_jsonl, write_jsonl
+from src.evals.testset import EvalTask, SetManifest, read_jsonl
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--drafts", type=Path, nargs="+", help="Files or dirs")
     parser.add_argument("--out", type=Path, help="Default: <set-dir>/questions.jsonl")
     parser.add_argument("--report", type=Path, help="Default: check_report.md by --out")
+    parser.add_argument(
+        "--assign-splits",
+        action="store_true",
+        help="Split questions 40/60 dev/test per type (seed of set.json); v2+",
+    )
     return parser.parse_args()
 
 
@@ -61,6 +72,9 @@ def main() -> int:
         print(f"Not found: {', '.join(map(str, missing))}", file=sys.stderr)
         return 2
     manifest = SetManifest.read(set_dir)
+    if args.assign_splits and manifest is None:
+        print(f"--assign-splits needs {set_dir / 'set.json'}", file=sys.stderr)
+        return 2
     set_id = args.set_id or (manifest.set_id if manifest else set_dir.name)
     try:
         tasks = read_jsonl(tasks_path, EvalTask)
@@ -77,7 +91,12 @@ def main() -> int:
         partial(load_company_chunks, gold_dir),
         partial(read_blocks, args.data_dir),
     )
+    negatives = {c for q in result.questions for c in q.hard_negative_chunks}
+    if negatives:  # v2: chunks showing the evidence are not distractors
+        prune_hard_negatives(result, load_chunk_texts(gold_dir, negatives))
     result.errors[:0] = draft_errors
+    if args.assign_splits and manifest is not None:
+        result.questions = assign_splits(result.questions, manifest.seed)
 
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(render_report(result), encoding="utf-8")
@@ -91,7 +110,7 @@ def main() -> int:
     if result.errors:
         print("Questions not written.")
         return 1
-    count = write_jsonl(out, result.questions)
+    count = write_questions(out, result.questions)
     print(f"Wrote {count} questions to {out}")
     return 0
 

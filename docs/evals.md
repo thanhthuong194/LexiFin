@@ -29,14 +29,42 @@ Retrieval and answers are scored against the same frozen question set.
    answer value: 10-Q/10-K twin of a release table, later comparatives); a
    value with under 4 significant digits (EPS, ratios) also needs another
    number of the row. Widened evidence (`widened`) counts for retrieval, not
-   for filter admission.
+   for filter admission. v2 checks per type (errors unless noted): `calc`
+   reference states `computed.value` (a percent within half its first
+   decimal; an amount to 2+ significant digits that round to it) with the
+   direction of a growth, CAGR or difference (rose/fell, tăng/giảm, or a
+   sign), every operand quoted with its value (each operand's group is
+   widened to its other fact blocks and same-label rows); `ranking` names
+   every company of `computed.order` in order, each placed by its mention
+   nearest its value, reversed only when the question or reference asks for
+   the lowest; `false_premise` with `computed` as calc (1..passages groups),
+   without it one group; warning `premise_not_denied`; `temporal_change` one
+   group per passage, distinct fiscal years (warning when both quote the
+   same text); `aggregation` one group per passage of a company not in
+   `cell.without_topic` (`|`-separated CIKs; quoting one is an error), a
+   warning when the reference omits a company or names a `without_topic`
+   one without a negation in that sentence; `event_8k` passages are 8-K
+   items (`8k_event`). Warning `relative_time` when the tag and relative
+   wording ("last quarter", "năm ngoái") disagree. Hard negatives whose text
+   shows an evidence quote or the fact/operand value are dropped (report
+   lists them). `--assign-splits` (v2+) sets `split` per question: `dev`
+   when sha256 of `{seed}:{task_id}` (`set.json` seed) is below 0.4·2^256,
+   else `test`, so adding or dropping questions moves no other; the report
+   shows the balance per type and tag. v1.x sets keep `split` null and
+   their `questions.jsonl` byte-identical (v2 fields at defaults are left
+   out).
    A person (or a non-Claude LLM) reviews a sample, shown the full passages,
    not only the quotes; then the set is frozen (never edited; a change is a
    new version).
 4. `uv run python scripts/evals/eval_retrieval.py [--no-rerank] [--no-llm]`:
    runs the retriever on each question in English and Vietnamese and writes
    `evals/runs/<time>_<label>/` (`report.md`, per-question results, ranx
-   runs); `--compare <run> <run>` tests differences.
+   runs); `--compare <run> <run>` tests differences. `--split dev|test`
+   scores one split (v2; fixes are judged on `dev`, `test` is the headline).
+   v2 reports add tables per tag and per split, and `post.hard_negative@8`:
+   share of answerable rows with hard negatives where one ranks above the
+   first evidence chunk in the delivered top 8 (shown only when a question
+   has hard negatives).
 
 Evidence is a Silver `block_id` plus a verbatim quote, so a set outlives chunk
 rule changes. A retrieved chunk is relevant when it holds the block and shows
@@ -58,9 +86,13 @@ t0077 split table loses its title).
    `chat.generator` and scores `answers.jsonl` (metrics in the
    `src/evals/answer_eval.py` docstring): the expected value stated (XBRL
    fact exactly, else the reference's first amount at its precision, any
-   sign), refusals of unanswerable questions, false refusals, citations, a
-   cited passage holding evidence, answer language; split by whether
-   retrieval found every evidence group. `--judge` adds `chat.judge`:
+   sign; `calc` and computed `false_premise`: the computed value with the
+   direction of a change; other `false_premise`: the premise denied and the
+   reference amount stated), `answer.order` (`ranking`: companies in order,
+   reversed only when the question or answer asks for the lowest), refusals of unanswerable questions, false refusals, citations,
+   a cited passage holding evidence, answer language; split by whether
+   retrieval found every evidence group, with tables per question type and
+   per tag. `--split dev|test` as for retrieval. `--judge` adds `chat.judge`:
    correctness against the English reference (correct/partial/incorrect,
    across languages and rounding) and faithfulness against every passage
    shown (hallucination; citation precision is the deterministic metric).
@@ -111,3 +143,31 @@ with tickers and aliases, `persona`, `mention_style`, `question_type`, `fact`,
   period or topic the corpus lacks), `evidence_quotes` empty.
 - If a task cannot yield a sensible question, still return a draft and start
   `reference_answer` with `SKIP:` and the reason; the check reports it.
+
+### v2 additions
+
+Full prompt: `docs/plans/eval_v2_writer_prompt.md` (keep in sync).
+
+- `mention_style` `former_name`: one of the company's `former_names`.
+- Tag `relative_time`: phrase the period relatively ("last quarter",
+  "năm ngoái"), read against `as_of` in `set.json`; without the tag, never.
+- `calc`: ask for the derived figure (growth, margin, share, CAGR) without
+  the operands; the reference states `computed.value` (percent to 1
+  decimal) with its direction (rose/fell) and its operands; one group per
+  passage quoting each operand's row with its value.
+- `ranking`: ask for the highest or the lowest; name all listed companies;
+  the reference lists every one with its value, in `computed.order`
+  (highest first), or lowest first when the question asks for the lowest;
+  one group per passage.
+- `temporal_change`: one group per passage (two fiscal years, different
+  quotes); the reference names the change and both years.
+- `event_8k`: the event of the 8-K item, with the 8-K's month/year.
+- `relation`: `hint` holds the matched snippet; ask about that
+  relationship; the reference states it as the passage does, both parties.
+- `aggregation`: the topic is in `hint`; the reference says yes/no for
+  every listed company (companies in `cell.without_topic` are "no", with a
+  negation in their sentence); one group per company that says it.
+- `false_premise`: ask naturally assuming `hint`; the reference denies it
+  ("No, ...", "did not") and states the true fact with its direction (and
+  `computed.value` if given); with `computed`, quote each operand's row
+  (one group per passage used), else one group.

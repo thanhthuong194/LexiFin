@@ -16,11 +16,13 @@ from src.evals.retrieval_eval import (
     dimension_values,
     evidence_chunks,
     failures,
+    hard_negative_hit,
     load_rows,
     match_groups,
     pending,
     resume_rows,
     score,
+    select,
     write_outputs,
 )
 from src.evals.testset import EvalQuestion, ExpectedFilters, Language
@@ -348,3 +350,63 @@ def test_outputs_report_and_compare(tmp_path: Path) -> None:
     (run_dirs[1] / "config.json").write_text(json.dumps(other), encoding="utf-8")
     with pytest.raises(ValueError, match="languages"):
         compare_runs(run_dirs)
+
+
+def test_hard_negative_hit() -> None:
+    groups = [frozenset({"e"})]
+    negatives = frozenset({"n"})
+    assert hard_negative_hit([["x"], ["n"], ["e"]], groups, negatives) == 1.0
+    assert hard_negative_hit([["e"], ["n"]], groups, negatives) == 0.0
+    # A chunk matching evidence is evidence, even if listed as a negative.
+    assert hard_negative_hit([["n", "e"]], groups, negatives) == 0.0
+    assert hard_negative_hit([["x"]] * 8 + [["n"]], groups, negatives) == 0.0
+    assert hard_negative_hit([["n"]], groups, frozenset()) is None
+
+
+def test_select_split_and_limit() -> None:
+    questions = [
+        EvalQuestion.model_validate(question(f"q{i}").model_dump() | {"split": split})
+        for i, split in enumerate(("dev", "test", "dev"))
+    ]
+    assert [q.id for q in select(questions, "dev", None)] == ["q0", "q2"]
+    assert [q.id for q in select(questions, "dev", 1)] == ["q0"]
+    assert len(select(questions, None, None)) == 3
+    assert select([question("v1")], "test", None) == []
+
+
+def test_hard_negatives_and_tags_in_report(tmp_path: Path) -> None:
+    tagged = EvalQuestion.model_validate(
+        question("q1").model_dump()
+        | {"tags": ["graph", "small_company"], "hard_negative_chunks": ["n"]}
+    )
+    plain = question("q2")
+    relevance = {"q1": [frozenset({"c1"})], "q2": [frozenset({"c1"})]}
+    run_rows(
+        [(tagged, "en", result([("n", [], 0, True), ("c1", [], 1, True)])),
+         (plain, "en", result([("c1", [], 0, True)]))],
+        relevance,
+        tmp_path / "results.jsonl",
+    )  # fmt: skip
+    config = CONFIG | {"languages": ["en"]}
+    scoring = write_outputs(tmp_path, config, [tagged, plain], relevance)
+    assert scoring.scored[0].metrics["post.hard_negative@8"] == 1.0
+    assert "post.hard_negative@8" not in scoring.scored[1].metrics
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "| post.hard_negative@8 | 1.000 (1) | 1.000 (1) |" in report
+    assert "### tag" in report and "| small_company | 1 |" in report
+    assert "| (none) | 1 |" in report
+    assert "### split" not in report
+    scores = json.loads((tmp_path / "scores.json").read_text(encoding="utf-8"))
+    assert scores["en"]["post.hard_negative@8"] == 1.0
+
+
+def test_v1_report_has_no_v2_parts(tmp_path: Path) -> None:
+    relevance = {"q1": [frozenset({"c1"})]}
+    run_rows(
+        [(question("q1"), "en", result([("c1", [], 0, True)]))],
+        relevance,
+        tmp_path / "results.jsonl",
+    )
+    write_outputs(tmp_path, CONFIG | {"languages": ["en"]}, [question("q1")], relevance)
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "hard_negative" not in report and "### tag" not in report

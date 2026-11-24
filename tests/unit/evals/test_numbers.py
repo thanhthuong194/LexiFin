@@ -13,6 +13,8 @@ from src.evals.numbers import (
     expected_amount,
     numbers,
     states,
+    states_computed,
+    states_direction,
     states_expected,
     text_states,
     value_tokens,
@@ -140,3 +142,43 @@ def test_states_expected(answer: str, reference: str, found: bool) -> None:
     expected = expected_amount(reference)
     assert expected is not None
     assert states_expected(answer, expected) is found
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "unit", "found"),
+    [
+        ("Revenue grew 12.3% in FY2024.", "12.3456", "percent", True),
+        ("Revenue grew 12.35 percent.", "12.3456", "percent", True),
+        ("Doanh thu tăng 12,3%.", "12.3456", "percent", True),
+        ("Revenue fell 4.2%.", "-4.2", "percent", True),
+        ("Revenue grew 12%.", "12.3456", "percent", False),
+        ("Revenue grew 12.4%.", "12.3456", "percent", False),
+        ("Revenue grew 12.3 times.", "12.3456", "percent", False),
+        ("The gap was $1.23 billion.", "1234000000", "iso4217:USD", True),
+        # Two significant digits suffice when they round right.
+        ("The gap was $1.2 billion.", "1234000000", "iso4217:USD", True),
+        ("The gap was $1 billion.", "1234000000", "iso4217:USD", False),
+        ("The gap was $1.3 billion.", "1234000000", "iso4217:USD", False),
+    ],
+)  # fmt: skip
+def test_states_computed(text: str, value: str, unit: str, found: bool) -> None:
+    assert states_computed(text, value, unit) is found
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "found"),
+    [
+        ("Revenue rose 12.3%.", "12.3", True),
+        ("Doanh thu tăng 12,3%.", "12.3", True),
+        ("Revenue grew +12.3%.", "12.3", True),
+        ("Revenue fell 12.3%.", "12.3", False),
+        ("Revenue fell 4.2%.", "-4.2", True),
+        ("Doanh thu giảm 4,2%.", "-4.2", True),
+        ("Revenue changed -4.2% in 2021-2022.", "-4.2", True),
+        ("Revenue changed 4.2% in 2021-2022.", "-4.2", False),
+        ("Debt changed by $5,042 million.", "-5042000000", False),
+        ("Flat at 0.0%.", "0", True),
+    ],
+)  # fmt: skip
+def test_states_direction(text: str, value: str, found: bool) -> None:
+    assert states_direction(text, value) is found

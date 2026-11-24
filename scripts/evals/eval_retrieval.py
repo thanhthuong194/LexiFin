@@ -14,7 +14,7 @@ from dataclasses import asdict
 from datetime import UTC, date, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
@@ -33,12 +33,14 @@ from src.evals.retrieval_eval import (
     pending,
     resume_rows,
     retried,
+    select,
     write_outputs,
 )
 from src.evals.testset import (
     LANGUAGES,
     EvalQuestion,
     SetManifest,
+    Split,
     dump_json,
     read_jsonl,
 )
@@ -53,6 +55,7 @@ EVALS = REPOSITORY_ROOT / "evals"
 # Config entries a resumed run must keep.
 RESUME_KEYS = (
     "languages",
+    "split",
     "limit",
     "today",
     "chunks_rules_version",
@@ -74,7 +77,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gold-dir", type=Path, help="Default: --data-dir")
     add_retriever_arguments(parser)
     parser.add_argument("--languages", nargs="+", choices=LANGUAGES, default=LANGUAGES)
-    parser.add_argument("--limit", type=int, help="First N questions only")
+    parser.add_argument(
+        "--split",
+        choices=get_args(Split),
+        help="Only questions of this split (v2+ sets)",
+    )
+    parser.add_argument("--limit", type=int, help="First N questions (of the split)")
     parser.add_argument(
         "--today", type=date.fromisoformat, help="Default: as_of of set.json"
     )
@@ -101,8 +109,10 @@ def conflicts(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
 
 
 def run(args: argparse.Namespace) -> int:
-    questions: list[EvalQuestion] = read_jsonl(args.questions, EvalQuestion)
-    questions = questions[: args.limit] if args.limit else questions
+    questions = select(read_jsonl(args.questions, EvalQuestion), args.split, args.limit)
+    if not questions:
+        print(f"no questions in split {args.split}", file=sys.stderr)
+        return 2
     manifest = SetManifest.read(args.questions.parent)
     today: date | None = args.today or (manifest.as_of if manifest else None)
     if today is None:
@@ -124,6 +134,7 @@ def run(args: argparse.Namespace) -> int:
             "count": len(questions),
         },
         "languages": list(args.languages),
+        "split": args.split,
         "limit": args.limit,
         "today": today.isoformat(),
         "chunks_rules_version": version,

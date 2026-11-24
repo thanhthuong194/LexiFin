@@ -14,7 +14,7 @@ from dataclasses import asdict
 from datetime import UTC, date, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
@@ -35,11 +35,13 @@ from src.evals.retrieval_eval import (
     means,
     pending,
     resume_rows,
+    select,
 )
 from src.evals.testset import (
     LANGUAGES,
     EvalQuestion,
     SetManifest,
+    Split,
     dump_json,
     read_jsonl,
 )
@@ -57,6 +59,7 @@ ANSWERS = "answers.jsonl"
 # Config entries a resumed run must keep.
 RESUME_KEYS = (
     "languages",
+    "split",
     "limit",
     "today",
     "judge",
@@ -82,7 +85,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--judge-profile", default="judge")
     parser.add_argument("--judge", action="store_true", help="Also judge answers")
     parser.add_argument("--languages", nargs="+", choices=LANGUAGES, default=LANGUAGES)
-    parser.add_argument("--limit", type=int, help="First N questions only")
+    parser.add_argument(
+        "--split",
+        choices=get_args(Split),
+        help="Only questions of this split (v2+ sets)",
+    )
+    parser.add_argument("--limit", type=int, help="First N questions (of the split)")
     parser.add_argument("--label", default="run")
     parser.add_argument("--out-dir", type=Path, default=EVALS / "runs")
     runs = parser.add_mutually_exclusive_group()
@@ -174,11 +182,11 @@ def run_rejudge(args: argparse.Namespace) -> int:
 
 
 def run(args: argparse.Namespace) -> int:
-    questions: list[EvalQuestion] = read_jsonl(args.questions, EvalQuestion)
-    questions = questions[: args.limit] if args.limit else questions
+    questions = select(read_jsonl(args.questions, EvalQuestion), args.split, args.limit)
     manifest = SetManifest.read(args.questions.parent)
-    if manifest is None:
-        print("no set.json next to the questions", file=sys.stderr)
+    if manifest is None or not questions:
+        missing = "no set.json next to the questions" if questions else "no questions"
+        print(f"{missing} (split {args.split})", file=sys.stderr)
         return 2
     relevance, _, version = evidence_chunks(args.gold_dir, questions)
     config: dict[str, Any] = {
@@ -186,6 +194,7 @@ def run(args: argparse.Namespace) -> int:
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "questions": questions_entry(args.questions, len(questions)),
         "languages": list(args.languages),
+        "split": args.split,
         "limit": args.limit,
         "today": manifest.as_of.isoformat(),
         "judge": args.judge,
