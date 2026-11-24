@@ -11,24 +11,12 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from qdrant_client import QdrantClient
-from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
-
-from src.llm import (
-    ChatModel,
-    LLMConfigError,
-    LLMError,
-    Reranker,
-    get_chat,
-    get_embedder,
-    get_reranker,
+from src.rag_engine.retrieval.factory import (
+    SERVER_ERRORS,
+    add_retriever_arguments,
+    retriever_from_args,
 )
-from src.rag_engine.retrieval.retriever import (
-    Models,
-    RetrievalResult,
-    Retriever,
-    RetrieverSettings,
-)
+from src.rag_engine.retrieval.retriever import RetrievalResult, RetrieverSettings
 from src.utils.logger import configure_logging
 
 PREVIEW_CHARS = 500
@@ -44,19 +32,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="One question per line, or a JSON list of strings / {question: ...}",
     )
-    target = parser.add_mutually_exclusive_group()
-    target.add_argument("--qdrant-url", default="http://localhost:6333")
-    target.add_argument("--qdrant-path", type=Path, help="Embedded Qdrant directory")
-    parser.add_argument("--query-profile", default="query", help="[chat.<name>]")
-    parser.add_argument("--embedding-profile", default="default")
-    parser.add_argument("--rerank-profile", default="default")
-    parser.add_argument(
-        "--no-llm", action="store_true", help="Read questions with rules only"
-    )
-    parser.add_argument("--no-rerank", action="store_true")
-    parser.add_argument(
-        "--llm-cache-dir", type=Path, help="Cache query-model replies here"
-    )
+    add_retriever_arguments(parser)
     parser.add_argument("--top-k", type=int, default=RetrieverSettings.top_k)
     parser.add_argument(
         "--context-tokens", type=int, default=RetrieverSettings.context_tokens
@@ -82,24 +58,6 @@ def load_questions(args: argparse.Namespace) -> list[str]:
         else:
             questions += [line.strip() for line in raw.splitlines() if line.strip()]
     return questions
-
-
-def optional_chat(args: argparse.Namespace) -> tuple[ChatModel | None, str | None]:
-    if args.no_llm:
-        return None, None
-    try:
-        return get_chat(args.query_profile, cache_dir=args.llm_cache_dir), None
-    except LLMConfigError as error:
-        return None, f"query model unavailable ({error}): rules"
-
-
-def optional_reranker(args: argparse.Namespace) -> tuple[Reranker | None, str | None]:
-    if args.no_rerank:
-        return None, None
-    try:
-        return get_reranker(args.rerank_profile), None
-    except LLMConfigError as error:
-        return None, f"reranker unavailable ({error})"
 
 
 def as_json(result: RetrievalResult) -> dict[str, Any]:
@@ -160,32 +118,16 @@ def main() -> int:
     if not questions:
         print("no question given", file=sys.stderr)
         return 2
-    client = (
-        QdrantClient(path=str(args.qdrant_path))
-        if args.qdrant_path
-        else QdrantClient(url=args.qdrant_url)
+    retriever = retriever_from_args(
+        args,
+        RetrieverSettings(top_k=args.top_k, context_tokens=args.context_tokens),
     )
-    chat, chat_note = optional_chat(args)
-    reranker, rerank_note = optional_reranker(args)
-    retriever = Retriever(
-        client,
-        Models(get_embedder(args.embedding_profile), chat, reranker),
-        settings=RetrieverSettings(
-            top_k=args.top_k, context_tokens=args.context_tokens
-        ),
-    )
-    retriever.notes += [n for n in (chat_note, rerank_note) if n]
     results: list[RetrievalResult] = []
     failed: list[dict[str, str]] = []
     for question in questions:
         try:
             results.append(retriever.retrieve(question))
-        except (
-            LLMError,
-            ResponseHandlingException,
-            UnexpectedResponse,
-            OSError,
-        ) as error:
+        except SERVER_ERRORS as error:
             # A server down for one question must not lose the others.
             failed.append(
                 {"question": question, "error": f"{type(error).__name__}: {error}"}

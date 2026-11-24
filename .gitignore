@@ -19,3 +19,7 @@ logs
 
 # Local Qdrant (docker volume)
 qdrant_storage/
+
+# Eval runs and model-reply caches (question sets under evals/sets are tracked)
+/evals/runs/
+/evals/cache/

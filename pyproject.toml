@@ -99,8 +99,8 @@ max-returns = 6
 strict = true
 
 [[tool.mypy.overrides]]
-# pyarrow, lxml and arelle ship no type information (no py.typed marker or stubs).
-module = ["pyarrow", "pyarrow.*", "lxml", "lxml.*", "arelle", "arelle.*"]
+# pyarrow, lxml, arelle and ranx ship no type information (no py.typed marker or stubs).
+module = ["pyarrow", "pyarrow.*", "lxml", "lxml.*", "arelle", "arelle.*", "ranx", "ranx.*"]
 ignore_missing_imports = true
 
 [tool.vulture]

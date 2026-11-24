@@ -110,6 +110,15 @@ class Candidate:
     final_score: float = 0.0
 
 
+@dataclass(frozen=True)
+class SearchUsed:
+    """A search as run: the filter left after relaxation (for eval)."""
+
+    corpus: str
+    collection: str
+    filter: SearchFilter
+
+
 @dataclass
 class RetrievalResult:
     question: str
@@ -122,6 +131,9 @@ class RetrievalResult:
     filters: dict[str, list[str]]
     notes: list[str] = field(default_factory=list)
     timings: dict[str, float] = field(default_factory=dict)
+    searches: list[SearchUsed] = field(default_factory=list)
+    # A configured reranker was not applied (failed or cooling down).
+    rerank_skipped: bool = False
 
     @property
     def context_tokens(self) -> int:
@@ -194,11 +206,12 @@ class Retriever:
         mark = time.perf_counter()
         planned = self._plan_searches(plan, notes)
         timings["filters_s"] = time.perf_counter() - mark
-        candidates, period_kept = self._candidates(
+        candidates, period_kept, used = self._candidates(
             plan, planned.searches, notes, timings
         )
+        pre_rank = {c.hit.point_id: i for i, c in enumerate(candidates)}
         mark = time.perf_counter()
-        candidates = self._rerank(plan, candidates, notes)
+        candidates, rerank_skipped = self._rerank(plan, candidates, notes)
         timings["rerank_s"] = time.perf_counter() - mark
         rule = YearRule(
             calendar=plan.calendar,
@@ -227,22 +240,14 @@ class Retriever:
             question=question,
             plan=plan,
             passages=passages,
-            ranking=[
-                {
-                    "chunk_id": c.hit.chunk_id,
-                    "duplicate_chunk_ids": list(c.hit.duplicates),
-                    "corpus": c.corpus,
-                    "fused_score": round(c.hit.score, 6),
-                    "rerank_score": c.rerank_score,
-                    "score": round(c.final_score, 6),
-                }
-                for c in candidates
-            ],
+            ranking=_ranking(candidates, pre_rank, {c.hit.point_id for c in selected}),
             companies=planned.companies,
             unresolved_companies=planned.unresolved,
             filters=planned.filters,
             notes=[*self.notes, *notes],
             timings={k: round(v, 3) for k, v in timings.items()},
+            searches=used,
+            rerank_skipped=rerank_skipped,
         )
         logger.info(
             "retrieval_completed",
@@ -289,9 +294,10 @@ class Retriever:
         searches: list[_Search],
         notes: list[str],
         timings: dict[str, float],
-    ) -> tuple[list[Candidate], bool]:
-        """Embed each distinct search text once, search, collapse same texts.
-        Also whether every search kept its period filter."""
+    ) -> tuple[list[Candidate], bool, list[SearchUsed]]:
+        """Embed each distinct search text once, search, collapse same texts
+        (fused order). Also whether every search kept its period filter, and
+        the filter each search ended with."""
 
         mark = time.perf_counter()
         texts = list(dict.fromkeys(s.text for s in searches))
@@ -308,9 +314,13 @@ class Retriever:
             self.settings.candidates // max(len(searches), 1), self.settings.top_k
         )
         period_kept = True
+        used: list[SearchUsed] = []
         for search in searches:
-            hits, relaxed, kept = self._search(
+            hits, relaxed, kept, scope = self._search(
                 search, vectors[search.text], plan, per_search
+            )
+            used.append(
+                SearchUsed(search.target.profile.name, search.target.collection, scope)
             )
             period_kept = period_kept and kept
             if relaxed:
@@ -324,7 +334,11 @@ class Retriever:
         if removed:
             notes.append(f"{removed} same-text candidates collapsed")
         timings["search_s"] = time.perf_counter() - mark
-        return [Candidate(corpus_of[h.point_id], h) for h in unique], period_kept
+        return (
+            [Candidate(corpus_of[h.point_id], h) for h in unique],
+            period_kept,
+            used,
+        )
 
     def _companies(
         self, target: Target, plan: QueryPlan
@@ -366,6 +380,7 @@ class Retriever:
                 plan.fiscal_years,
                 plan.fiscal_periods,
                 calendar=plan.calendar,
+                filed_months=plan.filed_months,
             )
             events = "8-K" in forms or "8k_event" in plan.topics
             full = replace(
@@ -459,7 +474,7 @@ class Retriever:
 
     def _search(
         self, search: _Search, dense: Sequence[float], plan: QueryPlan, limit: int
-    ) -> tuple[list[Hit], str | None, bool]:
+    ) -> tuple[list[Hit], str | None, bool, SearchFilter]:
         target, ladder = search.target, search.ladder
         sparse = query_vector(search.text)
         hits: list[Hit] = []
@@ -480,18 +495,21 @@ class Retriever:
             if len(hits) >= self.settings.min_results or step == len(ladder) - 1:
                 kept = scope.has_period or not ladder[0].has_period
                 if step == 0:
-                    return hits, None, kept
+                    return hits, None, kept, scope
                 dropped = _dropped(ladder[0], scope)
                 note = (
                     f"{target.profile.name} {','.join(scope.ciks) or 'all'}: "
                     f"{dropped} filter dropped ({len(hits)} chunks)"
                 )
-                return hits, note, kept
-        return hits, None, True
+                return hits, note, kept, scope
+        return hits, None, True, ladder[-1]
 
     def _rerank(
         self, plan: QueryPlan, candidates: list[Candidate], notes: list[str]
-    ) -> list[Candidate]:
+    ) -> tuple[list[Candidate], bool]:
+        """Candidates by rerank score (fused order without a reranker); also
+        whether a configured reranker was skipped (failed or cooling)."""
+
         cooling = time.monotonic() < self._rerank_retry_at
         if self.reranker is None or cooling or not candidates:
             if self.reranker is None or cooling:
@@ -500,7 +518,8 @@ class Retriever:
                     if cooling
                     else "no reranker: fused order"
                 )
-            return [replace(c, final_score=c.hit.score) for c in candidates]
+            fused = [replace(c, final_score=c.hit.score) for c in candidates]
+            return fused, self.reranker is not None and cooling
         scored: list[Candidate] = []
         try:
             for corpus in dict.fromkeys(c.corpus for c in candidates):
@@ -533,7 +552,7 @@ class Retriever:
             )
             logger.warning("retrieval_rerank_failed", error=str(error)[:300])
             self._rerank_retry_at = time.monotonic() + cooldown
-            return [replace(c, final_score=c.hit.score) for c in candidates]
+            return [replace(c, final_score=c.hit.score) for c in candidates], True
         # Candidates a `top_n` reranker left out rank below every scored one.
         reranked = {c.hit.point_id for c in scored}
         floor = min((c.final_score for c in scored), default=0.0) - 1.0
@@ -544,7 +563,7 @@ class Retriever:
             )
         ]
         scored.sort(key=lambda c: -c.final_score)
-        return scored
+        return scored, False
 
     def _recency(
         self,
@@ -614,6 +633,27 @@ class Retriever:
                 passages.append(replace(passage, rank=best, score=round(score, 6)))
         passages.sort(key=lambda p: p.rank)
         return passages
+
+
+def _ranking(
+    candidates: Sequence[Candidate], pre_rank: Mapping[str, int], selected: set[str]
+) -> list[dict[str, Any]]:
+    """Candidates best first, with their position in the fused order before
+    rerank (`pre_rank`) and whether they are among the delivered top k."""
+
+    return [
+        {
+            "chunk_id": c.hit.chunk_id,
+            "duplicate_chunk_ids": list(c.hit.duplicates),
+            "corpus": c.corpus,
+            "fused_score": round(c.hit.score, 6),
+            "rerank_score": c.rerank_score,
+            "score": round(c.final_score, 6),
+            "pre_rank": pre_rank[c.hit.point_id],
+            "selected": c.hit.point_id in selected,
+        }
+        for c in candidates
+    ]
 
 
 def _newness(candidates: Sequence[Candidate]) -> dict[str, float]:
@@ -734,6 +774,8 @@ def _describe(
         found.append(f"fiscal_year {', '.join(map(str, plan.fiscal_years))}")
     if plan.fiscal_periods:
         found.append(f"fiscal_period {', '.join(plan.fiscal_periods)}")
+    if plan.filed_months:
+        found.append(f"filed in {', '.join(plan.filed_months)}")
     if plan.forms:
         found.append(f"form {', '.join(plan.forms)}")
     if plan.topics:

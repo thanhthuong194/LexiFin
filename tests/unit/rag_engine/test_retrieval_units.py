@@ -186,6 +186,12 @@ def test_analyze_query_with_model_and_fallbacks() -> None:
         ("Apple Q1 and Q3 2022", "en", (2022,), ("Q1", "Q3"), False),
         ("Apple Q2 FY24 revenue", "en", (2024,), ("Q2",), False),
         ("AAPL current liabilities now", "en", (), (), False),
+        ("Doanh thu quý thứ hai năm 2024 của Apple?", "vi", (2024,), ("Q2",), False),
+        ("Microsoft second-quarter 2024 revenue", "en", (2024,), ("Q2",), False),
+        ("Lợi nhuận Apple tài khóa 2023", "vi", (2023,), ("FY",), False),
+        ("Votes at Apple's 2025 annual meeting", "en", (2025,), (), False),
+        ("Apple annual revenue 2024", "en", (2024,), ("FY",), False),
+        ("Doanh thu hàng năm 2024 của Apple", "vi", (2024,), ("FY",), False),
     ],
 )
 def test_rule_plan(
@@ -202,6 +208,417 @@ def test_rule_plan(
         periods,
     )
     assert plan.wants_latest is latest
+
+
+GOOGL_H1_EN = "What diluted EPS did GOOGL post for the first half of 2025?"
+GOOGL_H1_VI = "EPS pha loãng của GOOGL trong 6 tháng đầu năm 2025 là bao nhiêu?"
+SBC_EN = (
+    "How much stock-based compensation did NVIDIA record in the first half of "
+    "fiscal 2027 (six months to July 26, 2026), and Apple in the first nine months "
+    "of fiscal 2026 (to June 27, 2026)?"
+)
+SBC_VI = (
+    "NVIDIA ghi nhận bao nhiêu chi phí thù lao bằng cổ phiếu trong nửa đầu năm tài "
+    "chính 2027 (sáu tháng đến 26/7/2026), và Apple trong chín tháng đầu năm tài "
+    "chính 2026 (đến 27/6/2026)?"
+)
+GOODWILL_EN = (
+    "What goodwill did GOOGL carry on its balance sheet at September 30, 2022, "
+    "compared with September 30, 2021?"
+)
+GOODWILL_VI = (
+    "Lợi thế thương mại (goodwill) của GOOGL tại ngày 30/9/2022 là bao nhiêu, so "
+    "với ngày 30/9/2021?"
+)
+LETTER_EN = (
+    "In the 2021 shareholder letter filed with an April 2022 8-K, how did Amazon's "
+    "workplace injury rates compare with warehousing and delivery peers?"
+)
+LETTER_VI = (
+    "Trong thư gửi cổ đông năm 2021 (nộp kèm 8-K tháng 4/2022), tỷ lệ tai nạn lao "
+    "động của Amazon so với các công ty cùng ngành kho bãi và giao hàng ra sao?"
+)
+
+NINE_MONTHS_COMPARED = (
+    "Apple revenue for the nine months ended September 30, 2024 compared to 2023"
+)
+ABOUT_EN = (
+    "How do Amazon and Microsoft describe themselves in the 'About' section of "
+    "their July 2026 earnings press releases?"
+)
+ABOUT_VI = (
+    "Amazon và Microsoft tự mô tả thế nào trong phần “About” của thông cáo báo chí "
+    "công bố kết quả kinh doanh tháng 7/2026?"
+)
+FULFILLMENT_EN = (
+    "How much did Amazon spend on fulfillment in the September 2022 quarter versus "
+    "the September 2020 quarter?"
+)
+FULFILLMENT_VI = (
+    "Amazon chi bao nhiêu cho fulfillment trong quý kết thúc tháng 9/2022 so với "
+    "quý kết thúc tháng 9/2020?"
+)
+
+
+@pytest.mark.parametrize(
+    ("question", "years", "periods", "calendar", "filed"),
+    [
+        # Partial years: the year-to-date figures sit in that quarter's 10-Q.
+        (GOOGL_H1_EN, (2025,), ("Q2",), True, ()),
+        (GOOGL_H1_VI, (2025,), ("Q2",), True, ()),
+        ("Apple H1 2024 revenue", (2024,), ("Q2",), True, ()),
+        ("Doanh thu nửa đầu năm 2024 của Apple", (2024,), ("Q2",), True, ()),
+        ("Apple revenue for the nine months of 2024", (2024,), ("Q3",), True, ()),
+        ("Doanh thu 9 tháng đầu năm 2024 của Apple", (2024,), ("Q3",), True, ()),
+        (SBC_EN, (2026, 2027), ("Q2",), True, ()),
+        (SBC_VI, (2026, 2027), ("Q2",), True, ()),
+        # A partial year ended on a date: that date's nearest calendar quarter.
+        ("Apple revenue for the six months ended March 30, 2024", (2024,), ("Q1",),
+         True, ()),
+        ("Doanh thu của Apple trong sáu tháng kết thúc ngày 30/3/2024", (2024,),
+         ("Q1",), True, ()),
+        ("Microsoft revenue for the nine months ended March 31, 2025", (2025,),
+         ("Q1",), True, ()),
+        ("NVIDIA revenue for the six months ended July 27, 2025", (2025,), ("Q2",),
+         True, ()),
+        # Bare comparative years: the same partial year, no FY.
+        ("Apple revenue for the six months ended June 30, 2024 and 2023",
+         (2023, 2024), ("Q2",), True, ()),
+        ("Doanh thu 6 tháng kết thúc ngày 30/6/2024 và 2023", (2023, 2024), ("Q2",),
+         True, ()),
+        (NINE_MONTHS_COMPARED, (2023, 2024), ("Q3",), True, ()),
+        ("Apple 2Q24 revenue", (2024,), ("Q2",), False, ()),
+        # Dates: the calendar quarter holding them.
+        (GOODWILL_EN, (2021, 2022), ("Q3",), True, ()),
+        (GOODWILL_VI, (2021, 2022), ("Q3",), True, ()),
+        ("Apple cash as of 2023-12-31", (2023,), ("Q4",), True, ()),
+        ("Apple cash at 3/31/2024", (2024,), ("Q1",), True, ()),
+        ("Tiền mặt của Apple ngày 31 tháng 3 năm 2024", (2024,), ("Q1",), True, ()),
+        # A date's quarter is the calendar one whose end is nearest, even when
+        # "fiscal" is said; a date without a year is no period.
+        ("Apple cash at 31 March 2024, fiscal basis", (2024,), ("Q1",), True, ()),
+        ("Apple cash at April 27, 2024", (2024,), ("Q1",), True, ()),
+        ("Tiền mặt của Apple tại ngày 27/4/2024", (2024,), ("Q1",), True, ()),
+        ("NVIDIA inventory as of January 26, 2025", (2024,), ("Q4",), True, ()),
+        ("Hàng tồn kho của NVIDIA tại ngày 26/1/2025", (2024,), ("Q4",), True, ()),
+        ("Apple cash as of December 31, 2024", (2024,), ("Q4",), True, ()),
+        ("Microsoft cash at October 31, 2024", (2024,), ("Q3",), True, ()),
+        # A year-end date: the whole (fiscal) year.
+        ("Apple net sales for the fiscal year ended September 28, 2024", (2024,),
+         ("FY",), False, ()),
+        ("Doanh thu năm tài chính kết thúc ngày 28/9/2024 của Apple", (2024,),
+         ("FY",), False, ()),
+        ("NVIDIA results for the fiscal year ended January 26, 2025", (2025,),
+         ("FY",), False, ()),
+        ("Apple 10-K for the fiscal year ended September 30, 2023", (2023,),
+         ("FY",), False, ()),
+        # A full-year month range: the calendar year.
+        ("Apple revenue January-December 2024", (2024,), ("FY",), True, ()),
+        ("Doanh thu Apple tháng 1 - tháng 12/2024", (2024,), ("FY",), True, ()),
+        # A partial year beside another year asked keeps that year.
+        ("Alphabet revenue H1 FY2025 vs FY2024", (2024, 2025), ("Q2", "FY"), False,
+         ()),
+        ("Doanh thu 6 tháng đầu năm 2024 so với năm 2023 của Apple", (2023, 2024),
+         ("Q2", "FY"), True, ()),
+        ("Apple revenue Q1 2025 and first half 2025", (2025,), ("Q1", "Q2"), False,
+         ()),
+        ("Doanh thu quý 1/2025 và 6 tháng đầu năm 2025 của Apple", (2025,),
+         ("Q1", "Q2"), False, ()),
+        ("Apple 9M 2025 revenue", (2025,), ("Q3",), True, ()),
+        ("Apple revenue for the quarter ended March 2023", (2023,), ("Q1",), True, ()),
+        # A month range is a calendar period, not a filing month.
+        ("Alpha net sales October-December 2024", (2024,), ("Q4",), True, ()),
+        ("Doanh thu tháng 7 - tháng 9/2025 của Apple", (2025,), ("Q3",), True, ()),
+        # A month next to "quarter"/"quý" ends that quarter.
+        (FULFILLMENT_EN, (2020, 2022), ("Q3",), True, ()),
+        (FULFILLMENT_VI, (2020, 2022), ("Q3",), True, ()),
+        ("Apple revenue in the December 2023 quarter", (2023,), ("Q4",), True, ()),
+        ("Doanh thu của Apple trong quý tháng 12/2023", (2023,), ("Q4",), True, ()),
+        ("Apple revenue in the June quarter of 2024", (2024,), ("Q2",), True, ()),
+        ("Apple revenue for the quarter ending September 2022", (2022,), ("Q3",),
+         True, ()),
+        # A bare month outside a filing question: neither period nor filing.
+        ("Apple revenue in March 2023", (2023,), (), True, ()),
+        ("Doanh thu của Apple tháng 3/2023", (2023,), (), True, ()),
+        # Filing months: an asked 8-K is pinned by its month alone.
+        (LETTER_EN, (), (), False, ("2022-04",)),
+        (LETTER_VI, (), (), False, ("2022-04",)),
+        ("What did Apple's March 2023 bylaw amendment change?", (), (), False,
+         ("2023-03",)),
+        ("Điều lệ sửa đổi tháng 3 năm 2023 của Apple thay đổi gì?", (), (), False,
+         ("2023-03",)),
+        ("Báo cáo 8-K nộp tháng 1/2025 của Apple nói gì?", (), (), False,
+         ("2025-01",)),
+        ("Microsoft 8-K filed on April 25, 2023", (), (), False, ("2023-04",)),
+        ("Microsoft's September 2024 8-K", (), (), False, ("2024-09",)),
+        ("Microsoft 8-K Item 5.02 May 2024", (), (), False, ("2024-05",)),
+        # A dated announcement is a filing month.
+        ("Apple announced a buyback on May 2, 2024", (), (), False, ("2024-05",)),
+        ("Apple công bố mua lại cổ phiếu ngày 2/5/2024", (), (), False,
+         ("2024-05",)),
+        ("Báo cáo 8-K tháng 9/2024 của Microsoft", (), (), False, ("2024-09",)),
+        # A year asked beside the filing month stays.
+        ("Apple 2024 revenue in the 10-K filed in November 2024", (2024,), (), True,
+         ("2024-11",)),
+        # A month qualifying a release dates it (t0051).
+        (ABOUT_EN, (), (), False, ("2026-07",)),
+        (ABOUT_VI, (), (), False, ("2026-07",)),
+        ("Apple's press release of July 2026", (), (), False, ("2026-07",)),
+        ("Thông cáo báo chí tháng 7/2026 của Apple", (), (), False, ("2026-07",)),
+        ("Apple's July 2026 earnings release", (), (), False, ("2026-07",)),
+        # A release reports periods: its bare month is no filing month.
+        ("What did Apple's press release say about revenue in September 2024?",
+         (2024,), (), True, ()),
+        ("Thông cáo báo chí của Apple nói gì về doanh thu tháng 9/2024?", (2024,),
+         (), True, ()),
+        # Not a date: a quarter written with a slash, a day-month of a date.
+        ("Doanh thu quý 2/2024 của Apple?", (2024,), ("Q2",), False, ()),
+        ("Lợi nhuận ngày 6 tháng 9 năm 2022", (2022,), ("Q3",), True, ()),
+    ],
+)  # fmt: skip
+def test_rule_plan_partial_years_dates_and_filing_months(
+    question: str,
+    years: tuple[int, ...],
+    periods: tuple[str, ...],
+    calendar: bool,
+    filed: tuple[str, ...],
+) -> None:
+    plan = rule_plan(question, CORPORA)
+    assert (plan.fiscal_years, plan.fiscal_periods, plan.calendar) == (
+        years,
+        periods,
+        calendar,
+    )
+    assert plan.filed_months == filed
+    assert not plan.wants_latest and plan.has_period
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Apple revenue over the last six months",
+        "Apple plans for the next 6 months",
+        "Doanh thu Apple 6 tháng qua",
+        "Kế hoạch của Apple trong 6 tháng tới",
+        "Apple results in the past nine months",
+        "Apple spent $9M and $6M on it",
+        "Apple announce on September 6",
+        "Apple công bố ngày 6 tháng 9",
+        "Apple cash at March 31",
+    ],
+)
+def test_rule_plan_reads_no_period_from_relative_or_yearless_words(
+    question: str,
+) -> None:
+    plan = rule_plan(question, CORPORA)
+    assert (plan.fiscal_years, plan.fiscal_periods, plan.filed_months) == ((), (), ())
+
+
+def test_rule_plan_reads_a_dated_vietnamese_day_without_ngay() -> None:
+    plan = rule_plan("Sự kiện 6 tháng 9 năm 2024 của Apple", CORPORA)
+    # A date, not "six months".
+    assert (plan.fiscal_years, plan.fiscal_periods) == ((2024,), ("Q3",))
+
+
+@pytest.mark.parametrize(
+    ("given", "periods", "years"),
+    [
+        (["Q2 2024", "Q2 2025"], ("Q2",), (2024, 2025)),
+        (["FY2026"], ("FY",), (2026,)),
+        (["FY 2025"], ("FY",), (2025,)),
+        (["Q3 FY24"], ("Q3",), (2024,)),
+        (["2024Q1", "q4-2023"], ("Q1", "Q4"), (2023, 2024)),
+        (["H1 2025"], ("Q2",), (2025,)),
+        (["9M 2025"], ("Q3",), (2025,)),
+        (["2Q24"], ("Q2",), (2024,)),
+        (["second quarter 2024"], ("Q2",), (2024,)),
+        (["Quarter 2"], ("Q2",), ()),
+        (["FQ3 2025"], ("Q3",), (2025,)),
+    ],
+)
+def test_checked_plan_parses_periods_with_years(
+    given: list[str], periods: tuple[str, ...], years: tuple[int, ...]
+) -> None:
+    plan = checked_plan("q", _analysis(fiscal_years=[], fiscal_periods=given), CORPORA)
+    assert (plan.fiscal_periods, plan.fiscal_years) == (periods, years)
+    assert not any("periods dropped" in note for note in plan.notes)
+
+
+def test_checked_plan_drops_unreadable_periods_and_months() -> None:
+    plan = checked_plan(
+        "q",
+        _analysis(fiscal_periods=["Q2", "sometime"], filed_months=["2023-13", "x"]),
+        CORPORA,
+    )
+    assert plan.fiscal_periods == ("Q2",) and plan.filed_months == ()
+    assert any("unknown periods dropped: ['sometime']" in n for n in plan.notes)
+    assert any("unknown filed months dropped" in n for n in plan.notes)
+
+
+@pytest.mark.parametrize(
+    ("question", "given", "basis", "expected"),
+    [
+        # No period or the spanned quarters -> the quarter ending the span.
+        (GOOGL_H1_EN, [], "calendar", (("Q2",), (2025,), True)),
+        (GOOGL_H1_VI, ["Q1", "Q2"], "calendar", (("Q2",), (2025,), True)),
+        # Ended on stated dates: their calendar quarter (NVIDIA July 26, 2026
+        # and Apple June 27, 2026 are both nearest June 30).
+        (SBC_EN, ["FY2027", "FY2026"], "fiscal", (("Q2",), (2026, 2027), True)),
+        (SBC_VI, ["FY2027", "FY2026"], "fiscal", (("Q2",), (2026, 2027), True)),
+        ("Apple revenue for the six months ended March 30, 2024", ["Q2"], "fiscal",
+         (("Q1",), (2024,), True)),
+        ("Doanh thu của Apple trong sáu tháng kết thúc ngày 30/3/2024", [],
+         "fiscal", (("Q1",), (2024,), True)),
+        ("Microsoft revenue for the nine months ended March 31, 2025", ["Q3"],
+         "calendar", (("Q1",), (2025,), True)),
+        ("Doanh thu của Microsoft trong chín tháng kết thúc ngày 31/3/2025", ["Q3"],
+         "fiscal", (("Q1",), (2025,), True)),
+        # A whole year asked beside the half stays.
+        ("Alphabet revenue in the first half of 2025 vs full year 2024",
+         ["Q2", "FY"], "calendar", (("Q2", "FY"), (2024, 2025), True)),
+        # Other asked periods are merged with the partial year, not replaced.
+        ("Alphabet revenue H1 FY2025 vs FY2024", ["FY"], "fiscal", (("FY", "Q2"), (2024, 2025), False)),
+        ("Doanh thu nửa đầu năm tài chính 2025 so với năm tài chính 2024", ["FY"],
+         "fiscal", (("FY", "Q2"), (2024, 2025), False)),
+        ("Apple revenue for the nine months ended March 31, 2025 vs fiscal 2024",
+         ["FY"], "fiscal", (("FY", "Q1"), (2024, 2025), True)),
+        ("Doanh thu 6 tháng đầu năm 2024 so với năm 2023", ["FY"], "calendar",
+         (("FY", "Q2"), (2023, 2024), True)),
+        ("Apple revenue Q1 2025 and first half 2025", ["Q1", "Q2"], "fiscal",
+         (("Q1", "Q2"), (2025,), False)),
+        ("Doanh thu quý 1/2025 và 6 tháng đầu năm 2025", ["Q1"], "fiscal",
+         (("Q1", "Q2"), (2025,), False)),
+        # Bare comparative years repeat the partial year: no FY.
+        ("Apple revenue for the six months ended June 30, 2024 and 2023",
+         ["Q2", "FY"], "calendar", (("Q2",), (2023, 2024), True)),
+        ("Doanh thu 6 tháng kết thúc ngày 30/6/2024 và 2023", ["Q2", "FY"],
+         "calendar", (("Q2",), (2023, 2024), True)),
+    ],
+)  # fmt: skip
+def test_checked_plan_reads_partial_years(
+    question: str,
+    given: list[str],
+    basis: str,
+    expected: tuple[tuple[str, ...], tuple[int, ...], bool],
+) -> None:
+    years = list(expected[1])
+    analysis = _analysis(fiscal_years=years, fiscal_periods=given, period_basis=basis)
+    plan = checked_plan(question, analysis, CORPORA)
+    assert (plan.fiscal_periods, plan.fiscal_years, plan.calendar) == expected
+
+
+def test_checked_plan_reads_dates() -> None:
+    for question in (GOODWILL_EN, GOODWILL_VI):
+        analysis = _analysis(
+            fiscal_years=[2021, 2022], fiscal_periods=[], period_basis="fiscal"
+        )
+        plan = checked_plan(question, analysis, CORPORA)
+        assert (plan.fiscal_years, plan.fiscal_periods) == ((2021, 2022), ("Q3",))
+        assert plan.calendar, question  # a date is a calendar one
+        assert any("dates" in note for note in plan.notes)
+    # The model's own quarter wins over the dates.
+    analysis = _analysis(fiscal_years=[2021, 2022], fiscal_periods=["Q3"])
+    plan = checked_plan(GOODWILL_EN, analysis, CORPORA)
+    assert plan.fiscal_periods == ("Q3",) and not plan.calendar
+    # A year the model missed comes from the dates.
+    plan = checked_plan(
+        "Apple cash at 3/31/2024?", _analysis(fiscal_years=[], fiscal_periods=[]),
+        CORPORA,
+    )  # fmt: skip
+    assert (plan.fiscal_years, plan.fiscal_periods) == ((2024,), ("Q1",))
+
+
+def test_checked_plan_reads_filing_months() -> None:
+    for question in (LETTER_EN, LETTER_VI):
+        analysis = _analysis(
+            fiscal_years=[2021], fiscal_periods=[], forms=["8-K"], filed_months=[]
+        )
+        plan = checked_plan(question, analysis, CORPORA)
+        assert plan.filed_months == ("2022-04",), question
+        assert (plan.fiscal_years, plan.fiscal_periods) == ((), ())
+        assert plan.forms == ("8-K",) and plan.has_period
+    bylaws = "What did Apple's March 2023 bylaw amendment change?"
+    analysis = _analysis(
+        fiscal_years=[2023], fiscal_periods=[], forms=[], filed_months=["2023-3"],
+        wants_latest=True,
+    )  # fmt: skip
+    plan = checked_plan(bylaws, analysis, CORPORA)
+    # 2023 only dates the filing.
+    assert (plan.filed_months, plan.fiscal_years) == (("2023-03",), ())
+    assert not plan.wants_latest
+    for given in (["04/2022"], ["April 2022"], ["2022/4"], ["2022-04-14"],
+                  ["Apr-2022"], ["tháng 4/2022"]):  # fmt: skip
+        analysis = _analysis(fiscal_years=[], fiscal_periods=[], filed_months=given)
+        plan = checked_plan("Apple 8-K", analysis, CORPORA)
+        assert plan.filed_months == ("2022-04",)
+    # Outside a filing question the model's month and years are no filing.
+    for question in (
+        "Apple revenue in the September 2022 quarter",
+        "Doanh thu của Apple trong quý tháng 9/2022",
+    ):
+        analysis = _analysis(
+            fiscal_years=[2022], fiscal_periods=["Q3"], period_basis="calendar",
+            forms=[], filed_months=["2022-09"],
+        )  # fmt: skip
+        plan = checked_plan(question, analysis, CORPORA)
+        assert plan.filed_months == () and plan.fiscal_years == (2022,), question
+        assert plan.fiscal_periods == ("Q3",)
+
+
+def test_checked_plan_reads_year_ends_and_keeps_relative_recency() -> None:
+    for question in (
+        "Apple net sales for the fiscal year ended September 28, 2024",
+        "Doanh thu năm tài chính kết thúc ngày 28/9/2024 của Apple",
+    ):
+        analysis = _analysis(fiscal_years=[2024], fiscal_periods=["Q3"])
+        plan = checked_plan(question, analysis, CORPORA)
+        assert (plan.fiscal_years, plan.fiscal_periods) == ((2024,), ("FY",))
+        assert not plan.calendar
+    for question in (
+        "Apple revenue over the last six months",
+        "Doanh thu Apple 6 tháng qua",
+    ):
+        analysis = _analysis(fiscal_years=[], fiscal_periods=[], wants_latest=True)
+        plan = checked_plan(question, analysis, CORPORA)
+        assert plan.fiscal_periods == () and plan.wants_latest
+    # A partial year the model asked with recency still reads its quarter
+    # only when anchored by a year; otherwise recency stays.
+    analysis = _analysis(fiscal_years=[], fiscal_periods=[], wants_latest=True)
+    plan = checked_plan("Apple first half results, latest", analysis, CORPORA)
+    assert plan.fiscal_periods == () and plan.wants_latest
+
+
+def test_checked_plan_keeps_a_release_month_out_of_filings() -> None:
+    for question in (
+        "What did Apple's press release say about revenue in September 2024?",
+        "Thông cáo báo chí của Apple nói gì về doanh thu tháng 9/2024?",
+    ):
+        analysis = _analysis(
+            fiscal_years=[2024], fiscal_periods=[], forms=[], filed_months=["2024-09"]
+        )
+        plan = checked_plan(question, analysis, CORPORA)
+        assert plan.filed_months == () and plan.fiscal_years == (2024,), question
+    for question in (
+        "Apple announced a buyback on May 2, 2024",
+        "Apple công bố mua lại cổ phiếu ngày 2/5/2024",
+    ):
+        analysis = _analysis(fiscal_years=[2024], fiscal_periods=["Q2"], forms=[])
+        plan = checked_plan(question, analysis, CORPORA)
+        # The model's own period stays; the filing month joins it.
+        assert plan.filed_months == ("2024-05",), question
+        assert plan.fiscal_periods == ("Q2",)
+
+
+def test_system_prompt_explains_periods() -> None:
+    chat = FakeChat([reply(_analysis().model_dump_json())])
+    analyze_query("q", CORPORA, chat, TODAY)
+    _, options = chat.calls[0]
+    assert options is not None and options.system is not None
+    for phrase in ("6 tháng đầu năm", "nine months", "tại ngày 30/9/2022",
+                   "never with a year", "filed_months", "2022-04"):  # fmt: skip
+        assert phrase in options.system, phrase
+    assert options.output_schema is not None
+    assert "filed_months" in options.output_schema.json_schema["required"]
 
 
 def _hit(point: str, score: float, text: str, filed: str, cik: str = "1") -> Hit:
@@ -324,3 +741,22 @@ def test_multiword_first_word_names_at_sentence_start() -> None:
     assert [c.cik for c in index.find_in_text("First quarter revenue of Apple?")] == [
         "0000320193"
     ]
+
+
+def test_ranking_marks_pre_rank_and_selected() -> None:
+    from src.rag_engine.retrieval.retriever import Candidate, _ranking
+
+    def cand(point: str, fused: float, final: float) -> Candidate:
+        hit = Hit(point, fused, {"chunk_id": f"c-{point}"}, duplicates=("d",))
+        return Candidate("sec_filings", hit, rerank_score=final, final_score=final)
+
+    fused = [cand("a", 0.9, 0.1), cand("b", 0.5, 0.8), cand("c", 0.2, 0.5)]
+    pre_rank = {c.hit.point_id: i for i, c in enumerate(fused)}
+    final = sorted(fused, key=lambda c: -c.final_score)
+    rows = _ranking(final, pre_rank, {"b"})
+    assert [(r["chunk_id"], r["pre_rank"], r["selected"]) for r in rows] == [
+        ("c-b", 1, True),
+        ("c-c", 2, False),
+        ("c-a", 0, False),
+    ]
+    assert rows[0]["duplicate_chunk_ids"] == ["d"]

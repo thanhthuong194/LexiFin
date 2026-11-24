@@ -1,0 +1,137 @@
+{
+  "tasks": 100,
+  "seed": 1,
+  "question_type": {
+    "compare_companies": 8,
+    "compare_periods": 8,
+    "fact": 20,
+    "list": 8,
+    "multi_hop": 4,
+    "numeric": 20,
+    "summary": 6,
+    "table_lookup": 12,
+    "unanswerable": 14
+  },
+  "data_kind": {
+    "none": 14,
+    "table": 23,
+    "text": 43,
+    "xbrl": 20
+  },
+  "persona": {
+    "Vietnamese retail investor": 17,
+    "compliance officer": 16,
+    "equity analyst": 17,
+    "finance student": 15,
+    "financial journalist": 17,
+    "retail investor": 18
+  },
+  "mention_style": {
+    "name": 38,
+    "nickname": 14,
+    "ticker": 48
+  },
+  "company": {
+    "AAPL": 21,
+    "AMZN": 20,
+    "GOOG": 20,
+    "MSFT": 21,
+    "NVDA": 21
+  },
+  "form": {
+    "10-K": 38,
+    "10-Q": 35,
+    "8-K": 13
+  },
+  "document_type": {
+    "10-K": 38,
+    "10-Q": 35,
+    "8-K": 7,
+    "EX-99.01": 1,
+    "EX-99.1": 6,
+    "EX-99.2": 1
+  },
+  "section_topic": {
+    "8k_event": 7,
+    "business": 7,
+    "controls": 3,
+    "cybersecurity": 3,
+    "ex99": 7,
+    "exhibits": 2,
+    "financial_statements": 27,
+    "governance": 1,
+    "legal_proceedings": 4,
+    "market_equity": 3,
+    "market_risk": 3,
+    "mdna": 10,
+    "other": 3,
+    "properties": 2,
+    "risk_factors": 7
+  },
+  "chunk_kind": {
+    "table": 43,
+    "text": 43
+  },
+  "fiscal_year": {
+    "2021": 12,
+    "2022": 15,
+    "2023": 12,
+    "2024": 15,
+    "2025": 12,
+    "2026": 11,
+    "2027": 3
+  },
+  "fiscal_period": {
+    "FY": 38,
+    "Q1": 12,
+    "Q2": 11,
+    "Q3": 13
+  },
+  "part": {
+    "1/2": 11,
+    "1/3": 1,
+    "1/4": 1,
+    "2/2": 14,
+    "2/3": 4,
+    "2/4": 1,
+    "3/3": 6,
+    "3/4": 1,
+    "4/4": 1,
+    "5/5": 1,
+    "whole": 47
+  },
+  "concept": {
+    "AllocatedShareBasedCompensationExpense": 1,
+    "Assets": 1,
+    "CostOfRevenue": 1,
+    "EarningsPerShareDiluted": 1,
+    "GrossProfit": 1,
+    "IncomeTaxExpenseBenefit": 1,
+    "InventoryNet": 1,
+    "Liabilities": 1,
+    "LongTermDebtNoncurrent": 1,
+    "NetCashProvidedByUsedInOperatingActivities": 1,
+    "NetIncomeLoss": 1,
+    "OperatingExpenses": 1,
+    "OperatingIncomeLoss": 1,
+    "PaymentsForRepurchaseOfCommonStock": 1,
+    "PaymentsOfDividends": 1,
+    "PaymentsToAcquirePropertyPlantAndEquipment": 1,
+    "ResearchAndDevelopmentExpense": 1,
+    "RevenueFromContractWithCustomerExcludingAssessedTax": 1,
+    "ShareBasedCompensation": 1,
+    "StockholdersEquity": 1
+  },
+  "pair_kind": {
+    "8k_exhibit": 1,
+    "mdna_note": 1,
+    "note_ref": 2,
+    "table": 9,
+    "text": 7
+  },
+  "reason": {
+    "company_outside_corpus": 5,
+    "period_not_covered": 5,
+    "topic_absent": 4
+  }
+}
