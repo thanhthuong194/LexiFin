@@ -712,11 +712,12 @@ _RELEASE_BEFORE = re.compile(
     re.IGNORECASE,
 )
 # A question about an 8-K or an event: a bare month + year dates its filing
-# ("March 2023 bylaw amendment"). Not "press release": a release reports
-# periods ("revenue in September 2024").
+# ("March 2023 bylaw amendment", "January 2026 deal"). Not "press release":
+# a release reports periods ("revenue in September 2024").
 _EVENT_TOPIC = re.compile(
     r"\b8-?ks?\b|current report|báo cáo hiện hành|\bbylaws?\b|điều lệ|\bamend|"
-    r"sửa đổi|\bappoint|bổ nhiệm|\bresign|từ nhiệm|từ chức",
+    r"sửa đổi|\bappoint|bổ nhiệm|\bresign|từ nhiệm|từ chức|\bdeals?\b|\bacqui|"
+    r"\bmergers?\b|\bdivest|thương vụ|sáp nhập|thâu tóm",
     re.IGNORECASE,
 )
 # Any filing or event wording: only then can a model's month be a filing's.

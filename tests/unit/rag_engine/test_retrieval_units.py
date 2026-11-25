@@ -482,7 +482,7 @@ FULFILLMENT_VI = (
         ("Apple notes maturing in March 2030", (2030,), (), True, ()),
         ("Apple revenue in March and June 2023", (2023,), ("Q2",), True, ()),
         # Beside another year the month is context: only its year counts.
-        ("The merger closed in March 2022, what was revenue in 2023?",
+        ("The plant opened in March 2022, what was revenue in 2023?",
          (2022, 2023), (), True, ()),
         ("Apple repurchases in February 2022 and in fiscal 2021", (2021, 2022),
          ("FY",), False, ()),
@@ -498,6 +498,11 @@ FULFILLMENT_VI = (
         ("Microsoft 8-K filed on April 25, 2023", (), (), False, ("2023-04",)),
         ("Microsoft's September 2024 8-K", (), (), False, ("2024-09",)),
         ("Microsoft 8-Ks from May 2024", (), (), False, ("2024-05",)),
+        # A deal's month dates its 8-K (t0078); a buyback's is a period.
+        ("What stake did MKC hold after its January 2026 deal?", (), (), False,
+         ("2026-01",)),
+        ("MKC nắm bao nhiêu phần sau thương vụ hồi tháng 1 năm 2026?", (), (),
+         False, ("2026-01",)),
         ("Microsoft 8-K Item 5.02 May 2024", (), (), False, ("2024-05",)),
         # A dated announcement is a filing month.
         ("Apple announced a buyback on May 2, 2024", (), (), False, ("2024-05",)),
