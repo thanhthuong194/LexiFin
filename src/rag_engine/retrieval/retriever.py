@@ -343,22 +343,11 @@ class Retriever:
     def _companies(
         self, target: Target, plan: QueryPlan
     ) -> tuple[list[Company], list[str]]:
-        found: dict[str, Company] = {}
-        missing: list[str] = []
-        for mention in plan.companies:
-            company = target.companies.resolve(mention.name, mention.ticker)
-            if company is None:
-                missing.append(
-                    f"{mention.name} ({mention.ticker})"
-                    if mention.ticker
-                    else mention.name
-                )
-            else:
-                found.setdefault(company.cik, company)
         if plan.source == "rules":
-            for company in target.companies.find_in_text(plan.question):
-                found.setdefault(company.cik, company)
-        return list(found.values()), missing
+            return target.companies.find_in_text(plan.question), []
+        return target.companies.resolve_in_question(
+            plan.question, ((m.name, m.ticker) for m in plan.companies)
+        )
 
     def _scopes(
         self, target: Target, plan: QueryPlan, companies: Sequence[Company]

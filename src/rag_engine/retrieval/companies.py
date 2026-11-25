@@ -4,7 +4,9 @@ The query model names companies the way filers do ("Alphabet Inc.", GOOGL)
 and this module checks them against the companies the collection really
 holds (`indexing/companies.py`): by ticker, then by normalized name, then by
 a unique whole-word prefix ("Meta" -> "Meta Platforms"). Without a query
-model, `find_in_text` spots tickers and names in the question itself.
+model, `find_in_text` spots tickers and names in the question itself; with
+one, `resolve_in_question` lets tickers the question writes overrule the
+model's guesses.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import Any, NamedTuple
 
 from qdrant_client import QdrantClient
 
@@ -40,7 +42,9 @@ _WORD_TICKERS = frozenset(
         "AI", "CPU", "EPS", "FDS", "TECH", "FIX", "LIN", "OTIS", "WELL", "BALL",
         "PAYC", "RL", "VRSK", "CE", "PNR", "EG", "J", "K", "L", "O", "T", "V", "C",
         "F", "D", "IP", "GM", "ICE", "DOW", "EA", "PG", "MO", "SPG", "CMS", "ETN",
-        "NOC", "KIM", "AMP", "GL", "NRG", "PCG",
+        "NOC", "KIM", "AMP", "GL", "NRG", "PCG", "COO", "CRM", "AMT", "PTC", "USB",
+        "DOC", "FICO", "MTD", "MSCI", "ESS", "PSA", "XYZ", "IEX", "CNC", "RF", "DG",
+        "ECL", "SLB", "SW", "CB", "GIS",
     )
 )  # fmt: skip
 # One-word company names that are also common words: in a question they
@@ -86,6 +90,13 @@ def _ticker_key(ticker: str) -> str:
     return re.sub(r"[.\-/ ]", "", ticker.upper())
 
 
+# Written as a ticker: possessive ("RCL's"), in parentheses after a
+# capitalized word ("Valero (VLO)"), or in a list ("RF, RJF and MTB").
+_POSSESSIVE = re.compile(r"['’]s\b")
+_NAMED_TICKER = re.compile(r"\b[A-Z][\w&.]*\s*\(\s*$")
+_LIST_GAP = re.compile(r"\s*(,|&|/|\band\b|\bor\b|\bvs\.?|và|hoặc)?\s*(and|và)?\s*")
+
+
 @dataclass(frozen=True)
 class Company:
     cik: str
@@ -93,6 +104,15 @@ class Company:
     tickers: tuple[str, ...]
     names: tuple[str, ...]
     latest_filing_date: date | None = None
+
+
+class _Written(NamedTuple):
+    """A ticker the question writes; `sure` when it plainly is one."""
+
+    start: int
+    key: str
+    company: Company
+    sure: bool
 
 
 class CompanyIndex:
@@ -167,24 +187,64 @@ class CompanyIndex:
         }
         return next(iter(prefixed.values())) if len(prefixed) == 1 else None
 
-    def find_in_text(self, text: str) -> list[Company]:
+    def resolve_in_question(
+        self, question: str, mentions: Iterable[tuple[str, str | None]]
+    ) -> tuple[list[Company], list[str]]:
+        """The query model's mentions (name, ticker) checked against the
+        tickers the question writes: the companies and the mentions not in
+        the corpus.
+
+        - A mention whose ticker the question writes resolves by it.
+        - A mention the question does not write (by name or ticker) whose
+          ticker is one letter off a written ticker the model gave for
+          nothing else is a misread of it (EXE read as Exelon's EXC,
+          MKC as McKesson's MCK): it resolves by the written ticker.
+        - A written ticker that plainly is one (`_ticker_matches`) adds its
+          company; unresolved mentions the question never writes are then
+          the model's guesses at it ("Ryder" for RCL) and are dropped."""
+
+        mentions = list(mentions)
+        confirmed = {_ticker_key(t) for _, t in mentions if t}
+        written = self._ticker_matches(question, confirmed)
+        by_key = {w.key: w.company for w in written}
+        unread = [key for key in by_key if key not in confirmed]
+        words = f" {normalize_name(question)} "
+        read: list[tuple[str, str | None, Company | None]] = []
+        for name, ticker in mentions:
+            key = _ticker_key(ticker) if ticker else ""
+            company = by_key.get(key)
+            if company is None and not _written(name, ticker, words, question):
+                near = next((w for w in unread if _one_letter_off(key, w)), None)
+                if near is not None:
+                    company = by_key[near]
+                    unread.remove(near)
+            read.append((name, ticker, company or self.resolve(name, ticker)))
+        found = {c.cik: c for *_, c in read if c is not None}
+        added = [w.company for w in written if w.sure and w.company.cik not in found]
+        missing = [
+            f"{name} ({ticker})" if ticker else name
+            for name, ticker, company in read
+            if company is None
+            and (not added or _written(name, ticker, words, question))
+        ]
+        for company in added:
+            found.setdefault(company.cik, company)
+        return list(found.values()), missing
+
+    def find_in_text(self, text: str, confirmed: Iterable[str] = ()) -> list[Company]:
         """Companies a question names, in order of mention (the fallback when
         no query model reads the question).
 
         Tickers count as written (uppercase, 2+ letters), except tickers
         that are also words or finance abbreviations (`IT`, `ON`, `CF`...),
-        which need a `$`. Names count as whole words; a one-word name must
-        be capitalized ("Target", not "target gross margin")."""
+        which need a `$` or to be in `confirmed` (the query model read them
+        as tickers). Names count as whole words; a one-word name must be
+        capitalized ("Target", not "target gross margin")."""
 
         found: dict[str, tuple[int, Company]] = {}
-        for match in _TICKER.finditer(text):
-            ticker = match.group(1)
-            company = self._by_ticker.get(_ticker_key(ticker))
-            if company is None or len(ticker) < _MIN_TEXT_TICKER:
-                continue
-            if ticker in _WORD_TICKERS and not match.group(0).startswith("$"):
-                continue
-            found.setdefault(company.cik, (match.start(), company))
+        keys = {_ticker_key(t) for t in confirmed}
+        for written in self._ticker_matches(text, keys):
+            found.setdefault(written.company.cik, (written.start, written.company))
         ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore")
         tokens = [
             (m.start(), m.group())
@@ -199,8 +259,79 @@ class CompanyIndex:
                 found.setdefault(company.cik, (position, company))
         return [company for _, company in sorted(found.values(), key=lambda f: f[0])]
 
+    def _ticker_matches(self, text: str, confirmed: set[str]) -> list[_Written]:
+        """Tickers the text writes, in order. A word ticker (`IT`, `RF`)
+        counts only with a `$`, `confirmed` by the query model, or listed
+        next to another ticker ("RF, RJF and MTB"). `sure` marks those that
+        plainly are tickers: these, a possessive ("RCL's"), parentheses
+        after a capitalized word ("Valero (VLO)", not "radio frequency
+        (RF)"), or 2+ tickers written."""
+
+        found: list[tuple[re.Match[str], str, Company]] = []
+        for match in _TICKER.finditer(text):
+            key = _ticker_key(match.group(1))
+            company = self._by_ticker.get(key)
+            if company is not None and len(match.group(1)) >= _MIN_TEXT_TICKER:
+                found.append((match, key, company))
+        written: list[_Written] = []
+        for i, (match, key, company) in enumerate(found):
+            plain = (
+                match.group(0).startswith("$")
+                or key in confirmed
+                or _listed(text, found, i)
+            )
+            if match.group(1) in _WORD_TICKERS and not plain:
+                continue
+            in_parentheses = bool(_NAMED_TICKER.search(text[: match.start()])) and text[
+                match.end() :
+            ].lstrip().startswith(")")
+            sure = plain or bool(_POSSESSIVE.match(text, match.end())) or in_parentheses
+            written.append(_Written(match.start(), key, company, sure))
+        if len({w.key for w in written}) > 1:
+            written = [w._replace(sure=True) for w in written]
+        return written
+
+
+def _listed(text: str, found: list[tuple[re.Match[str], str, Company]], i: int) -> bool:
+    """The i-th ticker sits in a list with a neighbouring non-word ticker."""
+
+    for j in (i - 1, i + 1):
+        if not 0 <= j < len(found) or found[j][0].group(1) in _WORD_TICKERS:
+            continue
+        first, second = sorted((found[i][0], found[j][0]), key=lambda m: m.start())
+        if _LIST_GAP.fullmatch(text[first.end() : second.start()]):
+            return True
+    return False
+
 
 _MIN_PREFIX_CHARS = 4
+
+
+def _one_letter_off(read: str, written: str) -> bool:
+    """Same length, one letter changed or two neighbours swapped."""
+
+    if not read or len(read) != len(written) or read == written:
+        return False
+    diff = [i for i, (a, b) in enumerate(zip(read, written, strict=True)) if a != b]
+    return len(diff) == 1 or (
+        len(diff) == 2
+        and diff[1] == diff[0] + 1
+        and read[diff[0]] == written[diff[1]]
+        and read[diff[1]] == written[diff[0]]
+    )
+
+
+def _written(name: str, ticker: str | None, words: str, question: str) -> bool:
+    """The question writes a mention: its normalized name, or the first word
+    of it when distinctive ("Southwestern"), among the question's normalized
+    words, or its ticker as an uppercase word."""
+
+    key = normalize_name(name)
+    first = key.split()[0] if key else ""
+    distinctive = len(first) >= _MIN_PREFIX_CHARS and first not in _WORD_NAMES
+    return bool(
+        key and (f" {key} " in words or (distinctive and f" {first} " in words))
+    ) or bool(ticker and re.search(rf"(?<!\w)\$?{re.escape(ticker)}(?!\w)", question))
 
 
 def _text_names(

@@ -112,6 +112,90 @@ def test_find_in_text() -> None:
     ]
 
 
+TICKERS = CompanyIndex(
+    [
+        _row("0000895126", "EXPAND ENERGY CORPORATION", ["EXE"]),
+        _row("0001109357", "EXELON CORPORATION", ["EXC"]),
+        _row("0000063754", "McCormick & Company, Inc.", ["MKC", "MKC-V"]),
+        _row("0000927653", "McKESSON CORPORATION", ["MCK"]),
+        _row("0000711404", "THE COOPER COMPANIES, INC.", ["COO"]),
+        _row("0001048286", "Crown Castle Inc.", ["CCI"]),
+        _row("0000884887", "ROYAL CARIBBEAN CRUISES LTD.", ["RCL"]),
+        _row("0000732717", "AT&T INC.", ["T"]),
+        _row("0001035002", "VALERO ENERGY CORP/TX", ["VLO"]),
+        _row("0001744489", "Walt Disney Co", ["DIS"]),
+        _row("0001281761", "Regions Financial Corp", ["RF"]),
+        _row("0000814547", "Fair Isaac Corp", ["FICO"]),
+        _row("0000078003", "Pfizer Inc", ["PFE"]),
+        _row("0001126328", "Principal Financial Group Inc", ["PFG"]),
+        _row("0001045810", "NVIDIA CORP", ["NVDA"]),
+        _row("0000860731", "Tyler Technologies Inc", ["TYL"]),
+    ]
+)
+
+
+@pytest.mark.parametrize(
+    ("question", "mentions", "ciks", "missing"),
+    [
+        # The model read the written ticker as another company (t0061, t0078).
+        ("In EXE's October 2024 8-K on the Southwestern deal, what happened?",
+         [("Exelon Corporation", "EXC"), ("Southwestern Energy Company", "SWN")],
+         ["0000895126"], ["Southwestern Energy Company (SWN)"]),
+        ("Who is MKC's partner in its Mexican joint venture?",
+         [("McKesson Corporation", "MCK")], ["0000063754"], []),
+        # A model's ticker that the question writes wins over its name.
+        ("Who is MKC's partner?", [("McKesson Corporation", "MKC")],
+         ["0000063754"], []),
+        # Written tickers the model missed are added (t0063, t0117).
+        ("Votes for Kevin Kabat at CCI and Amy McPherson at RCL?",
+         [("Crown Castle International Corp.", "CCI"), ("Ryder System, Inc.", None)],
+         ["0001048286", "0000884887"], []),
+        ("Which of CCI, RCL and VLO bring up the FDIC?", [],
+         ["0001048286", "0000884887", "0001035002"], []),
+        # A word ticker needs the model or a `$`.
+        ("How much space does COO lease in Puerto Rico?", [], [], []),
+        ("How much space does $COO lease in Puerto Rico?", [], ["0000711404"], []),
+        ("How much space does COO lease?", [("The Cooper Companies", "COO")],
+         ["0000711404"], []),
+        ("Who is Valero's COO?", [("Valero Energy Corporation", "VLO")],
+         ["0001035002"], []),
+        # Mentions the model resolved stay, whatever their names' wording.
+        ("Compare Disney's and RCL's capex", [("The Walt Disney Company", "DIS")],
+         ["0001744489", "0000884887"], []),
+        ("AT&T (T) vs RCL's buybacks", [("AT&T Inc.", "T")],
+         ["0000732717", "0000884887"], []),
+        # A lone uppercase word is no ticker unless it plainly is one.
+        ("Valero vs RCL", [("Valero Energy Corporation", None)],
+         ["0001035002"], []),
+        ("Which RF components does Disney buy?", [("The Walt Disney Company", "DIS")],
+         ["0001744489"], []),
+        ("What FICO score cutoffs do banks disclose?", [], [], []),
+        ("Qualcomm revenue from radio frequency (RF) front-end", [], [], []),
+        ("What did NVDA say about RF chips?", [("NVIDIA Corporation", "NVDA")],
+         ["0001045810"], []),
+        ("Which of RF, TYL and VLO mention the FDIC?", [],
+         ["0001281761", "0000860731", "0001035002"], []),
+        # A company the question names is never redirected to a look-alike.
+        ("Compare Pfizer and PFG dividends", [("Pfizer Inc.", "PFE")],
+         ["0000078003"], []),
+        ("Exelon vs EXE capex", [("Exelon Corporation", "EXC")],
+         ["0001109357"], []),
+        ("Capex of Valero (VLO) vs RCL", [], ["0001035002", "0000884887"], []),
+        # No written ticker missed: the model's reading stands.
+        ("Compare Exelon with Samsung", [("Exelon Corporation", "EXC"),
+         ("Samsung Electronics", None)], ["0001109357"], ["Samsung Electronics"]),
+    ],
+)  # fmt: skip
+def test_written_tickers_overrule_the_model(
+    question: str,
+    mentions: list[tuple[str, str | None]],
+    ciks: list[str],
+    missing: list[str],
+) -> None:
+    found, unresolved = TICKERS.resolve_in_question(question, mentions)
+    assert ([c.cik for c in found], unresolved) == (ciks, missing)
+
+
 def test_topic_descriptions_cover_every_section_topic() -> None:
     assert set(SEC_FILINGS_PROFILE.topics) == set(get_args(SectionTopic))
 
@@ -385,9 +469,23 @@ FULFILLMENT_VI = (
         ("Apple revenue in the June quarter of 2024", (2024,), ("Q2",), True, ()),
         ("Apple revenue for the quarter ending September 2022", (2022,), ("Q3",),
          True, ()),
-        # A bare month outside a filing question: neither period nor filing.
-        ("Apple revenue in March 2023", (2023,), (), True, ()),
-        ("Doanh thu của Apple tháng 3/2023", (2023,), (), True, ()),
+        # A bare month outside a filing question: the calendar quarter
+        # holding it (t0067), unless it opens a span.
+        ("Apple revenue in March 2023", (2023,), ("Q1",), True, ()),
+        ("Doanh thu của Apple tháng 3/2023", (2023,), ("Q1",), True, ()),
+        ("AT&T buybacks in February 2022", (2022,), ("Q1",), True, ()),
+        ("AT&T mua lại cổ phiếu trong tháng 2/2022", (2022,), ("Q1",), True, ()),
+        ("Apple revenue in January 2025", (2025,), ("Q1",), True, ()),
+        ("Apple revenue since March 2020", (2020,), (), True, ()),
+        ("Doanh thu Apple kể từ tháng 3/2020", (2020,), (), True, ()),
+        ("Apple notes due March 2030", (2030,), (), True, ()),
+        ("Apple notes maturing in March 2030", (2030,), (), True, ()),
+        ("Apple revenue in March and June 2023", (2023,), ("Q2",), True, ()),
+        # Beside another year the month is context: only its year counts.
+        ("The merger closed in March 2022, what was revenue in 2023?",
+         (2022, 2023), (), True, ()),
+        ("Apple repurchases in February 2022 and in fiscal 2021", (2021, 2022),
+         ("FY",), False, ()),
         # Filing months: an asked 8-K is pinned by its month alone.
         (LETTER_EN, (), (), False, ("2022-04",)),
         (LETTER_VI, (), (), False, ("2022-04",)),
@@ -399,6 +497,7 @@ FULFILLMENT_VI = (
          ("2025-01",)),
         ("Microsoft 8-K filed on April 25, 2023", (), (), False, ("2023-04",)),
         ("Microsoft's September 2024 8-K", (), (), False, ("2024-09",)),
+        ("Microsoft 8-Ks from May 2024", (), (), False, ("2024-05",)),
         ("Microsoft 8-K Item 5.02 May 2024", (), (), False, ("2024-05",)),
         # A dated announcement is a filing month.
         ("Apple announced a buyback on May 2, 2024", (), (), False, ("2024-05",)),
@@ -416,9 +515,9 @@ FULFILLMENT_VI = (
         ("Apple's July 2026 earnings release", (), (), False, ("2026-07",)),
         # A release reports periods: its bare month is no filing month.
         ("What did Apple's press release say about revenue in September 2024?",
-         (2024,), (), True, ()),
+         (2024,), ("Q3",), True, ()),
         ("Thông cáo báo chí của Apple nói gì về doanh thu tháng 9/2024?", (2024,),
-         (), True, ()),
+         ("Q3",), True, ()),
         # Not a date: a quarter written with a slash, a day-month of a date.
         ("Doanh thu quý 2/2024 của Apple?", (2024,), ("Q2",), False, ()),
         ("Lợi nhuận ngày 6 tháng 9 năm 2022", (2022,), ("Q3",), True, ()),
@@ -808,3 +907,8 @@ def test_ranking_marks_pre_rank_and_selected() -> None:
         ("c-a", 0, False),
     ]
     assert rows[0]["duplicate_chunk_ids"] == ["d"]
+
+
+def test_rule_plan_reads_plural_forms() -> None:
+    plan = rule_plan("What did Apple's 8-Ks and 10-Qs in 2023 say?", CORPORA)
+    assert plan.forms == ("8-K", "10-Q")

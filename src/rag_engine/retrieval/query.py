@@ -616,7 +616,7 @@ _WHOLE_YEAR = re.compile(
     re.IGNORECASE,
 )
 _FISCAL = re.compile(r"\bfy|\bfiscal\b|năm tài chính|tài khóa", re.IGNORECASE)
-_FORM = re.compile(r"\b(10-?k|10-?q|8-?k)\b", re.IGNORECASE)
+_FORM = re.compile(r"\b(10-?k|10-?q|8-?k)s?\b", re.IGNORECASE)
 # Not "current"/"now": current assets, current liabilities.
 _LATEST = re.compile(
     r"\b(latest|most recent|newest)\b|gần nhất|gần đây nhất|mới nhất|hiện nay",
@@ -639,8 +639,12 @@ _TOPIC_WORDS = (
 # period end); a year-end date ("fiscal year ended September 28, 2024") the
 # whole year; a month range its span ("January-December 2024" = the year). A
 # date or month is a filing month next to "filed"/"announced"/"8-K", and a
-# bare month + year in a question about an 8-K or event; a date without a
-# year, or a bare month elsewhere, is neither.
+# bare month + year in a question about an 8-K or event; elsewhere a bare
+# month + year reads the calendar quarter holding it ("repurchases in
+# February 2022" -> Q1 2022) when no other year or date is asked, unless it
+# opens a span or is a due date ("since March 2020", "notes due March 2030").
+# Off-calendar filers (quarters ending Jan/Apr/Jul/Oct) can miss a quarter's
+# first month. A date without a year is neither.
 _MONTH = (
     r"(january|february|march|april|may|june|july|august|september|october|"
     r"november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)(?![a-z])\.?"
@@ -691,14 +695,14 @@ _RANGE_START = re.compile(
 # Right before a date or month: it dates a filing or an announcement.
 _FILED_BEFORE = re.compile(
     r"(\b(filed|filing|submitted|dated|issued|released|announced|nộp|công bố|"
-    r"thông báo|ban hành)\b|\b8-?k\b)[^.;?!\d]{0,25}$",
+    r"thông báo|ban hành)\b|\b8-?ks?\b)[^.;?!\d]{0,25}$",
     re.IGNORECASE,
 )
 # A month qualifying a filing or release noun dates it ("an April 2022
 # 8-K", "July 2026 earnings press releases", "press release of July 2026",
 # "thông cáo báo chí tháng 7/2026"); not "release say about revenue in".
 _FILED_AFTER = re.compile(
-    r"^\s*(form\s+)?8-?k\b|^\s*((quarterly|annual|earnings|results|financial)\s+)*"
+    r"^\s*(form\s+)?8-?ks?\b|^\s*((quarterly|annual|earnings|results|financial)\s+)*"
     r"(press\s+releases?|releases?|filings?|current\s+reports?)\b",
     re.IGNORECASE,
 )
@@ -711,7 +715,7 @@ _RELEASE_BEFORE = re.compile(
 # ("March 2023 bylaw amendment"). Not "press release": a release reports
 # periods ("revenue in September 2024").
 _EVENT_TOPIC = re.compile(
-    r"\b8-?k\b|current report|báo cáo hiện hành|\bbylaws?\b|điều lệ|\bamend|"
+    r"\b8-?ks?\b|current report|báo cáo hiện hành|\bbylaws?\b|điều lệ|\bamend|"
     r"sửa đổi|\bappoint|bổ nhiệm|\bresign|từ nhiệm|từ chức",
     re.IGNORECASE,
 )
@@ -719,6 +723,13 @@ _EVENT_TOPIC = re.compile(
 _FILING_WORDS = re.compile(
     rf"{_EVENT_TOPIC.pattern}|\b(filed|filing|submitted|dated|issued|released|"
     r"announced?|announcement)\b|\bnộp\b|công bố|thông báo|ban hành",
+    re.IGNORECASE,
+)
+# Right before a month that opens a span: no single period.
+_OPEN_BEFORE = re.compile(
+    r"\b(since|after|before|from|starting|beginning|until|till|by|due|"
+    r"matur\w*|expir\w*|kể\s+từ|từ|sau|trước|đến|đáo\s+hạn|hết\s+hạn)"
+    r"(\s+(in|on|of))?\s+$",
     re.IGNORECASE,
 )
 # Words right before a date or month that decide what it is, in order.
@@ -831,10 +842,10 @@ def _nearest_quarter(year: int, month: int, day: int | None) -> tuple[int, str]:
 
 def _mention_kind(
     question: str, mention: _Mention
-) -> Literal["filed", "year_end", "range", "period", "none"]:
+) -> Literal["filed", "year_end", "range", "period", "month", "none"]:
     """What a date or month is: a filing's, a year's end, a month range's
-    end, a period's end, or neither (no year; a bare month outside an event
-    question)."""
+    end, a period's end, a bare month (its quarter), or neither (no year; a
+    month opening a span)."""
 
     before, after = question[: mention.start], question[mention.end :]
     inside = question[mention.start : mention.end]
@@ -854,7 +865,9 @@ def _mention_kind(
         or (mention.day is not None and not filed)
     ):
         return "period"
-    return "filed" if filed or _EVENT_TOPIC.search(question) else "none"
+    if filed or _EVENT_TOPIC.search(question):
+        return "filed"
+    return "none" if _OPEN_BEFORE.search(before) else "month"
 
 
 def _partial_spans(question: str) -> list[tuple[int, int, str]]:
@@ -894,9 +907,15 @@ class _Dates:
 
 def _read_dates(question: str) -> _Dates:
     dates = _Dates()
+    # Bare months: (start, end, year, calendar quarter holding it).
+    months: list[tuple[int, int, int, str]] = []
     for mention in _mentions(question):
         kind = _mention_kind(question, mention)
         if kind == "none" or mention.year is None:
+            continue
+        if kind == "month":
+            quarter = f"Q{(mention.month + 2) // 3}"
+            months.append((mention.start, mention.end, mention.year, quarter))
             continue
         dates.spans.append((mention.start, mention.end))
         if kind == "filed":
@@ -916,7 +935,31 @@ def _read_dates(question: str) -> _Dates:
         dates.dated.append(quarter)
         dates.date_years.append(year)
         dates.period_ends.append((mention.start, mention.end, quarter))
+    _add_months(question, months, dates)
     return dates
+
+
+def _add_months(
+    question: str, months: list[tuple[int, int, int, str]], dates: _Dates
+) -> None:
+    """Bare months read the calendar quarter holding them (the 10-Q that
+    reports them, for calendar-quarter filers), only when no other date or
+    year is asked: else the month is context ("closed in March 2022, revenue
+    in 2023") and only its year counts, as before."""
+
+    if not months or dates.dated or dates.year_ends:
+        return
+    text = question
+    for start, end in dates.spans:
+        text = _blank(text, start, end)
+    for start, end, _, _ in months:
+        text = _blank(text, start, end)
+    if _YEAR.search(text) or _SHORT_FY.search(text):
+        return
+    for start, end, year, quarter in months:
+        dates.spans.append((start, end))
+        dates.dated.append(quarter)
+        dates.date_years.append(year)
 
 
 def _partials(question: str, dates: _Dates) -> list[tuple[int, int, str, str | None]]:
