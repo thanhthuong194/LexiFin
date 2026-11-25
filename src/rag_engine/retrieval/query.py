@@ -678,7 +678,9 @@ _QUARTER_BEFORE = re.compile(r"\b(quarter|quý)\s+$", re.IGNORECASE)
 _QUARTER_AFTER = re.compile(r"^\s*quarter\b", re.IGNORECASE)
 _YEAR_END_BEFORE = re.compile(
     r"\byear\s+(ended|ending)\s+(on\s+)?$|"
-    r"\bnăm(\s+tài\s+chính)?\s+kết\s+thúc(\s+vào)?(\s+ngày)?\s+$",
+    # Not "6 tháng đầu năm tài chính 2023, kết thúc ...": a partial year.
+    r"(?<!đầu )\bnăm(\s+tài\s+chính)?(\s+\d{4})?,?\s+kết\s+thúc(\s+vào)?"
+    r"(\s+ngày)?\s+$",
     re.IGNORECASE,
 )
 _PERIOD_END_BEFORE = re.compile(

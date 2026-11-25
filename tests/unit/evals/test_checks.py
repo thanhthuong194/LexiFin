@@ -1082,3 +1082,8 @@ def test_assign_splits_keeps_a_fixed_task_split() -> None:
     questions = run(fixed, [draft(f"x{i}") for i in range(20)]).questions
     assert {q.split for q in questions} == {"dev"}
     assert {q.split for q in assign_splits(questions, seed=1)} == {"dev"}
+
+
+def test_a_final_country_word_is_optional() -> None:  # x0086
+    tmus = company("0001283699", "T-MOBILE US, INC.")
+    assert names_company("followed by T-Mobile at $5,409 million", tmus)

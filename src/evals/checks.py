@@ -878,15 +878,23 @@ def company_name(name: str) -> str:
     return normalize_name(_STATE_SUFFIX.sub("", name))
 
 
+# Final words of a name that only say where (T-MOBILE US, INC.).
+COUNTRY_WORDS = frozenset(("us", "usa"))
+
+
 def name_phrases(company: CompanyRef) -> list[str]:
     """Phrases naming the company: each name, alias and former name
-    (`company_name`), and each distinctive word of them (4+ letters, not in
+    (`company_name`), without a final country word (`t mobile` for T-MOBILE
+    US), and each distinctive word of them (4+ letters, not in
     GENERIC_NAME_WORDS): `hormel` for HORMEL FOODS, `disney` for WALT DISNEY."""
 
     phrases: list[str] = []
     for name in (company.name, *company.aliases, *company.former_names):
         if phrase := company_name(name):
             phrases.append(phrase)
+            head, _, last = phrase.rpartition(" ")
+            if head and last in COUNTRY_WORDS:
+                phrases.append(head)
             phrases += [
                 w
                 for w in phrase.split()
