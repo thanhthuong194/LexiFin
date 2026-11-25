@@ -268,10 +268,13 @@ def rank(seed: int, key: str) -> int:
 
 
 def exhibit_number(number: str) -> str:
-    """`99.01` and `99.1` -> `99.1` (`EX-99.01` is how some filers type 99.1)."""
+    """`99.01` and `99.1` -> `99.1` (`EX-99.01` is how some filers type 99.1);
+    a suffix after the digits stays (`99.3(II)` -> `99.3(II)`)."""
 
     major, _, minor = number.partition(".")
-    return f"{major}.{int(minor or 0)}"
+    digits = re.match(r"\d*", minor)
+    head = digits.group() if digits else ""
+    return f"{major}.{int(head or 0)}{minor[len(head) :]}"
 
 
 def _quarter(day: date) -> int:
@@ -969,10 +972,17 @@ class CompanyHeader:
     fiscal_year_end: str | None = None  # `MMDD`
 
 
-def former_names(block: str, current: str) -> tuple[str, ...]:
-    """`FORMER CONFORMED NAME`s of an entity block, newest change first;
-    names equal to `current` once a state suffix (`/DE`) is dropped are not
-    former names."""
+# Name changes before this (`YYYYMMDD`) are too old for users to ask by
+# (Nucor's "Nuclear Corp of America" of the 1970s).
+FORMER_NAME_SINCE = "20150101"
+
+
+def former_names(
+    block: str, current: str, since: str = FORMER_NAME_SINCE
+) -> tuple[str, ...]:
+    """`FORMER CONFORMED NAME`s of an entity block changed on or after
+    `since`, newest change first; names equal to `current` once a state
+    suffix (`/DE`) is dropped are not former names."""
 
     found: list[tuple[str, str]] = []
     name: str | None = None
@@ -984,7 +994,9 @@ def former_names(block: str, current: str) -> tuple[str, ...]:
             name = None
     own = normalize_name(_STATE_SUFFIX.sub("", current))
     names: dict[str, str] = {}
-    for _, raw in sorted(found, reverse=True):
+    for changed_on, raw in sorted(found, reverse=True):
+        if changed_on < since:
+            continue
         key = normalize_name(_STATE_SUFFIX.sub("", raw))
         if key and key != own and key not in names:
             names[key] = _STATE_SUFFIX.sub("", raw)

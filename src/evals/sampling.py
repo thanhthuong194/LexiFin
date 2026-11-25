@@ -1188,8 +1188,9 @@ def calendar_fiscal(
     fiscal year end (`MMDD`), else its 10-K period ends; 52/53-week years
     ending in the first week of January count as calendar."""
 
-    if header is not None and header.fiscal_year_end:
-        month, day = int(header.fiscal_year_end[:2]), int(header.fiscal_year_end[2:])
+    year_end = header.fiscal_year_end if header is not None else None
+    if year_end and len(year_end) == 4 and year_end.isdigit():
+        month, day = int(year_end[:2]), int(year_end[2:])
     else:
         ends = [f.period_end_date for f in filings if f.fiscal_period == "FY"]
         last = max((end for end in ends if end is not None), default=None)

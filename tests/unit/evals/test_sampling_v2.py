@@ -243,7 +243,12 @@ def test_former_names_drop_state_suffix_variants() -> None:
         "\tFORMER COMPANY:\n\t\tFORMER CONFORMED NAME:\tFRUIT CO\n"
         "\t\tDATE OF NAME CHANGE:\t20010101\n"
     )
-    assert former_names(block, "Apple Inc.") == ("FRUIT CO", "APPLE COMPUTER INC")
+    assert former_names(block, "Apple Inc.", since="") == (
+        "FRUIT CO",
+        "APPLE COMPUTER INC",
+    )
+    assert former_names(block, "Apple Inc.", since="20000101") == ("FRUIT CO",)
+    assert former_names(block, "Apple Inc.") == ()  # all before 2015
     assert former_names("", "Apple Inc.") == ()
 
 
@@ -383,3 +388,14 @@ def test_outside_names_alternate_and_keys() -> None:
     company = OutsideCompany("NVIDIA CORP", ("NVDA",), (), "US-listed")
     assert outside_name(company) == ("NVIDIA CORP", ("NVDA",), ("NVIDIA", "Nvidia"))
     assert alternate(["a", "b", "x", "c"], {"a", "b", "c"}) == ["a", "x", "b", "c"]
+
+
+def test_exhibit_number_keeps_suffixes() -> None:
+    from src.evals.sampling_data import exhibit_number
+
+    assert [exhibit_number(n) for n in ("99.01", "99.1", "99", "99.3(II)")] == [
+        "99.1",
+        "99.1",
+        "99.0",
+        "99.3(II)",
+    ]

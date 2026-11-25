@@ -98,7 +98,8 @@ means the same as the English one; the type rules hold; no 6+ word copy.
 
 ## When done
 
-Run `uv run python scripts/evals/check_testset.py --set-dir evals/sets/v2
---data-dir <silver_root>` if the user gives you the data path, and fix the
-drafts it reports (errors first, then warnings). Report: drafts written per
-batch, SKIPs with reasons, check results. Do not commit.
+Do not run `check_testset.py`: it needs the 500-company Silver, which is on
+another machine; its report comes back to you as a list of drafts to fix.
+Validate every draft line yourself with
+`uv run python -c "import sys; from src.evals.testset import DraftQuestion; [DraftQuestion.model_validate_json(l) for l in open(sys.argv[1]) if l.strip()]" evals/sets/v2/drafts/<batch>.jsonl`.
+Report: drafts written per batch, SKIPs with reasons. Do not commit.
