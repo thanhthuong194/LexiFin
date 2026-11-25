@@ -67,6 +67,8 @@ from src.rag_engine.retrieval.query import rule_plan
 
 QUOTE_MAX_CHARS = 300
 QUOTE_MIN_CHARS = 12
+# A quote no single block holds may span this many consecutive blocks.
+SPAN_MAX_BLOCKS = 20
 # Lexical copying, over content words (no stopwords, numbers, period words,
 # company names): a shared run this long, or this share of the question's
 # content words found in the passages (with at least COPY_MIN_WORDS of them).
@@ -99,9 +101,43 @@ LOWEST = re.compile(
 # Period wording relative to `as_of` (tag `relative_time`).
 RELATIVE_TIME = re.compile(
     r"\b(last|this|past) (fiscal )?(quarter|year)\b|"
-    r"năm ngoái|năm nay|quý này|quý vừa qua|năm vừa qua",
+    r"\b(latest|most recent|previous|prior) (fiscal )?(quarter|year)\b|"
+    r"\b(one|two|three|four|five|\d+) (fiscal )?(quarters?|years?) ago\b|"
+    r"\bbefore the (latest|most recent)\b|"
+    r"năm ngoái|năm nay|quý này|vừa qua|vừa rồi|cách đây|"
+    r"(quý|năm)( tài chính)? gần nhất|"
+    r"\b(một|hai|ba|bốn|năm|\d+) (quý|năm)( tài chính)? trước\b",
     re.IGNORECASE,
 )
+# Company naming: tickers of at least TICKER_MIN letters, distinctive name
+# words of at least NAME_WORD_MIN letters not in GENERIC_NAME_WORDS.
+TICKER_MIN = 2
+NAME_WORD_MIN = 4
+GENERIC_NAME_WORDS = frozenset(
+    {"american", "america", "international", "national", "united", "general",
+     "first", "financial", "energy", "corporation", "company", "industries",
+     "technologies", "technology", "systems", "services", "global", "bank",
+     "bancorp", "bancshares", "foods", "food", "electric", "power", "capital",
+     "communications", "health", "healthcare", "resources", "brands",
+     "partners", "trust", "realty", "properties", "pharmaceuticals",
+     "insurance", "motors", "airlines", "materials", "products", "solutions",
+     "entertainment", "worldwide", "north", "south", "west", "east",
+     "pacific", "southern", "northern", "western", "eastern", "platforms",
+     "group", "holdings", "enterprises", "investment", "investments",
+     "management", "networks", "software", "semiconductor", "devices",
+     "scientific", "medical", "therapeutics", "petroleum", "chemical",
+     "chemicals", "manufacturing", "markets", "stores", "restaurants",
+     "hotels", "resorts", "water", "utilities", "data", "digital", "life",
+     "home", "homes", "auto", "automotive", "mobile", "media", "royal",
+     "standard", "street", "state", "city", "river", "lake", "mountain",
+     "union", "federal", "mutual", "republic", "interactive", "labs",
+     "laboratories", "instruments", "aerospace", "industrial", "logistics",
+     "income", "real", "estate", "equity", "fund", "funds", "news", "cruise",
+     "waste", "light", "gas", "oil"}
+)  # fmt: skip
+_YEAR = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+# SEC conformed names end in a state code: `CORP/TX`, `CO/`, `INC /DE/`.
+_STATE_SUFFIX = re.compile(r"\s*/[A-Za-z]{0,3}/?\s*$")
 # A reference (or answer) refusing a false premise says so.
 PREMISE_DENIAL = re.compile(
     r"\b(not|no|never|rather|instead|actually|contrary|incorrect|false|wrong|"
@@ -406,8 +442,15 @@ def _quote_evidence(
         found.errors.append(("block_not_in_silver", absent[0]))
     hits = [b for b in passage.block_ids if b in blocks and text in blocks[b].text]
     if not hits:
-        found.errors.append(("quote_no_block", f"no single block holds {short!r}"))
-        return []
+        # A short table a chunk writes inline joins its rows with `; `.
+        rows = normalize(quote.replace(";", " "))
+        hits = [b for b in passage.block_ids if b in blocks and rows in blocks[b].text]
+    if not hits:
+        hits = _spanning_blocks(text, passage.block_ids, blocks)[:1]
+        if not hits:
+            found.errors.append(("quote_no_block", f"no block run holds {short!r}"))
+            return []
+        found.warnings.append(("quote_spans_blocks", repr(short)))
     if text == normalize(passage.section_title) or all(
         blocks[b].block_type == "heading" for b in hits
     ):
@@ -417,6 +460,29 @@ def _quote_evidence(
     if not shown:
         found.errors.append(("quote_not_in_chunk", f"no Gold chunk shows {short!r}"))
     return [Evidence(block_id=b, quote=quote) for b in shown]
+
+
+def _spanning_blocks(
+    text: str, block_ids: Sequence[str], blocks: Mapping[str, Block]
+) -> list[str]:
+    """The shortest run (up to SPAN_MAX_BLOCKS) of consecutive non-table
+    blocks whose joined text holds `text` (a `normalize`d quote); [] when
+    none. A sentence of a document whose inline runs are separate blocks
+    spans several."""
+
+    best: list[str] = []
+    for start in range(len(block_ids)):
+        joined = ""
+        for end in range(start, min(start + SPAN_MAX_BLOCKS, len(block_ids))):
+            block = blocks.get(block_ids[end])
+            if block is None or block.block_type == "table":
+                break
+            joined += block.text
+            if text in joined:
+                if not best or end + 1 - start < len(best):
+                    best = list(block_ids[start : end + 1])
+                break
+    return best
 
 
 def _with_fact(
@@ -718,14 +784,25 @@ def wording(task: EvalTask, draft: DraftQuestion, found: _Found) -> None:
     english, vietnamese = draft.question_en.strip(), draft.question_vi.strip()
     if english.casefold() == vietnamese.casefold():
         found.errors.append(("question_untranslated", "question_vi equals question_en"))
-    plans = {"en": rule_plan(english, {}), "vi": rule_plan(vietnamese, {})}
-    periods = {k: (p.fiscal_years, p.fiscal_periods) for k, p in plans.items()}
+    texts = {"en": english, "vi": vietnamese}
+    plans = {k: rule_plan(t, {}) for k, t in texts.items()}
+    periods = {
+        k: (p.fiscal_years or _written_years(texts[k]), p.fiscal_periods)
+        for k, p in plans.items()
+    }
     if periods["en"] != periods["vi"]:
-        found.errors.append(
-            ("period_mismatch", f"en {periods['en']} vs vi {periods['vi']}")
+        message = f"en {periods['en']} vs vi {periods['vi']}"
+        # Only a period kind (FY, Q) on one side, no year on either: the
+        # parser reads "năm tài chính" as FY; a human pass decides.
+        kind_only = not periods["en"][0] and not periods["vi"][0]
+        (found.warnings if kind_only else found.errors).append(
+            ("period_mismatch", message)
         )
     for language, plan in plans.items():
-        if not (plan.has_period or plan.wants_latest):
+        relative = RELATIVE_TIME.search(texts[language]) is not None
+        if not (
+            plan.has_period or plan.wants_latest or relative or _no_period_needed(task)
+        ):
             found.warnings.append(
                 ("no_period", f"{language}: no year, quarter or recency")
             )
@@ -733,7 +810,6 @@ def wording(task: EvalTask, draft: DraftQuestion, found: _Found) -> None:
         found.warnings.append(
             ("vi_no_diacritics", "question_vi has no Vietnamese letters")
         )
-    texts = {"en": english, "vi": vietnamese}
     if task.question_type == "unanswerable":
         _hint_warnings(task, texts, found)
     else:
@@ -748,6 +824,19 @@ def wording(task: EvalTask, draft: DraftQuestion, found: _Found) -> None:
         draft.reference_answer, fact.value, fact.decimals, sign_words=True
     ):
         found.warnings.append(("answer_without_value", f"fact value {fact.value}"))
+
+
+def _written_years(text: str) -> tuple[int, ...]:
+    """Years written as `6/2026` or `2026` that the rule parser skipped
+    (only used when it found none)."""
+
+    return tuple(sorted({int(y) for y in _YEAR.findall(text)}))
+
+
+def _no_period_needed(task: EvalTask) -> bool:
+    """Unanswerable by company or topic: the question needs no period."""
+
+    return task.unanswerable_reason in ("company_outside_corpus", "topic_absent")
 
 
 def _company_warnings(task: EvalTask, texts: Mapping[str, str], found: _Found) -> None:
@@ -786,23 +875,48 @@ def _has_ticker(text: str, ticker: str) -> bool:
     return re.search(pattern, text) is not None
 
 
-def names_company(text: str, company: CompanyRef) -> bool:
-    """Named by a ticker of 3+ letters, its name without legal suffixes, an
-    alias or a former name."""
+def company_name(name: str) -> str:
+    """`normalize_name` after an SEC state suffix: `VALERO ENERGY CORP/TX`
+    -> `valero energy`, `WALT DISNEY CO/` -> `walt disney`."""
 
-    names = (company.name, *company.aliases, *company.former_names)
-    return any(_has_ticker(text, t) for t in company.tickers if len(t) > 2) or any(
-        _has_phrase(text, normalize_name(n)) for n in names
-    )
+    return normalize_name(_STATE_SUFFIX.sub("", name))
+
+
+def name_phrases(company: CompanyRef) -> list[str]:
+    """Phrases naming the company: each name, alias and former name
+    (`company_name`), and each distinctive word of them (4+ letters, not in
+    GENERIC_NAME_WORDS): `hormel` for HORMEL FOODS, `disney` for WALT DISNEY."""
+
+    phrases: list[str] = []
+    for name in (company.name, *company.aliases, *company.former_names):
+        if phrase := company_name(name):
+            phrases.append(phrase)
+            phrases += [
+                w
+                for w in phrase.split()
+                if len(w) >= NAME_WORD_MIN
+                and w not in GENERIC_NAME_WORDS
+                and not w.isdigit()
+            ]
+    return list(dict.fromkeys(phrases))
+
+
+def names_company(text: str, company: CompanyRef) -> bool:
+    """Named by a ticker of 2+ letters, a name phrase (`name_phrases`)."""
+
+    return bool(mention_positions(text, company))
 
 
 def uses_style(text: str, company: CompanyRef, style: str) -> bool:
-    if style == "ticker":
+    """The question names the company as `mention_style` says; a style the
+    company has no value for (no ticker, alias) is not checked."""
+
+    if style == "ticker" and company.tickers:
         return any(_has_ticker(text, t) for t in company.tickers)
     if style == "nickname":
-        return any(_has_phrase(text, normalize_name(a)) for a in company.aliases)
+        return any(_has_phrase(text, company_name(a)) for a in company.aliases)
     if style == "former_name":
-        return any(_has_phrase(text, normalize_name(n)) for n in company.former_names)
+        return any(_has_phrase(text, company_name(n)) for n in company.former_names)
     return True
 
 
@@ -820,16 +934,26 @@ def mention_positions(text: str, company: CompanyRef) -> list[int]:
 
     folded = _fold(text)
     found: list[int] = []
-    for name in (company.name, *company.aliases, *company.former_names):
-        if phrase := normalize_name(name):
-            joined = r"[^a-z0-9]+".join(map(re.escape, phrase.split()))
-            pattern = rf"(?<![a-z0-9]){joined}(?![a-z0-9])"
-            found += [m.start() for m in re.finditer(pattern, folded)]
+    for phrase in name_phrases(company):
+        joined = r"[^a-z0-9]*".join(map(_name_word, phrase.split()))
+        pattern = rf"(?<![a-z0-9]){joined}(?![a-z0-9])"
+        found += [m.start() for m in re.finditer(pattern, folded)]
     for ticker in company.tickers:
-        if len(ticker) > 2:
+        if len(ticker) >= TICKER_MIN:
             pattern = rf"(?<![A-Za-z0-9]){re.escape(ticker)}(?![A-Za-z0-9])"
             found += [m.start() for m in re.finditer(pattern, text)]
     return sorted(set(found))
+
+
+def _name_word(word: str) -> str:
+    """Regex of a name word: `and` also as `&` (AT&T), a final `s` also
+    after an apostrophe (Lowe's for `lowes`)."""
+
+    if word == "and":
+        return "(?:and|&)"
+    if len(word) > 2 and word.endswith("s"):
+        return re.escape(word[:-1]) + "[' ]?s"
+    return re.escape(word)
 
 
 def _company_position(

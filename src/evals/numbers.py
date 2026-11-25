@@ -103,16 +103,15 @@ def value_tokens(
     `sign_words`, stated positive next to "loss", "decrease", "used"...
     `any_sign` skips this, for table rows whose sign is presentation (an
     outflow fact, positive in XBRL, shown as `(28,107)` in a cash-flow row).
-    A number without unit may also be in units of `10 ** -decimals`.
+    A number without unit may also be in units of `10 ** -decimals`, shifted
+    by its shown fraction digits: `76,054.1` for decimals -5 is in millions.
     """
 
     try:
         target = Decimal(value)
     except InvalidOperation:
         return [value] if value in text else []
-    implicit = [Decimal(1)]
-    if decimals and decimals.lstrip("-").isdigit() and int(decimals) < 0:
-        implicit.append(Decimal(10) ** -int(decimals))
+    precision = int(decimals) if decimals and decimals.lstrip("-").isdigit() else None
     worded = sign_words and _NEGATIVE.search(text) is not None
     tokens: list[str] = []
     for sign, whole, fraction, unit in _NUMBER.findall(text):
@@ -128,6 +127,9 @@ def value_tokens(
             continue
         digits = len(fraction) - 1 if fraction else 0
         significant = len(written.replace(".", "").lstrip("0"))
+        implicit = [Decimal(1)]
+        if precision is not None and precision < 0:
+            implicit.append(Decimal(10) ** (digits - precision))
         for scale in [_SCALES[unit.casefold()]] if unit else implicit:
             error = abs(number * scale - abs(target))
             rounded = error <= Decimal(5) * Decimal(10) ** (-digits - 1) * scale

@@ -21,9 +21,11 @@ from src.evals.checks import (
     names_company,
     prune_hard_negatives,
     question_json,
+    ranking_holds,
     render_report,
     uses_style,
     widen_evidence,
+    wording,
     write_questions,
 )
 from src.evals.testset import (
@@ -891,3 +893,185 @@ def test_question_json_leaves_out_v2_defaults(tmp_path: Path) -> None:
     path = tmp_path / "questions.jsonl"
     assert write_questions(path, [v1, v2]) == 2
     assert path.read_text(encoding="utf-8").splitlines() == [question_json(v1), line]
+
+
+# v2 check fixes (strings from the homepc v2 drafts)
+
+
+def company(cik: str, name: str, *tickers: str) -> CompanyRef:
+    return CompanyRef(cik=cik, name=name, tickers=tickers)
+
+
+def eps(value: str, decimals: str = "2") -> XbrlFact:
+    return operand(value).model_copy(update={"decimals": decimals})
+
+
+def test_ranking_with_tickers_and_short_names() -> None:  # t0121, t0027
+    ivz = company("0000914208", "Invesco Ltd.", "IVZ")
+    syf = company("0001601712", "SYNCHRONY FINANCIAL", "SYF")
+    bx = company("0001393818", "Blackstone Inc", "BX")
+    computed = Computed(
+        operation="ranking",
+        value=None,
+        unit="iso4217:USD/xbrli:shares",
+        operands=(eps("6.19"), eps("2.36"), eps("1.5")),
+        order=(syf.cik, bx.cik, ivz.cik),
+    )
+    answer = (
+        "SYF was highest with basic EPS of $6.19 in fiscal 2022, followed by BX "
+        "at $2.36 and IVZ at $1.50."
+    )
+    assert ranking_holds(computed, (ivz, syf, bx), answer)
+    hrl = company("0000048465", "HORMEL FOODS CORPORATION", "HRL")
+    pm = company("0001413329", "Philip Morris International Inc.", "PM")
+    adm = company("0000007084", "ARCHER-DANIELS-MIDLAND CO", "ADM")
+    goodwill = Computed(
+        operation="ranking",
+        value=None,
+        unit="iso4217:USD",
+        operands=(
+            eps("6680000000", "-6"),
+            eps("4929102000", "-3"),
+            eps("4182000000", "-6"),
+        ),
+        order=(pm.cik, hrl.cik, adm.cik),
+    )
+    answer = (
+        "Philip Morris International ranked highest with goodwill of $6,680 "
+        "million at December 31, 2021, followed by Hormel at $4,929,102 thousand "
+        "(October 31, 2021) and Archer-Daniels-Midland at $4,182 million "
+        "(December 31, 2021)."
+    )
+    assert ranking_holds(goodwill, (hrl, pm, adm), answer)
+
+
+@pytest.mark.parametrize(
+    ("text", "name", "tickers"),
+    [
+        ("How much cash did Valero generate", "VALERO ENERGY CORP/TX", ()),
+        ("Disney does not; its passage covers FCC regulation", "WALT DISNEY CO/", ("DIS",)),
+        ("Regions (RF) yes, listing FDIC insurance assessments", "REGIONS FINANCIAL CORP", ("RF",)),
+    ],
+)  # fmt: skip
+def test_names_company_sec_names(
+    text: str, name: str, tickers: tuple[str, ...]
+) -> None:
+    assert names_company(text, company("0000000001", name, *tickers))
+
+
+def test_generic_name_words_do_not_name() -> None:
+    aep = company("0000004904", "AMERICAN ELECTRIC POWER COMPANY, INC.")
+    assert not names_company("Which American utility grew fastest?", aep)
+    assert names_company("American Electric Power's 2024 liabilities", aep)
+
+
+def test_ticker_style_without_tickers() -> None:  # t0091 Mosaic
+    mosaic = company("0001285785", "MOSAIC CO")
+    assert uses_style(
+        "Of ALB, Mosaic, CTVA and IP, which earned most?", mosaic, "ticker"
+    )
+
+
+def wording_issues(
+    english: str, vietnamese: str, **changes: Any
+) -> tuple[set[str], set[str]]:
+    found = _Found()
+    wording(task(**changes), draft(question_en=english, question_vi=vietnamese), found)
+    return {c for c, _ in found.errors}, {c for c, _ in found.warnings}
+
+
+RELATIVE = ("relative_time",)
+
+
+@pytest.mark.parametrize(
+    ("english", "vietnamese"),
+    [
+        ("What gross margin did AutoZone earn in the fiscal year before the latest one?",
+         "Biên lợi nhuận gộp của AutoZone trong năm tài chính trước năm tài chính gần nhất là bao nhiêu?"),
+        ("Two quarters ago, what share of its revenue did RDDT spend on R&D?",
+         "Hai quý trước, RDDT chi bao nhiêu phần trăm doanh thu cho R&D?"),
+        ("Why did CRM's stock buybacks jump last quarter compared with the same quarter a year earlier?",
+         "Vì sao khoản mua lại cổ phiếu của CRM trong quý vừa rồi tăng mạnh so với cùng kỳ năm trước?"),
+        ("What net income did DHI report for its last fiscal year?",
+         "DHI đã báo cáo lợi nhuận ròng là bao nhiêu trong năm tài chính vừa rồi?"),
+        ("Two quarters ago, what were the main results CRH highlighted for its second quarter?",
+         "Cách đây hai quý, CRH nêu những kết quả chính nào của quý 2?"),
+    ],
+)  # fmt: skip
+def test_relative_wording_read_in_both_languages(english: str, vietnamese: str) -> None:
+    errors, warnings = wording_issues(english, vietnamese, tags=RELATIVE)
+    assert not errors  # t0010: "năm tài chính" alone is a period kind, no year
+    assert not warnings & {"no_period", "relative_time"}
+
+
+def test_relative_tag_with_explicit_date_still_warns() -> None:  # t0056
+    explicit = draft(
+        question_en="In the 8-K Microsoft filed in August 2026 for its second quarter results, which exhibit holds the release?",
+        question_vi="Trong 8-K Microsoft nộp hồi tháng 8 năm 2026 về kết quả quý 2, thông cáo nằm ở phụ lục nào?",
+    )  # fmt: skip
+    assert "relative_time" in checks(run([task(tags=RELATIVE)], [explicit]).warnings)
+    relative = draft(
+        question_en="What net income did Microsoft report for its last fiscal year?",
+        question_vi="Microsoft đã báo cáo lợi nhuận ròng là bao nhiêu trong năm tài chính vừa rồi?",
+    )  # fmt: skip
+    assert "relative_time" not in checks(
+        run([task(tags=RELATIVE)], [relative]).warnings
+    )
+
+
+def test_period_mismatch_cases() -> None:
+    errors, _ = wording_issues(  # t0055: vi writes the year as 6/2026
+        "How many broker non-votes did Lowe's and Zimmer Biomet each report in the director elections disclosed in their 8-Ks from May and June 2026?",
+        "Lowe's và Zimmer Biomet mỗi công ty ghi nhận bao nhiêu phiếu broker non-votes trong cuộc bầu giám đốc được công bố trong các báo cáo 8-K tháng 5 và tháng 6/2026?",
+    )  # fmt: skip
+    assert "period_mismatch" not in errors
+    errors, _ = wording_issues(
+        "Microsoft revenue in fiscal 2024?", "Doanh thu Microsoft năm 2023?"
+    )
+    assert "period_mismatch" in errors
+
+
+def test_topic_absent_needs_no_period() -> None:  # t0132
+    _, warnings = wording_issues(
+        "How much coal mine reclamation liability does Procter & Gamble report?",
+        "Procter & Gamble ghi nhận bao nhiêu khoản nợ phải trả cho việc hoàn nguyên mỏ than?",
+        question_type="unanswerable",
+        data_kind="none",
+        companies=(),
+        passages=(),
+        unanswerable_reason="topic_absent",
+        hint="coal mine reclamation liabilities",
+    )
+    assert "no_period" not in warnings
+
+
+def test_inline_table_rows_and_spanning_blocks() -> None:
+    # t0021: a short table the chunk writes inline, rows joined by "; ".
+    inline = "Commodity Derivative | 10% Change | 25% Change; Natural gas | $6 | $15; Other commodities | $14 | $36"
+    cells = "Commodity Derivative\n10% Change\n25% Change\nNatural gas\n$6\n$15\nOther commodities\n$14\n$36"
+    quote = "Natural gas | $6 | $15; Other commodities | $14 | $36"
+    blocks = {"t1": Block.of(cells, "table")}
+    result = run(
+        [task(passages=(passage(("t1",), text=inline),))],
+        [draft(evidence_quotes=((quote,),))],
+        blocks=blocks,
+        chunks={"t1": [inline]},
+    )
+    assert not result.errors
+    # t0046: a sentence whose inline runs are separate blocks.
+    sentence = "We compete with private, public and state-owned companies in all facets of the E&P business."
+    runs = {
+        "r1": "We compete with private, public",
+        "r2": "and state-owned companies in all",
+        "r3": "facets of the E&P business.",
+    }
+    blocks = {b: Block.of(t, "paragraph") for b, t in runs.items()}
+    result = run(
+        [task(passages=(passage(tuple(runs), text=sentence),))],
+        [draft(evidence_quotes=((sentence,),))],
+        blocks=blocks,
+        chunks={b: [sentence] for b in runs},
+    )
+    assert not result.errors
+    assert "quote_spans_blocks" in checks(result.warnings)
+    assert result.questions[0].evidence_blocks == {"r1"}

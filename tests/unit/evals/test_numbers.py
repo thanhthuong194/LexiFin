@@ -182,3 +182,17 @@ def test_states_computed(text: str, value: str, unit: str, found: bool) -> None:
 )  # fmt: skip
 def test_states_direction(text: str, value: str, found: bool) -> None:
     assert states_direction(text, value) is found
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "token"),
+    [  # v2 t0081, t0091, t0120: decimals -5 shown with one decimal in millions
+        ("TOTAL LIABILITIES | 76,054.1 | 71,355.6", "76054100000", "76,054.1"),
+        ("Net earnings attributable to Mosaic | $540.7 | $174.9 | $1,164.9", "1164900000", "1,164.9"),
+        ("Total assets | $ 14,234.6 | $ 13,682.6", "13682600000", "13,682.6"),
+    ],
+)  # fmt: skip
+def test_value_tokens_fraction_digits_shift_the_scale(
+    text: str, value: str, token: str
+) -> None:
+    assert value_tokens(text, value, "-5", any_sign=True) == [token]
