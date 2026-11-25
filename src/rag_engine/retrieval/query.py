@@ -396,12 +396,7 @@ def checked_plan(
     years = {*analysis.fiscal_years, *(y for _, (_, y) in parsed if y)}
     relative = read_relative(question, today)
     words = _read_periods(relative.text)
-    if relative.offsets or relative.years:
-        # The model's years for "this year" / "this fiscal year" are guesses.
-        notes.append(
-            f"relative years from the question: {relative.years or relative.offsets}"
-        )
-        years = set(words.years) if relative.years else set()
+    years = _plan_years(years, relative, words, notes, latest=analysis.wants_latest)
     periods, years, calendar = _completed(analysis, periods, years, words, notes)
     if relative.years and not words.fiscal:
         calendar = True
@@ -435,6 +430,58 @@ def checked_plan(
         source="llm",
         notes=tuple(notes),
     )
+
+
+def _plan_years(
+    years: set[int],
+    relative: Relative,
+    words: _Wording,
+    notes: list[str],
+    *,
+    latest: bool,
+) -> set[int]:
+    """The model's years checked against the question's words: relative
+    years replace them (the model's are guesses), years the question asks
+    fill in when the model gives none and wants no latest filing
+    ("year-end 2025"), and a change over a range keeps its ends."""
+
+    if relative.offsets or relative.years:
+        notes.append(
+            f"relative years from the question: {relative.years or relative.offsets}"
+        )
+        years = set(words.years) if relative.years else set()
+    if not years and not latest and (asked := _asked_years(relative.text, words)):
+        notes.append(f"years from the question: {sorted(asked)}")
+        years = asked
+    return _endpoints(relative.text, years, words, notes)
+
+
+# Right before a year that only bounds a span or dates a due date ("since
+# 2019", "notes due 2030").
+_SPAN_BEFORE = re.compile(
+    r"\b(since|after|before|until|till|due|matur\w*|expir\w*|kể\s+từ|sau|trước|"
+    r"đáo\s+hạn)(\s+(in|fiscal|năm))?\s+$",
+    re.IGNORECASE,
+)
+# "The 2019 merger", "the 2023 banking crisis": a year naming an event.
+_EVENT_YEAR = re.compile(
+    r"\bthe\s+((?:19|20)\d{2})\s+(?!fiscal|annual|10-|8-|quarter|first|second|third|"
+    r"fourth|full|year|results|report|filing|financial|balance|income|cash)[a-z]",
+    re.IGNORECASE,
+)
+
+
+def _asked_years(text: str, words: _Wording) -> set[int]:
+    """`words.years` except years written only after a span word or naming
+    an event."""
+
+    named = {m.start(1) for m in _EVENT_YEAR.finditer(text)}
+    kinds: dict[int, set[bool]] = {}
+    for m in _YEAR.finditer(text):
+        only = m.start(1) in named or bool(_SPAN_BEFORE.search(text[: m.start()]))
+        kinds.setdefault(int(m.group(1)), set()).add(only)
+    bounds = {year for year, seen in kinds.items() if seen == {True}}
+    return set(words.years) - bounds
 
 
 def _completed(
@@ -1308,3 +1355,48 @@ def _named_forms(question: str) -> tuple[str, ...]:
         if (match := pattern.search(question))
     )
     return tuple(form for _, form in found)
+
+
+# A change over a range ("CAGR from fiscal 2021 to fiscal 2025", "how much
+# did debt grow between 2023 and 2025") needs its two ends, not every year
+# between (1 of 8 slots per year, the ends crowded out); "each year from
+# 2021 to 2025", "annually", "the trend" keep them all.
+_CAGR = re.compile(
+    r"\bcagr\b|\bcompound(ed)?\b|tăng\s+trưởng\s+kép|bình\s+quân\s+(mỗi|hằng|hàng)\s+năm",
+    re.IGNORECASE,
+)
+_CHANGE = re.compile(
+    r"\b(grow|grew|growth|increas|ris[ei]|rose|chang|declin|fall|fell|drop)\w*|"
+    r"\btăng\b|\bgiảm\b|thay\s+đổi",
+    re.IGNORECASE,
+)
+_EVERY_YEAR = re.compile(
+    r"\b(each|every)\s+(of\s+|fiscal\s+)?(year\b)?|\bper\s+year\b|"
+    r"\byear[\s-]+(by|over)[\s-]+year\b|\byoy\b|\bannual(ly)?\b|\btrend|"
+    r"\btừng\s+năm\b|\bmỗi\s+năm\b|\bhằng\s+năm\b|\bhàng\s+năm\b|các\s+năm",
+    re.IGNORECASE,
+)
+# One amount over the range: "how much did it grow from A to B".
+_ONE_AMOUNT = re.compile(
+    r"\bhow\s+much\b|\bby\s+(how\s+much|what)\b|\bwhat\s+(was\s+the\s+)?"
+    r"(percent|percentage|change|growth|increase|decrease)\b|\bbao\s+nhiêu\b|"
+    r"\bmấy\s+phần\s+trăm\b",
+    re.IGNORECASE,
+)
+
+
+def _endpoints(
+    question: str, years: set[int], words: _Wording, notes: list[str]
+) -> set[int]:
+    written = set(words.years)
+    if len(years) <= 2 or len(written) != 2 or not years >= written:
+        return years
+    one_change = (
+        _CHANGE.search(question)
+        and _ONE_AMOUNT.search(question)
+        and not _EVERY_YEAR.search(question)
+    )
+    if not (_CAGR.search(question) or one_change):
+        return years
+    notes.append(f"a change over a range: its end years {sorted(written)}")
+    return written

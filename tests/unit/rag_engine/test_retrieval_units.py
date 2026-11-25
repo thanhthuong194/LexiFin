@@ -135,6 +135,7 @@ TICKERS = CompanyIndex(
         _row("0000079282", "BROWN & BROWN, INC.", ["BRO"]),
         _row("0002005951", "Smurfit WestRock plc", ["SW"]),
         _row("0000811156", "CMS ENERGY CORP", ["CMS"]),
+        _row("0000910606", "REGENCY CENTERS CORP", ["REG"]),
     ]
 )
 
@@ -178,6 +179,16 @@ TICKERS = CompanyIndex(
         ("How did SW's earnings presentation wording change?", [],
          ["0002005951"], []),
         ("How did SW wording change?", [], [], []),
+        # Vietnamese word tickers need a company cue; acronyms stay words.
+        ("Cách diễn đạt rủi ro của SW đã thay đổi thế nào?", [], ["0002005951"],
+         []),
+        ("Cách SW diễn đạt rủi ro đã thay đổi thế nào?", [], [], []),
+        ("Những công ty nào bổ nhiệm COO mới năm 2024?", [], [], []),
+        # A ticker one letter longer is a misread too (x0019).
+        ("Which of CCI, REG and RCL discuss buybacks?",
+         [("Crown Castle Inc.", "CCI"), ("Regeneron Pharmaceuticals", "REGN"),
+          ("Royal Caribbean Cruises", "RCL")],
+         ["0001048286", "0000910606", "0000884887"], []),
         # Agencies, not companies; brands are no misread of another ticker.
         ("How did CMS's 2026 rate notice affect insurers?", [], [], []),
         ("What did Google say about UHS?", [("Alphabet Inc.", None)],
@@ -1088,3 +1099,44 @@ def test_checked_plan_drops_forms_the_question_does_not_name() -> None:
                         ("current report", "8-K")):  # fmt: skip
         plan = checked_plan(f"Apple {named} 2024", _analysis(forms=[form]), CORPORA)
         assert plan.forms == (form,)
+
+
+@pytest.mark.parametrize(
+    ("question", "model_years", "years"),
+    [
+        # Years the model dropped (x0027, x0052, x0054).
+        ("At year-end 2025, which of CNP and NEE carried more long-term debt?", [],
+         (2025,)),
+        ("In UHS's 8-Ks on its 2022 and 2023 bonus goals, what share was at risk?",
+         [], (2022, 2023)),
+        ("Biên lợi nhuận ròng của T-Mobile trong quý 3 năm 2021?", [], (2021,)),
+        # A year that only bounds a span is not asked.
+        ("What has Apple said about China since 2019?", [], ()),
+        # A change over a range: its ends (x0085, x0108); "each year" keeps all.
+        ("STLD's CAGR in stock pay from fiscal 2021 to fiscal 2025?",
+         [2021, 2022, 2023, 2024, 2025], (2021, 2025)),
+        ("Dòng tiền Clorox thay đổi bình quân mỗi năm từ năm 2022 đến 2026?",
+         [2022, 2023, 2024, 2025, 2026], (2022, 2026)),
+        ("How much did NEE's debt grow between 2021 and 2024?",
+         [2021, 2022, 2023, 2024], (2021, 2024)),
+        ("How did NEE's debt grow between 2021 and 2024?", [2021, 2022, 2023, 2024],
+         (2021, 2022, 2023, 2024)),
+        ("How did Apple's revenue change annually from 2021 to 2024?",
+         [2021, 2022, 2023, 2024], (2021, 2022, 2023, 2024)),
+        ("By how much did Apple's revenue grow in each of 2022-2024?",
+         [2022, 2023, 2024], (2022, 2023, 2024)),
+        # Context years: an event, a due date, or a latest filing asked.
+        ("What did Apple say about the 2019 merger in its 10-K?", [], ()),
+        ("When are Apple's notes due 2030 redeemable?", [], ()),
+        ("Apple revenue each year from 2021 to 2024, did it grow?",
+         [2021, 2022, 2023, 2024], (2021, 2022, 2023, 2024)),
+    ],
+)  # fmt: skip
+def test_checked_plan_years_from_the_question(
+    question: str, model_years: list[int], years: tuple[int, ...]
+) -> None:
+    analysis = _analysis(fiscal_years=model_years, fiscal_periods=[], forms=[])
+    assert checked_plan(question, analysis, CORPORA).fiscal_years == years
+    latest = _analysis(fiscal_years=[], fiscal_periods=[], wants_latest=True)
+    plan = checked_plan("Apple's latest 10-K on the 2024 election?", latest, CORPORA)
+    assert plan.fiscal_years == () and plan.wants_latest

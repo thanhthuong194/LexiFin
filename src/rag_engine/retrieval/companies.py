@@ -32,6 +32,13 @@ _SUFFIXES = frozenset(
 )  # fmt: skip
 _TICKER = re.compile(r"(?<![\w$])\$?([A-Z]{1,5}(?:[.-][A-Z])?)(?![\w])")
 _MIN_TEXT_TICKER = 2
+# Vietnamese for a company's ("của SW", "cổ phiếu SW").
+_VI_COMPANY_BEFORE = re.compile(
+    r"\b(của|công\s+ty|cổ\s+phiếu|mã|tập\s+đoàn|hãng)\s+$", re.IGNORECASE
+)
+_VIETNAMESE = re.compile(
+    r"[ăâđêôơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ]", re.IGNORECASE
+)
 # Tickers that are also English words or finance abbreviations: in a
 # question they count only as `$IT`.
 _WORD_TICKERS = frozenset(
@@ -202,9 +209,10 @@ class CompanyIndex:
 
         - A mention whose ticker the question writes resolves by it.
         - A mention the question does not write (by name or ticker) whose
-          ticker is one letter off a written ticker the model gave for
-          nothing else is a misread of it (EXE read as Exelon's EXC,
-          MKC as McKesson's MCK): it resolves by the written ticker. So
+          ticker is close to a written ticker the model gave for nothing
+          else is a misread of it (EXE read as Exelon's EXC, MKC as
+          McKesson's MCK, REG as Regeneron's REGN): it resolves by the
+          written ticker. So
           does the model's only mention, unwritten, when the question
           writes one ticker the model did not give, starting like the
           mention's ticker or name (UHS read as UnitedHealth's UNH, BRO as
@@ -225,7 +233,7 @@ class CompanyIndex:
             key = _ticker_key(ticker) if ticker else ""
             company = by_key.get(key)
             if company is None and not _written(name, ticker, words, question):
-                near = next((w for w in unread if _one_letter_off(key, w)), None)
+                near = next((w for w in unread if _close(key, w)), None)
                 if (
                     near is None
                     and len(mentions) == 1
@@ -305,9 +313,11 @@ class CompanyIndex:
         after a capitalized word ("Valero (VLO)", not "radio frequency
         (RF)"), or 2+ tickers written. `alone` (the query model named no
         company): every ticker written is sure, a word ticker too when
-        possessive ("SW's"), unless it is mostly an acronym ("CMS's")."""
+        possessive ("SW's", "của SW", "công ty SW"), unless it is mostly an
+        acronym ("CMS's")."""
 
         found: list[tuple[re.Match[str], str, Company]] = []
+        vietnamese = bool(_VIETNAMESE.search(text))
         for match in _TICKER.finditer(text):
             key = _ticker_key(match.group(1))
             company = self._by_ticker.get(key)
@@ -321,7 +331,10 @@ class CompanyIndex:
                 or _listed(text, found, i)
             )
             possessive = bool(_POSSESSIVE.match(text, match.end()))
-            loose = alone and possessive and match.group(1) not in _ACRONYM_TICKERS
+            owned = possessive or (
+                vietnamese and bool(_VI_COMPANY_BEFORE.search(text[: match.start()]))
+            )
+            loose = alone and owned and match.group(1) not in _ACRONYM_TICKERS
             if match.group(1) in _WORD_TICKERS and not (plain or loose):
                 continue
             in_parentheses = bool(_NAMED_TICKER.search(text[: match.start()])) and text[
@@ -347,6 +360,17 @@ def _listed(text: str, found: list[tuple[re.Match[str], str, Company]], i: int) 
 
 
 _MIN_PREFIX_CHARS = 4
+_MIN_PREFIX_TICKER = 3
+
+
+def _close(read: str, written: str) -> bool:
+    """One letter off, or one letter more or less at the end of a ticker of
+    3+ letters (REGN, REG; not F, FE)."""
+
+    if read and abs(len(read) - len(written)) == 1:
+        short, long_ = sorted((read, written), key=len)
+        return len(short) >= _MIN_PREFIX_TICKER and long_.startswith(short)
+    return _one_letter_off(read, written)
 
 
 def _one_letter_off(read: str, written: str) -> bool:

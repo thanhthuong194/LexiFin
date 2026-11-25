@@ -68,3 +68,10 @@ provider = "http_rerank"
 model = "Qwen/Qwen3-Reranker-0.6B"
 prompt_format = "qwen3"
 instruction = "Given a question about SEC filings, judge whether the passage helps answer it"
+
+# Trial of the larger reranker (eval `--rerank-profile large`).
+[rerank.large]
+provider = "http_rerank"
+model = "Qwen/Qwen3-Reranker-4B"
+prompt_format = "qwen3"
+instruction = "Given a question about SEC filings, judge whether the passage helps answer it"

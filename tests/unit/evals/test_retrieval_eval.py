@@ -11,6 +11,7 @@ from src.data_pipeline.storage.native_rag.chunks import CHUNKS_SPEC
 from src.evals.retrieval_eval import (
     Groups,
     Probe,
+    answer_figures,
     collect,
     compare_runs,
     dimension_values,
@@ -410,3 +411,55 @@ def test_v1_report_has_no_v2_parts(tmp_path: Path) -> None:
     write_outputs(tmp_path, CONFIG | {"languages": ["en"]}, [question("q1")], relevance)
     report = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "hard_negative" not in report and "### tag" not in report
+
+
+def test_answer_figures_credit_passages_outside_the_evidence() -> None:
+    q = question("q1").model_copy(
+        update={
+            "reference_answer": "Total liabilities grew 33.5% (by $17,931 million) "
+            "from $53,588 million at September 30, 2021 to $71,519 million in 2022."
+        }
+    )
+    rows = [{"text": "Total liabilities | 71,519 | 53,588"}]
+    # Both amounts, in the table's millions; the percent and dates are no amounts.
+    assert answer_figures(q, rows) == pytest.approx(2 / 3)
+    computed = EvalQuestion.model_validate(
+        q.model_dump()
+        | {
+            "computed": {
+                "operation": "difference",
+                "value": "17931000000",
+                "unit": "USD",
+                "operands": [_fact(), _fact()],
+            }
+        }
+    )
+    assert answer_figures(computed, rows) == 1.0  # the result is not looked for
+    assert answer_figures(q, [{"text": "Total liabilities were $71.5 billion"}]) == (
+        1 / 3
+    )
+    assert answer_figures(q, []) == 0.0  # nothing delivered
+    # Small bare numbers are no amounts ("Note 12", "Item 2").
+    small = EvalQuestion.model_validate(
+        q.model_dump() | {"reference_answer": "Capex was $12 million in 2022."}
+    )
+    assert answer_figures(small, [{"text": "See Item 12 and Note 12."}]) == 0.0
+    assert answer_figures(small, [{"text": "Capital expenditures | $ 12"}]) == 1.0
+    assert answer_figures(q, [{"chunk_ids": []}]) is None  # rows without text
+    assert answer_figures(question("q2"), rows) is None  # no amounts
+
+
+def _fact() -> dict[str, Any]:
+    return {
+        "fact_id": "f",
+        "concept": "Liabilities",
+        "value": "1",
+        "unit": "iso4217:USD",
+        "decimals": "-6",
+        "period_start": None,
+        "period_end": None,
+        "instant": "2022-09-30",
+        "block_id": "b0",
+        "cell_id": None,
+        "block_ids": ["b0"],
+    }

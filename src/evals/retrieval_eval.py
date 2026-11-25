@@ -13,6 +13,11 @@ Rows are scored from `results.jsonl` alone, so a run rescores or resumes.
 `post.hard_negative@8` (v2 sets): share of answerable rows whose question
 lists hard negatives where one ranks above the first evidence chunk in the
 delivered top 8 (a chunk matching evidence never counts as a negative).
+`context.answer_figures`: share of the reference answer's amounts (not
+percents, not the computed result) the delivered passages state, in any
+rounding or unit; it credits passages that answer outside the writer's
+evidence (an earnings release, MD&A prose). Rows written before passages
+kept their text: none.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import warnings
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -40,6 +46,7 @@ from src.data_pipeline.storage.iceberg import (
     values_filter,
 )
 from src.data_pipeline.storage.native_rag.chunks import CHUNKS_TABLE
+from src.evals.numbers import amounts, figures, states_expected
 from src.evals.testset import CELL_KEYS, EvalQuestion, Language, normalize
 from src.rag_engine.indexing.qdrant_store import point_id
 from src.rag_engine.retrieval.corpora import CORPORA
@@ -60,6 +67,7 @@ LISTS = ("pre", "post")
 METRIC_KEYS = (
     *(f"{lst}.{m}" for m in METRICS for lst in LISTS),
     "context.recall",
+    "context.answer_figures",
     "query.company",
     "query.unknown_flagged",
     "query.filter_admits_evidence",
@@ -72,7 +80,13 @@ HARD_NEGATIVE_K = 8
 HARD_NEGATIVE = f"post.hard_negative@{HARD_NEGATIVE_K}"
 # Shown in the report only when a row has them (v1.x reports unchanged).
 OPTIONAL_KEYS = (HARD_NEGATIVE,)
-HEADLINE = ("post.hit_rate@8", "post.mrr@10", "post.recall@8", "context.recall")
+HEADLINE = (
+    "post.hit_rate@8",
+    "post.mrr@10",
+    "post.recall@8",
+    "context.recall",
+    "context.answer_figures",
+)
 BREAKDOWNS = ("question_type", "data_kind", *CELL_KEYS)
 # v2 breakdowns (name -> EvalQuestion field), shown only when a question
 # has a value.
@@ -276,6 +290,7 @@ def result_row(
                 "fiscal_year": p.fiscal_year,
                 "fiscal_period": p.fiscal_period,
                 "section_title": p.section_title,
+                "text": p.text,
             }
             for p in result.passages
         ],
@@ -470,10 +485,31 @@ def _row_metrics(
             for c in (*p["chunk_ids"], *p["duplicate_chunk_ids"])
         }
         metrics["context.recall"] = sum(1 for g in groups if g & context) / len(groups)
+        metrics["context.answer_figures"] = answer_figures(question, row["passages"])
         negatives = frozenset(question.hard_negative_chunks)
         if negatives:
             metrics[HARD_NEGATIVE] = hard_negative_hit(row["post"], groups, negatives)
     return metrics
+
+
+def answer_figures(
+    question: EvalQuestion, passages: Sequence[Mapping[str, Any]]
+) -> float | None:
+    """Share of the reference's amounts the passages state (module doc), 0
+    without passages; None without amounts or passage text."""
+
+    if any("text" not in p for p in passages):
+        return None
+    computed = question.computed.value if question.computed else None
+    wanted = [
+        f
+        for f in figures(question.reference_answer)
+        if computed is None or abs(f.amount - abs(Decimal(computed))) > f.half
+    ]
+    if not wanted:
+        return None
+    text = amounts("\n".join(p["text"] for p in passages))
+    return sum(states_expected(text, f) for f in wanted) / len(wanted)
 
 
 def score(
@@ -655,7 +691,7 @@ def _failure(item: Scored) -> list[str]:
     lines = [
         f"- **{item.question.id}** ({row['language']}, {item.question.question_type}, {item.question.data_kind}): {row['question']}",
         f"  - expected ciks {list(item.question.expected.ciks)}; read ({plan['source']}) ciks {read}, years {plan['fiscal_years']}, periods {plan['fiscal_periods']}, forms {plan['forms']}, unresolved {row['unresolved_companies']}",
-        f"  - filters admit evidence groups: {row['filter_admits']}",
+        f"  - filters admit evidence groups: {row['filter_admits']}; answer figures in context: {item.metrics.get('context.answer_figures')}",
         *(f"  - search {s['corpus']}: {s['filter']}" for s in row["searches"]),
         *(f"  - note: {n}" for n in row["notes"]),
     ]

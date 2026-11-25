@@ -245,13 +245,47 @@ def expected_amount(text: str) -> Expected | None:
 
     for number in numbers(without_dates(text)):
         if number.checked:
-            exponent = number.scale.adjusted()
-            decimals = str(-exponent) if exponent >= 3 else None
-            shown = number.value.as_tuple().exponent
-            digits = -shown if isinstance(shown, int) and shown < 0 else 0
-            half = Decimal(5) * Decimal(10) ** (-digits - 1) * number.scale
-            return Expected(number.value * number.scale, decimals, half)
+            return _expected(number)
     return None
+
+
+def figures(text: str) -> list[Expected]:
+    """Every checked amount of `text` except percents (mostly derived)."""
+
+    return [
+        _expected(n)
+        for n in numbers(without_dates(text))
+        if n.checked and n.scale != _SCALES["%"]
+    ]
+
+
+def amounts(text: str) -> str:
+    """The numbers of `text` that read as amounts, one per line: with `$`,
+    a scale word or VALUE_MIN_DIGITS significant digits, or alone in a
+    table cell (not "Note 12", "Item 2", "Section 3.5")."""
+
+    kept = [cell.replace(" ", "") for cell in _CELL_NUMBER.findall(text)]
+    for number in numbers(without_dates(text)):
+        digits = len(str(number.value).replace(".", "").lstrip("0"))
+        if "$" in number.written or number.scale != 1 or digits >= VALUE_MIN_DIGITS:
+            kept.append(number.written)
+    return "\n".join(kept)
+
+
+# A number filling a table cell (cells are joined by " | ").
+_CELL_NUMBER = re.compile(
+    r"(?:^|\|)[ \t]*(\$?[ \t]*\(?[-−]?\d[\d,]*(?:\.\d+)?\)?)[ \t]*(?=\||$)",
+    re.MULTILINE,
+)
+
+
+def _expected(number: Number) -> Expected:
+    exponent = number.scale.adjusted()
+    decimals = str(-exponent) if exponent >= 3 else None
+    shown = number.value.as_tuple().exponent
+    digits = -shown if isinstance(shown, int) and shown < 0 else 0
+    half = Decimal(5) * Decimal(10) ** (-digits - 1) * number.scale
+    return Expected(number.value * number.scale, decimals, half)
 
 
 def _readings(text: str) -> tuple[str, ...]:
