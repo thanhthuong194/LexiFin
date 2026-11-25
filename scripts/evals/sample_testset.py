@@ -13,6 +13,7 @@ from src.evals.sampling import (
     PLANS,
     SampleSettings,
     coverage_summary,
+    read_exclusion,
     sample_tasks,
     split_batches,
     write_tasks,
@@ -43,7 +44,26 @@ def parse_args() -> argparse.Namespace:
         choices=sorted(PLANS),
         default="v1",
         help="v1: 9 types, 100 tasks; v2: 16 types with minimums, sector and "
-        "size strata, tags and hard negatives (use --total 150)",
+        "size strata, tags and hard negatives (use --total 150); v2dev: v2 "
+        "inputs, exact quotas of weak types for dev-only tasks (--total 120)",
+    )
+    parser.add_argument(
+        "--exclude-set",
+        type=Path,
+        help="Earlier set dir: skip companies of its test questions, every "
+        "chunk its tasks show or list as hard negatives, its outside companies",
+    )
+    parser.add_argument(
+        "--task-prefix", default="t", help="Task IDs <prefix>0001... (default: t)"
+    )
+    parser.add_argument(
+        "--split", choices=("dev", "test"), help="Fixed split of every task"
+    )
+    parser.add_argument(
+        "--min-relative",
+        type=int,
+        help="relative_time tasks to aim for (default: the plan's, 20 of 120 "
+        "for v2dev, else 0)",
     )
     parser.add_argument("--set-id", default="v1")
     parser.add_argument(
@@ -77,6 +97,11 @@ def main() -> int:
     if args.total < 1 or args.batches < 1:
         print("--total and --batches must be positive", file=sys.stderr)
         return 2
+    out: Path = args.out_dir or REPOSITORY_ROOT / "evals" / "sets" / args.set_id
+    exclude_dir: Path | None = args.exclude_set
+    if exclude_dir is not None and out.resolve() == exclude_dir.resolve():
+        print("--out-dir must differ from --exclude-set", file=sys.stderr)
+        return 2
     configure_logging()
     as_of: date = args.as_of or datetime.now(UTC).date()
     settings = SampleSettings(
@@ -87,11 +112,14 @@ def main() -> int:
         plan_id=args.plan,
         bronze_dir=args.bronze_dir,
         as_of=as_of,
+        exclude=read_exclusion(exclude_dir) if exclude_dir is not None else None,
+        task_prefix=args.task_prefix,
+        split=args.split,
+        min_relative=args.min_relative,
     )
     tasks, rules_version = sample_tasks(
         args.data_dir, args.gold_dir or args.data_dir, settings
     )
-    out: Path = args.out_dir or REPOSITORY_ROOT / "evals" / "sets" / args.set_id
     manifest = SetManifest(
         set_id=args.set_id,
         as_of=as_of,

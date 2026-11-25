@@ -11,6 +11,7 @@ pins the right part of a table split over several chunks.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterable
@@ -194,6 +195,8 @@ class EvalTask(_Model):
     # Chunks easy to confuse with the evidence (same concept or heading in
     # another year, segment or company): a run reports hits on them.
     hard_negative_chunks: tuple[str, ...] = ()
+    # Fixed split (tasks added to grow `dev` only); None: by hash.
+    split: Split | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> EvalTask:
@@ -283,6 +286,18 @@ class EvalQuestion(_Model):
     @property
     def evidence_blocks(self) -> frozenset[str]:
         return frozenset(e.block_id for group in self.evidence_groups for e in group)
+
+
+# `--assign-splits`: a question is `dev` when sha256(`{seed}:{task_id}`) is
+# below this share of 2**256 (each question on its own: stable as sets grow).
+DEV_SHARE = 0.4
+
+
+def hash_split(seed: int, task_id: str) -> Split:
+    """A task's split by hash (`assign_splits`), unless the task fixes one."""
+
+    digest = hashlib.sha256(f"{seed}:{task_id}".encode()).digest()
+    return "dev" if int.from_bytes(digest) < int(DEV_SHARE * 2**256) else "test"
 
 
 def read_jsonl[M: BaseModel](path: Path, model: type[M]) -> list[M]:

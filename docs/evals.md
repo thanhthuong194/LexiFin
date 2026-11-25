@@ -18,6 +18,18 @@ Retrieval and answers are scored against the same frozen question set.
    picks chunks and XBRL facts per coverage cell (company, form, section topic,
    text/table/split part, year, period, question type, mention style), checked
    against the data; metadata never comes from writers.
+   Dev-only additions to v2 (weak types, nothing shared with `test`):
+   `sample_testset.py --set-id v2 --plan v2dev --total 120 --seed 2 --as-of 2026-11-24 --exclude-set evals/sets/v2 --task-prefix x --split dev --out-dir evals/sets/v2/extra --bronze-dir <bronze> --data-dir <silver> --gold-dir <gold> --batches 12`.
+   `v2dev` = v2 inputs with exact quotas (calc 25, ranking 15,
+   compare_periods 15, aggregation 12, false_premise 12, table_lookup 12,
+   numeric 10, compare_companies 9, unanswerable 5, event_8k 5; no extra
+   tasks) and `--min-relative` 20: single-passage and numeric picks take
+   each company's newest filing per form first until 20 tasks can carry
+   `relative_time` (log `eval_sampling_relative_time`). `--exclude-set`
+   skips companies of its `test` questions (`companies`, `expected.ciks`),
+   every chunk its tasks show or list as hard negatives, and its outside
+   companies (log `eval_sampling_excluded`); `--split` fixes every task's
+   `split`; `--out-dir` must differ from `--exclude-set`.
 2. Writers (Claude agents, one batch each) answer every task of their batch
    following the brief below, into `drafts/<batch>.jsonl`; a second agent
    reviews the drafts.

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import Counter
 from functools import partial
 from pathlib import Path
 
@@ -45,7 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, required=True, help="Silver root")
     parser.add_argument("--gold-dir", type=Path, help="Gold root (default: --data-dir)")
     parser.add_argument("--set-id", help="Default: set.json, else the set dir name")
-    parser.add_argument("--tasks", type=Path, help="Default: <set-dir>/tasks.jsonl")
+    parser.add_argument(
+        "--tasks",
+        type=Path,
+        nargs="+",
+        help="Default: <set-dir>/tasks.jsonl (several: e.g. dev-only additions)",
+    )
     parser.add_argument("--drafts", type=Path, nargs="+", help="Files or dirs")
     parser.add_argument("--out", type=Path, help="Default: <set-dir>/questions.jsonl")
     parser.add_argument("--report", type=Path, help="Default: check_report.md by --out")
@@ -60,13 +66,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     set_dir: Path = args.set_dir
-    tasks_path: Path = args.tasks or set_dir / "tasks.jsonl"
+    tasks_paths: list[Path] = args.tasks or [set_dir / "tasks.jsonl"]
     draft_paths: list[Path] = args.drafts or [set_dir / "drafts"]
     out: Path = args.out or set_dir / "questions.jsonl"
     report: Path = args.report or out.parent / "check_report.md"
     gold_dir: Path = args.gold_dir or args.data_dir
     missing = [
-        p for p in (tasks_path, *draft_paths, args.data_dir, gold_dir) if not p.exists()
+        p
+        for p in (*tasks_paths, *draft_paths, args.data_dir, gold_dir)
+        if not p.exists()
     ]
     if missing:
         print(f"Not found: {', '.join(map(str, missing))}", file=sys.stderr)
@@ -76,11 +84,17 @@ def main() -> int:
         print(f"--assign-splits needs {set_dir / 'set.json'}", file=sys.stderr)
         return 2
     set_id = args.set_id or (manifest.set_id if manifest else set_dir.name)
-    try:
-        tasks = read_jsonl(tasks_path, EvalTask)
-    except ValidationError as error:
-        print(f"Invalid tasks file {tasks_path}: {error}", file=sys.stderr)
-        return 1
+    tasks: list[EvalTask] = []
+    for tasks_path in tasks_paths:
+        try:
+            tasks += read_jsonl(tasks_path, EvalTask)
+        except ValidationError as error:
+            print(f"Invalid tasks file {tasks_path}: {error}", file=sys.stderr)
+            return 1
+    counts = Counter(t.task_id for t in tasks)
+    if duplicated := sorted(task_id for task_id, n in counts.items() if n > 1):
+        print(f"Task IDs in several files: {duplicated[:5]}", file=sys.stderr)
+        return 2
     drafts, draft_errors = load_drafts(draft_paths)
     blocks = load_blocks(args.data_dir, tasks)
     chunks = load_chunks(gold_dir, tasks)

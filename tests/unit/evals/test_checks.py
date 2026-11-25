@@ -1075,3 +1075,10 @@ def test_inline_table_rows_and_spanning_blocks() -> None:
     assert not result.errors
     assert "quote_spans_blocks" in checks(result.warnings)
     assert result.questions[0].evidence_blocks == {"r1"}
+
+
+def test_assign_splits_keeps_a_fixed_task_split() -> None:
+    fixed = [task(f"x{i}", split="dev") for i in range(20)]
+    questions = run(fixed, [draft(f"x{i}") for i in range(20)]).questions
+    assert {q.split for q in questions} == {"dev"}
+    assert {q.split for q in assign_splits(questions, seed=1)} == {"dev"}

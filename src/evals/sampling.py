@@ -24,6 +24,7 @@ from itertools import pairwise, zip_longest
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 
 from src.data_pipeline.storage.iceberg import (
@@ -67,12 +68,17 @@ from src.evals.testset import (
     CompanyRef,
     Computed,
     DataKind,
+    EvalQuestion,
     EvalTask,
     MentionStyle,
     QuestionType,
+    SetManifest,
+    Split,
     TaskPassage,
     UnanswerableReason,
     XbrlFact,
+    hash_split,
+    read_jsonl,
     whole_number,
 )
 from src.evals.universe import CompanyProfile, OutsideCompany, load_universe
@@ -115,7 +121,28 @@ V2_PLAN: dict[QuestionType, int] = {
     "false_premise": 6,
 }
 V2_TOTAL = 150
-PLANS: dict[str, dict[QuestionType, int]] = {"v1": DEFAULT_PLAN, "v2": V2_PLAN}
+# Dev-only tasks added to v2 (weak types; exact quotas for 120, no extra).
+V2DEV_PLAN: dict[QuestionType, int] = {
+    "calc": 25,
+    "ranking": 15,
+    "compare_periods": 15,
+    "aggregation": 12,
+    "false_premise": 12,
+    "table_lookup": 12,
+    "numeric": 10,
+    "compare_companies": 9,
+    "unanswerable": 5,
+    "event_8k": 5,
+}
+PLANS: dict[str, dict[QuestionType, int]] = {
+    "v1": DEFAULT_PLAN,
+    "v2": V2_PLAN,
+    "v2dev": V2DEV_PLAN,
+}
+# Plans read with v2 inputs (universe, strata, tags, hard negatives).
+V2_PLANS = frozenset({"v2", "v2dev"})
+# `relative_time` tasks a plan aims for at its plan total (scaled with it).
+MIN_RELATIVE: dict[str, int] = {"v2dev": 20}
 # Types extra v2 tasks go to (one passage, large pools).
 EXTRA_TYPES: tuple[QuestionType, ...] = ("fact", "table_lookup", "list", "summary")
 # Every type in task-ID rotation order (v1 types first, as v1 had them).
@@ -235,14 +262,20 @@ def scale_plan(
 
 
 def plan_quotas(total: int, plan_id: str) -> tuple[dict[QuestionType, int], int]:
-    """Per-type quotas and the extra tasks `plan_extra` adds: v1 scales its
-    plan to `total`; v2 scales its minimums to `total * 142 / 150`."""
+    """Per-type quotas and the extra tasks `plan_extra` adds: v1 and v2dev
+    scale their plan to `total`; v2 scales its minimums to `total * 142 / 150`."""
 
     plan = PLANS[plan_id]
-    if plan_id == "v1":
+    if plan_id != "v2":
         return scale_plan(total, plan), 0
     base = scale_plan(total * sum(plan.values()) // V2_TOTAL, plan)
     return base, total - sum(base.values())
+
+
+def min_relative(total: int, plan_id: str) -> int:
+    """`relative_time` tasks to aim for: MIN_RELATIVE scaled to `total`."""
+
+    return MIN_RELATIVE.get(plan_id, 0) * total // sum(PLANS[plan_id].values())
 
 
 # --- chunk filters -------------------------------------------------------------
@@ -275,6 +308,10 @@ class Picker:
     overall: Counter[tuple[str, str]] = field(default_factory=Counter)
     per_type: Counter[tuple[str, str, str]] = field(default_factory=Counter)
     strata: Mapping[str, tuple[str, str]] = field(default_factory=dict)
+    # Newest filing per (company, form); single-passage picks take chunks of
+    # them first while `relative_needed` > 0 (`relative_time` tags).
+    newest: frozenset[str] = frozenset()
+    relative_needed: int = 0
 
     def rank(self, key: str) -> int:
         return rank(self.seed, key)
@@ -333,18 +370,41 @@ class Picker:
         self.add(qtype, *self.chunk_dims(chunk))
         self.used.add(chunk.chunk_id)
 
+    def take_all(self, planned: Iterable[PlannedTask]) -> None:
+        for task in planned:
+            for chunk in task.chunks:
+                self.take(task.question_type, chunk)
+
     def chunks(
         self, pool: Iterable[ChunkMeta], qtype: QuestionType, quota: int
     ) -> list[ChunkMeta]:
         """Up to `quota` unused chunks; a company's heading is asked once per
-        type (not the same table every year)."""
+        type (not the same table every year). While `relative_needed` > 0,
+        chunks of `newest` filings first."""
 
+        pool = list(pool)
+        asked: set[tuple[str, str]] = set()
+        picked: list[ChunkMeta] = []
+        if self.relative_needed > 0:
+            newest = [c for c in pool if c.filing_id in self.newest]
+            picked = self._chunks(
+                newest, qtype, min(quota, self.relative_needed), asked
+            )
+            self.relative_needed -= len(picked)
+        return picked + self._chunks(pool, qtype, quota - len(picked), asked)
+
+    def _chunks(
+        self,
+        pool: Iterable[ChunkMeta],
+        qtype: QuestionType,
+        quota: int,
+        asked: set[tuple[str, str]],
+    ) -> list[ChunkMeta]:
         by_company: dict[str, list[tuple[tuple[str, ...], ChunkMeta]]] = defaultdict(
             list
         )
         for chunk in pool:
             by_company[chunk.cik].append((chunk.dims(), chunk))
-        asked: set[tuple[str, str]] = set()
         picked: list[ChunkMeta] = []
 
         def heading(chunk: ChunkMeta) -> tuple[str, str]:
@@ -418,7 +478,8 @@ class Picker:
         passage_of: Callable[[FactCandidate], tuple[ChunkMeta, Occurrence] | None],
     ) -> list[tuple[XbrlFact, ChunkMeta]]:
         """Up to `quota` facts spread over company, form, concept and period;
-        current-period facts first; each with an unused passage chunk."""
+        current-period facts first (of `newest` filings while
+        `relative_needed` > 0); each with an unused passage chunk."""
 
         # Current and other facts by position (narrowing ignores order).
         current: dict[int, tuple[tuple[str, ...], FactCandidate]] = {}
@@ -430,19 +491,28 @@ class Picker:
                 (*strata, *candidate.dims()),
                 candidate,
             )
+        fresh = (
+            {i for i, (_, c) in current.items() if c.filing_id in self.newest}
+            if self.relative_needed > 0
+            else set()
+        )
         picked: list[tuple[XbrlFact, ChunkMeta]] = []
         while len(picked) < quota and (current or other):
-            pool = current or other
+            use_fresh = bool(fresh) and self.relative_needed > 0
+            pool = {i: current[i] for i in fresh} if use_fresh else current or other
             index, _ = self.narrow(
                 ((dims, (index, fact)) for index, (dims, fact) in pool.items()),
                 names,
                 "numeric",
                 lambda item: item[1].fact.fact_id,
             )[1]
-            choice = pool.pop(index)
+            choice = (current if use_fresh else pool).pop(index)
+            fresh.discard(index)
             found = passage_of(choice[1])
             if found is None or found[0].chunk_id in self.used:
                 continue
+            if use_fresh:
+                self.relative_needed -= 1
             chunk, occurrence = found
             # Fact dims only: numeric passages are statement tables, and counting
             # their topic would push other types off financial statements.
@@ -1211,6 +1281,21 @@ class TagContext:
     as_of: date | None
 
 
+def newest_filings(
+    stats: CorpusStats, as_of: date | None
+) -> dict[tuple[str, str], str]:
+    """(cik, form) -> the newest `filing_id` filed by `as_of`."""
+
+    newest: dict[tuple[str, str], tuple[date, str]] = {}
+    for filing_id, info in stats.filings.items():
+        if as_of is not None and info.filing_date > as_of:
+            continue
+        key = (info.cik, info.form)
+        if key not in newest or (info.filing_date, filing_id) > newest[key]:
+            newest[key] = (info.filing_date, filing_id)
+    return {key: filing_id for key, (_, filing_id) in newest.items()}
+
+
 def tag_context(
     stats: CorpusStats,
     headers: Mapping[str, CompanyHeader],
@@ -1218,14 +1303,8 @@ def tag_context(
     as_of: date | None,
 ) -> TagContext:
     by_company: dict[str, list[FilingInfo]] = defaultdict(list)
-    newest: dict[tuple[str, str], tuple[date, str]] = {}
-    for filing_id, info in stats.filings.items():
+    for info in stats.filings.values():
         by_company[info.cik].append(info)
-        if as_of is not None and info.filing_date > as_of:
-            continue
-        key = (info.cik, info.form)
-        if key not in newest or (info.filing_date, filing_id) > newest[key]:
-            newest[key] = (info.filing_date, filing_id)
     return TagContext(
         off_calendar=frozenset(
             cik
@@ -1236,7 +1315,7 @@ def tag_context(
         size_deciles={cik: p.size_decile for cik, p in profiles.items()}
         if len(profiles) >= SMALL_UNIVERSE
         else {},
-        newest={key: filing_id for key, (_, filing_id) in newest.items()},
+        newest=newest_filings(stats, as_of),
         as_of=as_of,
     )
 
@@ -1276,6 +1355,22 @@ def task_tags(task: PlannedTask, context: TagContext) -> tuple[str, ...]:
     if any(context.size_deciles.get(cik, 0) >= SMALL_DECILE for cik in ciks):
         tags.append("small_company")
     return tuple(dict.fromkeys(tags))
+
+
+def aim_relative(
+    picker: Picker,
+    planned: Sequence[PlannedTask],
+    context: TagContext,
+    wanted: int,
+) -> None:
+    """Make `picker` take chunks of newest filings first until `wanted`
+    tasks (with those `planned`) can carry `relative_time`."""
+
+    if context.as_of is None:
+        return
+    picker.newest = frozenset(context.newest.values())
+    have = sum("relative_time" in task_tags(t, context) for t in planned)
+    picker.relative_needed = max(0, wanted - have)
 
 
 def finish_v2(
@@ -1451,6 +1546,17 @@ def assemble(
     return tasks
 
 
+def relabel(
+    tasks: Sequence[EvalTask], prefix: str, split: Split | None
+) -> list[EvalTask]:
+    """Tasks with IDs `<prefix>0001`... (in order) and a fixed `split`."""
+
+    return [
+        task.model_copy(update={"task_id": f"{prefix}{number:04d}", "split": split})
+        for number, task in enumerate(tasks, start=1)
+    ]
+
+
 def coverage_summary(tasks: Iterable[EvalTask]) -> dict[str, dict[str, int]]:
     """Task counts per value of each coverage dimension (pair values split)."""
 
@@ -1472,6 +1578,112 @@ def coverage_summary(tasks: Iterable[EvalTask]) -> dict[str, dict[str, int]]:
     return {name: dict(sorted(counts.items())) for name, counts in summary.items()}
 
 
+# --- exclusion of an earlier set --------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Exclusion:
+    """What new tasks must not share with an earlier set: companies of its
+    `test` questions, chunks any of its tasks shows or lists as hard
+    negatives, and outside company names it asked about (normalized)."""
+
+    ciks: frozenset[str] = frozenset()
+    chunks: frozenset[str] = frozenset()
+    outside: frozenset[str] = frozenset()
+
+    def allows(self, chunk: ChunkMeta) -> bool:
+        return chunk.cik not in self.ciks and chunk.chunk_id not in self.chunks
+
+    def apply(
+        self, candidates: Sequence[ChunkMeta], stats: CorpusStats
+    ) -> tuple[list[ChunkMeta], CorpusStats]:
+        """Allowed candidates and `stats` without excluded companies; logs
+        what is excluded."""
+
+        kept = [c for c in candidates if self.allows(c)]
+        logger.info(
+            "eval_sampling_excluded",
+            companies=len(self.ciks),
+            corpus_companies=len(stats.companies.keys() & self.ciks),
+            chunks=len(self.chunks),
+            candidates=len(candidates) - len(kept),
+            outside=len(self.outside),
+        )
+        return kept, self.stats(stats)
+
+    def blocks(
+        self, chunks_of: Mapping[str, Sequence[ChunkMeta]]
+    ) -> dict[str, list[ChunkMeta]]:
+        return {
+            block: [c for c in found if self.allows(c)]
+            for block, found in chunks_of.items()
+        }
+
+    def stats(self, stats: CorpusStats) -> CorpusStats:
+        """`stats` without the excluded companies (outside names kept)."""
+
+        def keep[V](values: Mapping[str, V]) -> dict[str, V]:
+            return {cik: v for cik, v in values.items() if cik not in self.ciks}
+
+        return replace(
+            stats,
+            companies=keep(stats.companies),
+            first_year=keep(stats.first_year),
+            filings={
+                fid: info
+                for fid, info in stats.filings.items()
+                if info.cik not in self.ciks
+            },
+            years=defaultdict(set, keep(stats.years)),
+            probe_hits=defaultdict(set, keep(stats.probe_hits)),
+            section_probes=defaultdict(
+                set,
+                {
+                    key: found
+                    for key, found in stats.section_probes.items()
+                    if key[0] not in self.ciks
+                },
+            ),
+        )
+
+
+def read_exclusion(set_dir: Path) -> Exclusion:
+    """The `Exclusion` of a set directory (`set.json`, `tasks.jsonl`,
+    `questions.jsonl`). Test companies come from every task whose split
+    (fixed, else by hash) is `test`, also tasks without a question yet: a
+    later check can still turn them into test questions."""
+
+    manifest = SetManifest.read(set_dir)
+    if manifest is None:
+        raise FileNotFoundError(set_dir / "set.json")
+    tasks = read_jsonl(set_dir / "tasks.jsonl", EvalTask)
+    questions_path = set_dir / "questions.jsonl"
+    questions = (
+        read_jsonl(questions_path, EvalQuestion) if questions_path.exists() else []
+    )
+    test = [q for q in questions if q.split == "test"]
+    ciks = {c.cik for q in test for c in q.companies} | {
+        cik for q in test for cik in q.expected.ciks
+    }
+    for task in tasks:
+        if (task.split or hash_split(manifest.seed, task.task_id)) == "test":
+            ciks |= {c.cik for c in task.companies} | {p.cik for p in task.passages}
+    chunks = {p.chunk_id for t in tasks for p in t.passages}
+    chunks |= {c for t in tasks for c in t.hard_negative_chunks}
+    chunks |= {c for q in questions for c in q.hard_negative_chunks}
+    outside = {
+        t.hint
+        for t in tasks
+        if t.unanswerable_reason == "company_outside_corpus" and t.hint
+    }
+    outside |= {name for q in questions for name in q.expected.unknown_companies}
+    return Exclusion(
+        frozenset(ciks),
+        frozenset(chunks),
+        frozenset(normalize_name(name) for name in outside),
+    )
+
+
 # --- entry point -------------------------------------------------------------------------
 
 
@@ -1484,6 +1696,15 @@ class SampleSettings:
     plan_id: str = "v1"  # a PLANS key
     bronze_dir: Path | None = None  # v2: default `<data_dir>/bronze/sec_filings`
     as_of: date | None = None  # v2: `relative_time` tags
+    exclude: Exclusion | None = None  # an earlier set's companies and chunks
+    task_prefix: str = "t"
+    split: Split | None = None  # fixed split of every task
+    min_relative: int | None = None  # None: `min_relative(total, plan_id)`
+
+    def relative_wanted(self) -> int:
+        if self.min_relative is not None:
+            return self.min_relative
+        return min_relative(self.total, self.plan_id)
 
 
 _LEGAL_TAIL = re.compile(
@@ -1562,19 +1783,41 @@ class _V2:
         # universe.
         filings = bronze / "sec-edgar-filings"
         corpus = [d.name for d in filings.iterdir()] if filings.is_dir() else []
+        # Names an earlier set asked about are dropped: ask for that many
+        # more of each half (foreign, US-listed).
+        excluded = settings.exclude.outside if settings.exclude else frozenset()
         picks = universe_outside(
             profiles,
             bronze,
-            2 * outside_count(unanswerable),
+            2 * outside_count(unanswerable) + 2 * len(excluded),
             settings.seed,
             corpus_ciks=corpus,
         )
+        picks = [c for c in picks if normalize_name(c.name) not in excluded]
         return cls(
             bronze,
             profiles,
             tuple(outside_name(c) for c in picks),
             frozenset(c.name for c in picks if c.country != "US-listed"),
         )
+
+    def silver_inputs(
+        self,
+        silver: Catalog,
+        stats: CorpusStats,
+        fact_settings: FactSettings,
+        as_of: date | None,
+    ) -> tuple[dict[str, CompanyRef], FactSettings, FactInputs, TagContext]:
+        """Company directory, fact settings with sectors, fact inputs and
+        tag context, read from Silver."""
+
+        headers = read_company_headers(silver, self.bronze, latest_filings(stats))
+        directory = company_directory(stats, self.profiles, headers)
+        sectors = {c: r.sector for c, r in directory.items() if r.sector}
+        fact_settings = replace(fact_settings, sectors=sectors)
+        inputs = fact_inputs(silver, stats, self.profiles, fact_settings)
+        context = tag_context(stats, headers, self.profiles, as_of)
+        return directory, fact_settings, inputs, context
 
 
 def _strata(
@@ -1649,6 +1892,35 @@ def _reworded_pairs(
     ]
 
 
+def _temporal(candidates: Sequence[ChunkMeta], quota: int, seed: int) -> list[Pair]:
+    text = [c for c in candidates if is_eligible(c) and c.chunk_kind == "text"]
+    return temporal_candidates(temporal_pairs(text, seed), quota, seed)
+
+
+def _log_shortfall(
+    planned: Sequence[PlannedTask],
+    quotas: Mapping[QuestionType, int],
+    extra: int,
+    relative: int,
+) -> None:
+    """Warn about types short of their quota and `relative_time` tasks
+    short of `relative` (logged when aimed for)."""
+
+    shortfall = {
+        q: n - sum(t.question_type == q for t in planned) for q, n in quotas.items()
+    }
+    if any(shortfall.values()):
+        logger.warning(
+            "eval_sampling_shortfall",
+            shortfall={q: n for q, n in shortfall.items() if n},
+            extra=extra,
+        )
+    if relative:
+        tagged = sum("relative_time" in t.tags for t in planned)
+        log = logger.info if tagged >= relative else logger.warning
+        log("eval_sampling_relative_time", tasks=tagged, wanted=relative)
+
+
 def sample_tasks(
     data_dir: Path, gold_dir: Path, settings: SampleSettings
 ) -> tuple[list[EvalTask], int | None]:
@@ -1658,11 +1930,11 @@ def sample_tasks(
     quotas, extra = plan_quotas(settings.total, settings.plan_id)
     v2 = (
         _V2.read(data_dir, settings, quotas.get("unanswerable", 0))
-        if settings.plan_id == "v2"
+        if settings.plan_id in V2_PLANS
         else None
     )
+    relative = settings.relative_wanted()
     directory: dict[str, CompanyRef] | None = None
-    headers: dict[str, CompanyHeader] = {}
     inputs: FactInputs | None = None
     fact_settings = FactSettings(quotas, settings.seed)
     with open_gold_catalog_read_only(gold_dir) as gold:
@@ -1680,15 +1952,17 @@ def sample_tasks(
             candidates=len(candidates),
             companies=len(stats.companies),
         )
+        corpus = stats  # outside names must not match any corpus company
+        if settings.exclude is not None:
+            candidates, stats = settings.exclude.apply(candidates, stats)
         picker = Picker(settings.seed)
+        context: TagContext | None = None
         with open_silver_catalog_read_only(data_dir) as silver:
             if v2 is not None:
-                headers = read_company_headers(silver, v2.bronze, latest_filings(stats))
-                directory = company_directory(stats, v2.profiles, headers)
+                directory, fact_settings, inputs, context = v2.silver_inputs(
+                    silver, stats, fact_settings, settings.as_of
+                )
                 picker.strata = _strata(directory, v2.profiles)
-                sectors = {c: r.sector for c, r in directory.items() if r.sector}
-                fact_settings = replace(fact_settings, sectors=sectors)
-                inputs = fact_inputs(silver, stats, v2.profiles, fact_settings)
             facts = read_fact_candidates(
                 silver, stats.filings, settings.seed, settings.max_fact_instances
             )
@@ -1698,32 +1972,23 @@ def sample_tasks(
             current=sum(f.is_current for f in facts),
         )
         temporal = (
-            temporal_candidates(
-                temporal_pairs(
-                    [
-                        c
-                        for c in candidates
-                        if is_eligible(c) and c.chunk_kind == "text"
-                    ],
-                    settings.seed,
-                ),
-                quotas.get("temporal_change", 0),
-                settings.seed,
-            )
+            _temporal(candidates, quotas.get("temporal_change", 0), settings.seed)
             if inputs is not None
             else []
         )
         chunks_of, texts = _read_blocks(
             chunks, *_wanted_blocks(facts, inputs, temporal)
         )
+        if settings.exclude is not None:
+            chunks_of = settings.exclude.blocks(chunks_of)
         planned: list[PlannedTask] = []
         if inputs is not None:
             # Fact-type tasks first: numeric and text picks skip their chunks.
             fact_tasks = plan_fact_tasks(inputs, chunks_of, texts, fact_settings)
             planned = [fact_planned(task) for task in fact_tasks]
-            for task in planned:
-                for chunk in task.chunks:
-                    picker.take(task.question_type, chunk)
+            picker.take_all(planned)
+        if relative and context is not None:
+            aim_relative(picker, planned, context, relative)
         numeric = picker.facts(
             facts,
             quotas.get("numeric", 0),
@@ -1733,43 +1998,39 @@ def sample_tasks(
         reworded_pairs = _reworded_pairs(temporal, texts) if v2 is not None else None
         planned += plan_tasks(candidates, quotas, picker, stats, reworded_pairs)
         outside = (
-            alternate(outside_companies(stats), v2.foreign) if v2 is not None else None
+            alternate(outside_companies(corpus), v2.foreign) if v2 is not None else None
         )
         planned += plan_unanswerable(
             stats, quotas.get("unanswerable", 0), picker, outside
         )
-        if v2 is not None:
+        if settings.plan_id == "v2":
             planned += plan_extra(
                 candidates, planned, settings.total - len(planned), picker
             )
+        if v2 is not None and context is not None:
             in_memory = [
                 *candidates,
                 *(c for found in chunks_of.values() for c in found),
                 *(c for task in planned for c in task.chunks),
             ]
             sectors = {cik: sector for cik, (sector, _) in picker.strata.items()}
-            context = tag_context(stats, headers, v2.profiles, settings.as_of)
             planned = finish_v2(
                 planned, context, NegativeIndex(in_memory, sectors), settings.seed
             )
         texts = _picked_texts(chunks, planned, texts)
-    shortfall = {
-        q: n - sum(t.question_type == q for t in planned) for q, n in quotas.items()
-    }
-    if any(shortfall.values()):
-        logger.warning(
-            "eval_sampling_shortfall",
-            shortfall={q: n for q, n in shortfall.items() if n},
-            extra=extra,
-        )
+    _log_shortfall(planned, quotas, extra, relative)
     deciles = {cik: p.size_decile for cik, p in v2.profiles.items()} if v2 else None
-    tasks = assemble(planned, texts, directory, deciles)
+    tasks = relabel(
+        assemble(planned, texts, directory, deciles),
+        settings.task_prefix,
+        settings.split,
+    )
     return tasks, int(version) if version else None
 
 
 # EvalTask / CompanyRef fields added for v2, left out of a task's JSON at
 # their defaults so v1 `tasks.jsonl` stay byte-identical.
-V2_TASK_FIELDS = ("computed", "tags", "hard_negative_chunks")
+V2_TASK_FIELDS = ("computed", "tags", "hard_negative_chunks", "split")
 V2_COMPANY_FIELDS = ("former_names", "sector")
 
 

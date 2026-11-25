@@ -11,7 +11,6 @@ false premise not denied, near duplicates, skipped drafts).
 
 from __future__ import annotations
 
-import hashlib
 import itertools
 import re
 import unicodedata
@@ -56,9 +55,9 @@ from src.evals.testset import (
     EvalTask,
     Evidence,
     ExpectedFilters,
-    Split,
     TaskPassage,
     XbrlFact,
+    hash_split,
     normalize,
     whole_number,
 )
@@ -145,9 +144,6 @@ PREMISE_DENIAL = re.compile(
     r"\b(không|chưa|thực tế|ngược lại|sai)\b",
     re.IGNORECASE,
 )
-# `--assign-splits`: a question is `dev` when sha256(`{seed}:{task_id}`) is
-# below this share of 2**256 (each question on its own: stable as sets grow).
-DEV_SHARE = 0.4
 # EvalQuestion fields added for v2, left out of a question's JSON at their
 # defaults so v1.x `questions.jsonl` stay byte-identical.
 V2_FIELDS = ("computed", "tags", "hard_negative_chunks", "split")
@@ -1189,21 +1185,20 @@ def build_question(
         computed=task.computed,
         tags=task.tags,
         hard_negative_chunks=task.hard_negative_chunks,
+        split=task.split,
     )
 
 
 def assign_splits(questions: Sequence[EvalQuestion], seed: int) -> list[EvalQuestion]:
     """Each question in `dev` when sha256 of `{seed}:{task_id}` is below
     DEV_SHARE of 2**256, else `test`: decided per question, so adding or
-    dropping questions never moves another one (report shows the balance)."""
+    dropping questions never moves another one (report shows the balance).
+    A split the task fixed (dev-only additions) is kept."""
 
-    bound = int(DEV_SHARE * 2**256)
-
-    def split(question: EvalQuestion) -> Split:
-        digest = hashlib.sha256(f"{seed}:{question.task_id}".encode()).digest()
-        return "dev" if int.from_bytes(digest) < bound else "test"
-
-    return [q.model_copy(update={"split": split(q)}) for q in questions]
+    return [
+        q.model_copy(update={"split": q.split or hash_split(seed, q.task_id)})
+        for q in questions
+    ]
 
 
 def question_json(question: EvalQuestion) -> str:

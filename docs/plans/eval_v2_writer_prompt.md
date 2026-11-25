@@ -4,6 +4,11 @@ Run it only after `sample_testset.py --set-id v2` has written
 `evals/sets/v2/tasks.jsonl` and `evals/sets/v2/batches/*.jsonl`. The session
 writes only `evals/sets/v2/drafts/`; it never edits code, other sets or data.
 
+Dev-only additions (`--out-dir evals/sets/v2/extra`): paste the same prompt
+with every `evals/sets/v2/batches/` and `evals/sets/v2/drafts/` path read as
+`evals/sets/v2/extra/batches/` and `evals/sets/v2/extra/drafts/` (task IDs
+`x0001`…); everything else is unchanged.
+
 ---
 
 You are writing questions for a frozen evaluation set of LexiFin, a RAG system

@@ -3,31 +3,39 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import replace
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from src.evals.sampling import (
     V2_PLAN,
+    V2DEV_PLAN,
+    Exclusion,
     NegativeIndex,
     Picker,
     PlannedTask,
     TagContext,
     aggregation_groups,
+    aim_relative,
     alternate,
     assemble,
     calendar_fiscal,
     event_items,
     finish_v2,
+    min_relative,
     outside_name,
     plan_aggregation,
     plan_extra,
     plan_quotas,
     plan_spread,
+    read_exclusion,
+    relabel,
     reworded,
     task_json,
     task_tags,
     temporal_pairs,
+    write_tasks,
 )
 from src.evals.sampling_data import (
     AGGREGATION_PROBES,
@@ -35,16 +43,28 @@ from src.evals.sampling_data import (
     ChunkText,
     CompanyHeader,
     CorpusStats,
+    FactCandidate,
     FilingInfo,
+    Occurrence,
     company_ref,
     find_relation,
     former_names,
     record,
     sic_sector,
 )
-from src.evals.testset import Computed, XbrlFact
+from src.evals.testset import (
+    Computed,
+    EvalQuestion,
+    Evidence,
+    ExpectedFilters,
+    SetManifest,
+    Split,
+    XbrlFact,
+    dump_json,
+    write_jsonl,
+)
 from src.evals.universe import OutsideCompany
-from tests.unit.evals.test_sampling import chunk
+from tests.unit.evals.test_sampling import chunk, fact
 
 pytestmark = pytest.mark.unit
 
@@ -58,6 +78,15 @@ def test_v2_quotas_are_the_spec_minimums_plus_extra() -> None:
     quotas, extra = plan_quotas(300, "v2")
     assert quotas == {q: 2 * n for q, n in V2_PLAN.items()} and extra == 16
     assert plan_quotas(100, "v1")[1] == 0
+
+
+def test_v2dev_quotas_are_exact_and_scale() -> None:
+    assert plan_quotas(120, "v2dev") == (V2DEV_PLAN, 0)
+    quotas, extra = plan_quotas(60, "v2dev")
+    assert sum(quotas.values()) == 60 and extra == 0
+    assert quotas["calc"] == 12 or quotas["calc"] == 13
+    assert min_relative(120, "v2dev") == 20 and min_relative(240, "v2dev") == 40
+    assert min_relative(150, "v2") == 0 and min_relative(100, "v1") == 0
 
 
 def _kind(text: str) -> str | None:
@@ -399,3 +428,148 @@ def test_exhibit_number_keeps_suffixes() -> None:
         "99.0",
         "99.3(II)",
     ]
+
+
+def _question(task_id: str, cik: str, split: str, **fields: Any) -> EvalQuestion:
+    return EvalQuestion.model_validate(
+        {
+            "id": f"v2-{task_id}",
+            "task_id": task_id,
+            "question_en": "What changed?",
+            "question_vi": "Điều gì thay đổi?",
+            "reference_answer": "Something.",
+            "answerable": True,
+            "question_type": "fact",
+            "data_kind": "text",
+            "persona": "equity analyst",
+            "mention_style": "name",
+            "companies": [company_ref(cik, "Company", ("T",)).model_dump()],
+            "evidence_groups": [[Evidence(block_id="b1", quote="q").model_dump()]],
+            "expected": ExpectedFilters(ciks=(cik,)).model_dump(),
+            "split": split,
+            **fields,
+        }
+    )
+
+
+def test_read_exclusion_takes_test_companies_and_every_chunk(tmp_path: Path) -> None:
+    planned = [
+        PlannedTask("fact", (chunk(1, cik=ALPHA),), hard_negative_chunks=("n1",)),
+        PlannedTask("fact", (chunk(2, cik=BETA),)),
+        PlannedTask(
+            "unanswerable",
+            unanswerable_reason="company_outside_corpus",
+            hint="ING Groep N.V.",
+        ),
+        # A test task without a question yet (dropped draft): still excluded.
+        PlannedTask("fact", (chunk(5, cik=GAMMA),)),
+    ]
+    texts = {c.chunk_id: ChunkText("ctx", "text") for t in planned for c in t.chunks}
+    splits: list[Split] = ["test", "dev", "dev", "test"]
+    tasks = [
+        t.model_copy(update={"split": split})
+        for t, split in zip(assemble(planned, texts), splits, strict=True)
+    ]
+    write_tasks(tmp_path / "tasks.jsonl", tasks)
+    dump_json(
+        tmp_path / "set.json",
+        SetManifest(
+            set_id="v2",
+            as_of=date(2026, 11, 24),
+            seed=1,
+            total=4,
+            chunks_rules_version=8,
+        ).model_dump(mode="json"),
+    )
+    write_jsonl(
+        tmp_path / "questions.jsonl",
+        [
+            _question("t0001", ALPHA, "test", hard_negative_chunks=("n2",)),
+            _question("t0002", BETA, "dev"),
+        ],
+    )
+    exclusion = read_exclusion(tmp_path)
+    assert exclusion.ciks == {ALPHA, GAMMA}  # BETA only in a dev question
+    assert exclusion.chunks == {"c0001", "c0002", "c0005", "n1", "n2"}
+    assert exclusion.outside == {"ing groep"}
+    assert not exclusion.allows(chunk(3, cik=ALPHA))
+    assert not exclusion.allows(chunk(2, cik=BETA))
+    assert exclusion.allows(chunk(4, cik=BETA))
+
+
+def test_exclusion_drops_companies_from_candidates_stats_and_blocks() -> None:
+    stats = _stats(
+        (ALPHA, "risk_factors", 2024, {0}), (BETA, "risk_factors", 2024, {1})
+    )
+    stats.first_year.update({ALPHA: 2021, BETA: 2022})
+    stats.filings["f1"] = FilingInfo(ALPHA, "10-K", 2024, "FY", None, date(2025, 2, 1))
+    stats.filings["f2"] = FilingInfo(BETA, "10-K", 2024, "FY", None, date(2025, 2, 1))
+    exclusion = Exclusion(frozenset({ALPHA}), frozenset({"c0002"}))
+    pool = [chunk(1, cik=ALPHA), chunk(2, cik=BETA), chunk(3, cik=BETA)]
+    kept, left = exclusion.apply(pool, stats)
+    assert [c.chunk_id for c in kept] == ["c0003"]
+    assert ALPHA not in left.companies and BETA in left.companies
+    assert set(left.filings) == {"f2"} and set(left.first_year) == {BETA}
+    assert [key[0] for key in left.section_probes] == [BETA]
+    assert ALPHA in stats.companies  # the corpus stats stay whole
+    blocks = exclusion.blocks({"b": pool})
+    assert [c.chunk_id for c in blocks["b"]] == ["c0003"]
+
+
+def test_relabel_sets_prefix_and_split() -> None:
+    planned = [PlannedTask("fact", (chunk(n),)) for n in (1, 2)]
+    texts = {c.chunk_id: ChunkText("ctx", "text") for t in planned for c in t.chunks}
+    tasks = assemble(planned, texts)
+    assert relabel(tasks, "t", None) == tasks
+    dev = relabel(tasks, "x", "dev")
+    assert [t.task_id for t in dev] == ["x0001", "x0002"]
+    assert all(t.split == "dev" for t in dev)
+    assert '"split":"dev"' in task_json(dev[0])
+
+
+def test_picker_takes_newest_filings_until_relative_needed() -> None:
+    pool = [
+        chunk(
+            n,
+            filing_id="new" if n < 3 else "old",
+            subheading=f"Heading {'abcdefghi'[n] * 3}",
+        )
+        for n in range(1, 9)
+    ]
+    picker = Picker(seed=1, newest=frozenset({"new"}), relative_needed=2)
+    picked = picker.chunks(pool, "table_lookup", 4)
+    assert len(picked) == 4 and {c.filing_id for c in picked[:2]} == {"new"}
+    assert picker.relative_needed == 0
+    # Without a need, the same pool picks as a plain picker does.
+    plain = Picker(seed=1).chunks(pool, "table_lookup", 4)
+    assert plain == Picker(seed=1, newest=frozenset({"new"})).chunks(
+        pool, "table_lookup", 4
+    )
+
+
+def test_picker_facts_prefer_newest_filing() -> None:
+    occurrence = Occurrence("b1", None, "1")
+    old = fact(occurrence)
+    new = replace(fact(occurrence, concept="Assets"), filing_id="f-new")
+    passages = {"f1": chunk(1), "f-new": chunk(2)}
+
+    def passage_of(candidate: FactCandidate) -> tuple[ChunkMeta, Occurrence]:
+        return passages[candidate.filing_id], occurrence
+
+    picker = Picker(seed=1, newest=frozenset({"f-new"}), relative_needed=1)
+    picked = picker.facts([old, new], 1, passage_of)
+    assert [f.concept for f, _ in picked] == ["Assets"]
+    assert picker.relative_needed == 0
+
+
+def test_aim_relative_counts_tasks_already_tagged() -> None:
+    context = TagContext(
+        frozenset(), {}, {(ALPHA, "10-K"): "f-new"}, as_of=date(2026, 1, 1)
+    )
+    tagged = PlannedTask("calc", (chunk(1, filing_id="f-new"),))
+    picker = Picker(seed=1)
+    aim_relative(picker, [tagged], context, 3)
+    assert picker.newest == {"f-new"} and picker.relative_needed == 2
+    unset = Picker(seed=1)
+    aim_relative(unset, [tagged], replace(context, as_of=None), 3)
+    assert unset.relative_needed == 0
