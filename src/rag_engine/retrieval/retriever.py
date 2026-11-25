@@ -53,6 +53,7 @@ logger = get_logger(__name__)
 
 # "Latest" covers the last annual report and the quarters after it.
 LATEST_DAYS = timedelta(days=400)
+_QUARTER_INDEX = {"Q1": 1, "Q2": 2, "Q3": 3, "FY": 4}
 
 
 @dataclass(frozen=True)
@@ -198,11 +199,11 @@ class Retriever:
         timings: dict[str, float] = {}
         started = time.perf_counter()
         profiles = {name: t.profile for name, t in self.targets.items()}
-        plan = analyze_query(
-            question, profiles, self.chat, self.today or datetime.now(UTC).date()
-        )
+        today = self.today or datetime.now(UTC).date()
+        plan = analyze_query(question, profiles, self.chat, today)
         timings["analyze_s"] = time.perf_counter() - started
         notes = [*plan.notes]
+        plan = self._offset_years(plan, today, notes)
         mark = time.perf_counter()
         planned = self._plan_searches(plan, notes)
         timings["filters_s"] = time.perf_counter() - mark
@@ -259,6 +260,68 @@ class Retriever:
             **result.timings,
         )
         return result
+
+    def _offset_years(
+        self, plan: QueryPlan, today: date, notes: list[str]
+    ) -> QueryPlan:
+        """Fiscal-year offsets ("this fiscal year", "last fiscal year") as
+        years of each named company's current fiscal year, else today's."""
+
+        if not plan.fiscal_offsets:
+            return plan
+        current: set[int] = set()
+        for name in plan.corpora:
+            target = self.targets[name]
+            for company in self._companies(target, plan)[0]:
+                year = self._current_fiscal_year(target, company.cik, today)
+                if year is not None:
+                    current.add(year)
+        current = current or {today.year}
+        years = {y + o for y in current for o in plan.fiscal_offsets}
+        notes.append(
+            f"fiscal years {sorted(years)} for offsets {list(plan.fiscal_offsets)}"
+        )
+        return replace(
+            plan,
+            fiscal_years=tuple(sorted({*plan.fiscal_years, *years})),
+            calendar=False,
+        )
+
+    def _current_fiscal_year(self, target: Target, cik: str, today: date) -> int | None:
+        """The fiscal year holding `today`: from the newest 10-K/10-Q filed
+        by then, counting the quarters since its period end (a 10-K ends
+        its year)."""
+
+        points, _ = self.client.scroll(
+            target.collection,
+            scroll_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="cik", match=models.MatchValue(value=cik)
+                    ),
+                    models.FieldCondition(
+                        key="form", match=models.MatchAny(any=["10-K", "10-Q"])
+                    ),
+                    models.FieldCondition(
+                        key="filing_date", range=models.DatetimeRange(lte=today)
+                    ),
+                ]
+            ),
+            order_by=models.OrderBy(key="filing_date", direction=models.Direction.DESC),
+            limit=1,
+            with_payload=["fiscal_year", "fiscal_period", "period_end_date"],
+        )
+        payload = points[0].payload if points else None
+        if not payload or not payload.get("fiscal_year"):
+            return None
+        quarter = _QUARTER_INDEX.get(str(payload.get("fiscal_period")))
+        end = payload.get("period_end_date")
+        if quarter is None or not end:
+            return None
+        days = (today - date.fromisoformat(str(end)[:10])).days
+        # Quarters run 90-92 days; the one after the period end holds day 1.
+        holding = quarter + 1 + max(days - 1, 0) // 92
+        return int(payload["fiscal_year"]) + (holding - 1) // 4
 
     def _plan_searches(self, plan: QueryPlan, notes: list[str]) -> _Planned:
         planned = _Planned()

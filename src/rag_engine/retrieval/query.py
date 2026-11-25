@@ -125,6 +125,10 @@ class QueryPlan:
     # filing-date windows. Years only dating such a filing are not in
     # `fiscal_years`.
     filed_months: tuple[str, ...] = ()
+    # Fiscal years relative to each company's current one ("this fiscal
+    # year" 0, "last fiscal year" -1); the retriever resolves them from the
+    # company's newest filing into `fiscal_years`.
+    fiscal_offsets: tuple[int, ...] = ()
     source: Literal["llm", "rules"] = "rules"
     notes: tuple[str, ...] = field(default=())
 
@@ -133,7 +137,12 @@ class QueryPlan:
 
     @property
     def has_period(self) -> bool:
-        return bool(self.fiscal_years or self.fiscal_periods or self.filed_months)
+        return bool(
+            self.fiscal_years
+            or self.fiscal_periods
+            or self.filed_months
+            or self.fiscal_offsets
+        )
 
 
 def _languages(corpora: Mapping[str, CorpusProfile]) -> tuple[str, ...]:
@@ -245,7 +254,9 @@ def analyze_query(
     or its reply fails (the reason is kept in `notes`)."""
 
     if chat is None:
-        return rule_plan(question, corpora, notes=("no query model: rules",))
+        return rule_plan(
+            question, corpora, notes=("no query model: rules",), today=today
+        )
     try:
         analysis, _ = generate_structured(
             chat,
@@ -255,8 +266,10 @@ def analyze_query(
         )
     except LLMError as error:
         reason = f"query model failed ({type(error).__name__}: {error}): rules"
-        return rule_plan(question, corpora, notes=(reason[:300],))
-    return with_search_texts(checked_plan(question, analysis, corpora), corpora, chat)
+        return rule_plan(question, corpora, notes=(reason[:300],), today=today)
+    return with_search_texts(
+        checked_plan(question, analysis, corpora, today), corpora, chat
+    )
 
 
 def _translation_prompt(language: str) -> str:
@@ -328,11 +341,15 @@ def _question_language(question: str) -> str:
 
 
 def checked_plan(
-    question: str, analysis: QueryAnalysis, corpora: Mapping[str, CorpusProfile]
+    question: str,
+    analysis: QueryAnalysis,
+    corpora: Mapping[str, CorpusProfile],
+    today: date | None = None,
 ) -> QueryPlan:
     """Keep only values the corpora know; no corpus left means all of them.
-    Periods the model misreads most (partial years, dates, filing months)
-    are completed from the question's own words."""
+    Periods the model misreads most (partial years, dates, filing months,
+    relative years against `today`) are completed from the question's own
+    words, and forms the question does not name are dropped."""
 
     notes: list[str] = []
     chosen = tuple(dict.fromkeys(c for c in analysis.corpora if c in corpora))
@@ -364,17 +381,36 @@ def checked_plan(
     ):
         if len(kept) < len(set(given)):
             notes.append(f"unknown {kind} dropped: {given}")
+    # Not an 8-K for an event (a vote is in an 8-K the user need not name).
+    named = (
+        *_named_forms(question),
+        *(("8-K",) if _EVENT_TOPIC.search(question) else ()),
+    )
+    if unnamed := [f for f in plan_forms if f not in named]:
+        notes.append(f"forms the question does not name dropped: {unnamed}")
+        plan_forms = tuple(f for f in plan_forms if f not in unnamed)
     parsed = [(value, _period(value)) for value in analysis.fiscal_periods]
     if unknown := [value for value, (period, _) in parsed if period is None]:
         notes.append(f"unknown periods dropped: {unknown}")
     periods = tuple(dict.fromkeys(p for _, (p, _) in parsed if p))
     years = {*analysis.fiscal_years, *(y for _, (_, y) in parsed if y)}
-    words = _read_periods(question)
+    relative = read_relative(question, today)
+    words = _read_periods(relative.text)
+    if relative.offsets or relative.years:
+        # The model's years for "this year" / "this fiscal year" are guesses.
+        notes.append(
+            f"relative years from the question: {relative.years or relative.offsets}"
+        )
+        years = set(words.years) if relative.years else set()
     periods, years, calendar = _completed(analysis, periods, years, words, notes)
+    if relative.years and not words.fiscal:
+        calendar = True
+    if relative.offsets:
+        calendar = False
     model_months = _model_months(question, analysis.filed_months, notes)
     filed = tuple(dict.fromkeys([*model_months, *words.filed_months]))
-    asked = tuple(dict.fromkeys(_form(f) for f in analysis.forms))
-    kept_years, periods = _filed_scope(years, periods, filed, asked, words)
+    kept_years, periods = _filed_scope(years, periods, filed, plan_forms, words)
+    filed = _with_months(filed, relative)
     return QueryPlan(
         question=question,
         language=analysis.language.lower() or "und",
@@ -392,8 +428,10 @@ def checked_plan(
         calendar=calendar,
         forms=plan_forms,
         topics=plan_topics,
-        wants_latest=analysis.wants_latest and not (kept_years or periods or filed),
+        wants_latest=analysis.wants_latest
+        and not (kept_years or periods or filed or relative.offsets),
         filed_months=filed,
+        fiscal_offsets=relative.offsets,
         source="llm",
         notes=tuple(notes),
     )
@@ -408,7 +446,7 @@ def _completed(
 ) -> tuple[tuple[str, ...], set[int], bool]:
     """A model's periods completed from the question's words: FY for a
     year-end date, the partial years' quarters, a date's calendar quarter
-    when nothing else is asked."""
+    unless the question names a quarter."""
 
     if words.year_ends and "FY" not in periods:
         # "fiscal year ended September 28, 2024": the year, not its last quarter.
@@ -425,10 +463,21 @@ def _completed(
             # Ended on a stated date: that date's calendar quarter.
             return merged, years | set(words.date_years), True
         return merged, years, calendar
-    if not periods and words.dated:
-        # A date's quarter is a calendar one (search matches its period end).
-        notes.append(f"periods from dates in the question: {words.dated}")
-        return words.dated, years | set(words.date_years), True
+    if words.dated and periods and words.quarters:
+        # The question names its quarter ("Q4 fiscal 2025, the quarter ended
+        # June 30, 2025"): the model's reading stands, with the fiscal years
+        # the question writes (the model shifts them next to dates).
+        return periods, years | (set(words.years) if words.fiscal else set()), calendar
+    if words.dated:
+        # Otherwise a date's quarter is a calendar one (search matches its
+        # period end) and overrules the model (a fiscal Q4 for "the quarter
+        # ended September 30, 2025" of a June filer); FY stays when the
+        # question names a whole year.
+        whole = ("FY",) if words.full_year and "FY" in periods else ()
+        dated = tuple(dict.fromkeys([*words.dated, *whole]))
+        if dated != periods:
+            notes.append(f"periods from dates in the question: {words.dated}")
+        return dated, years | set(words.date_years), True
     return periods, years, calendar
 
 
@@ -714,12 +763,17 @@ _RELEASE_BEFORE = re.compile(
     re.IGNORECASE,
 )
 # A question about an 8-K or an event: a bare month + year dates its filing
-# ("March 2023 bylaw amendment", "January 2026 deal"). Not "press release":
+# ("March 2023 bylaw amendment", "January 2026 deal", "the credit facility
+# it ended in April 2025", "the vote at its May 2026 meeting"). Not "press release":
 # a release reports periods ("revenue in September 2024").
 _EVENT_TOPIC = re.compile(
     r"\b8-?ks?\b|current report|báo cáo hiện hành|\bbylaws?\b|điều lệ|\bamend|"
     r"sửa đổi|\bappoint|bổ nhiệm|\bresign|từ nhiệm|từ chức|\bdeals?\b|\bacqui|"
-    r"\bmergers?\b|\bdivest|thương vụ|sáp nhập|thâu tóm",
+    r"\bmergers?\b|\bdivest|thương vụ|sáp nhập|thâu tóm|"
+    r"\bcredit\s+(facility|agreement)|\brevolv|\bterminat|\bindenture|"
+    r"hạn mức tín dụng|khoản vay|chấm dứt|\bvot(e|ed|es|ing)\b|\belect(ed|ion)s?\b|"
+    r"\b(shareholders?|stockholders?|annual)\s+meetings?\b|bỏ phiếu|biểu quyết|"
+    r"đại hội",
     re.IGNORECASE,
 )
 # Any filing or event wording: only then can a model's month be a filing's.
@@ -1027,11 +1081,13 @@ def rule_plan(
     question: str,
     corpora: Mapping[str, CorpusProfile],
     notes: tuple[str, ...] = (),
+    today: date | None = None,
 ) -> QueryPlan:
     """Language, years, periods, filing months, forms, topics and recency
-    from patterns."""
+    from patterns; relative years against `today`."""
 
-    words = _read_periods(question)
+    relative = read_relative(question, today)
+    words = _read_periods(relative.text)
     periods = [*words.quarters, *words.partial]
     if words.year_ends or (words.partial and words.other_year):
         periods.append("FY")
@@ -1040,10 +1096,11 @@ def rule_plan(
         periods = list(words.dated)
     elif not periods and words.full_year:
         periods = ["FY"]
-    asked = tuple(dict.fromkeys(_form(m) for m in _FORM.findall(question)))
+    asked = _named_forms(question)
     years, kept = _filed_scope(
         words.years, tuple(dict.fromkeys(periods)), words.filed_months, asked, words
     )
+    filed = _with_months(words.filed_months, relative)
     forms = {f for p in corpora.values() for f in p.forms}
     topics = tuple(dict.fromkeys(t for rx, t in _TOPIC_WORDS if rx.search(question)))
     language = _question_language(question)
@@ -1058,16 +1115,196 @@ def rule_plan(
         fiscal_years=years,
         fiscal_periods=kept,
         calendar=bool(years)
+        and not relative.offsets
         and (
             from_dates
             or (words.partial_dated and not words.quarters)
+            or (bool(relative.years) and not words.fiscal)
             or not (words.fiscal or words.quarters or named_year)
         ),
         forms=_known(asked, forms),
         topics=topics,
-        wants_latest=not (years or kept or words.filed_months)
+        wants_latest=not (years or kept or filed or relative.offsets)
         and bool(_LATEST.search(question)),
-        filed_months=words.filed_months,
+        filed_months=filed,
+        fiscal_offsets=relative.offsets,
         source="rules",
         notes=notes,
     )
+
+
+# Relative time, read against today, only in a question naming no year of
+# its own. "This year" / "năm nay" is today's year and "last year", "a year
+# earlier", "năm ngoái" the one before: written into the question, so the
+# rules above read "the end of June this year" as a date, and a month
+# without a year takes the one year so written ("its August 8-K this
+# year"). "This fiscal year" and "last fiscal year" depend on each
+# company's calendar (Constellation's fiscal 2027 runs March 2026-February
+# 2027): offsets the retriever resolves. "Two months ago" / "hai tháng
+# trước" searches filings of that month and its neighbours, in any question.
+_THIS_YEAR = re.compile(
+    r"\b(this|current)\s+year\b|\bnăm\s+nay\b|\bnăm\s+hiện\s+tại\b", re.IGNORECASE
+)
+# "Last year" asks a year; the others are comparison bases, a year before
+# the asked one ("this year's Q2 vs the year-ago quarter").
+_LAST_YEAR = re.compile(r"\b(last|previous)\s+year\b|\bnăm\s+ngoái\b", re.IGNORECASE)
+_YEAR_BEFORE = re.compile(
+    r"\bprior\s+year\b|\ba\s+year\s+(earlier|ago|before)\b|\bthe\s+year\s+before\b|"
+    r"\byear[\s-]+ago\b|\bnăm\s+trước(\s+đó)?\b(?!\s+khi)",
+    re.IGNORECASE,
+)
+# Right before a relative year that is only the comparison base.
+_COMPARED_BEFORE = re.compile(
+    r"\b(compar\w*(\s+(with|to))?|versus|vs\.?|than|from|against|so\s+với|"
+    r"cùng\s+kỳ|same\s+(quarter|period|month))\s+(the\s+)?(same\s+\w+\s+)?$",
+    re.IGNORECASE,
+)
+_THIS_FISCAL = re.compile(
+    r"\b(this|current)\s+fiscal\s+year\b|"
+    r"\bnăm\s+tài\s+chính\s+(này|nay|hiện\s+tại)\b",
+    re.IGNORECASE,
+)
+_LAST_FISCAL = re.compile(
+    r"\b(last|previous|prior|latest|most\s+recent)\s+(completed\s+)?fiscal\s+year\b|"
+    r"\bfiscal\s+year\s+that\s+(just\s+)?ended\b|"
+    r"\bnăm\s+tài\s+chính\s+(vừa\s+rồi|vừa\s+qua|trước|vừa\s+kết\s+thúc|gần\s+nhất)\b",
+    re.IGNORECASE,
+)
+_COUNT_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "một": 1, "hai": 2, "ba": 3, "bốn": 4, "tư": 4, "năm": 5, "sáu": 6,
+}  # fmt: skip
+_COUNT = r"(\d{1,2}|a|an|one|two|three|four|five|six|một|hai|ba|bốn|tư|năm|sáu)"
+_MONTHS_AGO = re.compile(
+    rf"\b{_COUNT}\s+months?\s+ago\b|\blast\s+month\b(?!\s+of)|"
+    rf"\b{_COUNT}\s+tháng\s+trước\b(?!\s+đó)|"
+    rf"\bcách\s+đây\s+(?:khoảng\s+)?{_COUNT}\s+tháng\b|"
+    r"(?:^|(?<=[,.;:?!(]\s)|(?<=\btrong\s)|(?<=\bvào\s))tháng\s+trước\b(?!\s+đó)",
+    re.IGNORECASE,
+)
+_EXPLICIT_YEAR = re.compile(
+    rf"{_YEAR.pattern}|\bfy\s?'?\d{{2}}\b|\b[1-4]q'?\d{{2}}\b|'\d{{2}}\b|"
+    r"(?<![\d/])\d{1,2}/\d{1,2}/\d{2}(?![\d/])",
+    re.IGNORECASE,
+)
+# A capitalized month name without a day, year or "quarter" after it, or
+# "tháng 8" without a year.
+_YEARLESS_MONTH = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October|"
+    r"November|December)\b(?!\s*(?:\d{1,2}(?![\d-])|\d{4}|,\s*\d|of\s+\d|quarter))|"
+    r"\b[tT]háng\s+\d{1,2}\b(?!\s*(?:[/-]|năm\b))"
+)
+
+
+@dataclass(frozen=True)
+class Relative:
+    """A question's relative time: its text with calendar years written in,
+    the years so written, fiscal-year offsets and the months searched."""
+
+    text: str
+    years: tuple[int, ...] = ()
+    offsets: tuple[int, ...] = ()
+    months: tuple[str, ...] = ()
+
+
+def read_relative(question: str, today: date | None) -> Relative:
+    if today is None:
+        return Relative(question)
+    months = _months_ago(question, today)
+    if _EXPLICIT_YEAR.search(question):
+        return Relative(question, months=months)
+    this_fiscal = bool(_THIS_FISCAL.search(question))
+    if this_fiscal or _LAST_FISCAL.search(question):
+        anchor = 0 if this_fiscal else -1
+        rest = _LAST_FISCAL.sub(" ", _THIS_FISCAL.sub(" ", question))
+        before = _LAST_YEAR.search(rest) or _YEAR_BEFORE.search(rest)
+        offsets = {anchor, *((anchor - 1,) if before else ())}
+        return Relative(question, offsets=tuple(sorted(offsets)), months=months)
+    if _LATEST.search(question):
+        # "latest 10-K vs the prior year": the newest filing, not a year.
+        return Relative(question, months=months)
+    # The asked year: "this year", else a "last year" that is no comparison
+    # base; the comparison words then mean the year before it.
+    if _THIS_YEAR.search(question):
+        asked = today.year
+    elif any(not _compared(question, m) for m in _LAST_YEAR.finditer(question)):
+        asked = today.year - 1
+    else:
+        return Relative(question, months=months)
+    text = _THIS_YEAR.sub(lambda m: _year_text(m.group(), today.year), question)
+    text = _LAST_YEAR.sub(lambda m: _year_text(m.group(), today.year - 1), text)
+    text = _YEAR_BEFORE.sub(lambda m: _year_text(m.group(), asked - 1), text)
+    found = {int(y) for y in _YEAR.findall(text)}
+    if found == {asked}:
+        text = _YEARLESS_MONTH.sub(lambda m: _month_text(m, asked), text)
+    return Relative(text, years=tuple(sorted(found)), months=months)
+
+
+def _compared(question: str, match: re.Match[str]) -> bool:
+    return bool(_COMPARED_BEFORE.search(question[: match.start()]))
+
+
+def _year_text(phrase: str, year: int) -> str:
+    """The year in place of a relative phrase, in the phrase's language."""
+
+    return f"năm {year}" if phrase.lower().startswith("năm") else str(year)
+
+
+def _month_text(match: re.Match[str], year: int) -> str:
+    """A yearless month with the year; not "May" the verb ("May Apple ...")."""
+
+    month, text = match.group(), match.string
+    if month == "May" and (
+        re.search(r"(^|[.?!]\s*)$", text[: match.start()])
+        or re.match(r"\s+[A-Z]", text[match.end() :])
+    ):
+        return month
+    return (
+        f"{month} năm {year}"
+        if month.lower().startswith("tháng")
+        else f"{month} {year}"
+    )
+
+
+def _months_ago(question: str, today: date) -> tuple[str, ...]:
+    """Months of "N months ago" and the one on each side (filings come late)."""
+
+    found: list[str] = []
+    for match in _MONTHS_AGO.finditer(question):
+        count = next((g for g in match.groups() if g), "1").lower()
+        back = int(count) if count.isdigit() else _COUNT_WORDS.get(count, 1)
+        for step in (back + 1, back, back - 1):
+            index = today.year * 12 + today.month - 1 - step
+            found.append(f"{index // 12:04d}-{index % 12 + 1:02d}")
+    return tuple(dict.fromkeys(found))
+
+
+def _with_months(filed: tuple[str, ...], relative: Relative) -> tuple[str, ...]:
+    """Filing months plus months counted back from today."""
+
+    return tuple(dict.fromkeys([*filed, *relative.months]))
+
+
+# Forms a question names, by number or by name.
+_NAMED_FORMS = (
+    (re.compile(r"\b10-?ks?\b|\bannual\s+(reports?|filings?)\b|"
+                r"báo\s+cáo(\s+tài\s+chính)?\s+(thường\s+niên|năm)\b", re.IGNORECASE),
+     "10-K"),
+    (re.compile(r"\b10-?qs?\b|\bquarterly\s+(reports?|filings?)\b|"
+                r"báo\s+cáo(\s+tài\s+chính)?\s+qu[ýí]\b", re.IGNORECASE), "10-Q"),
+    # An earnings release is an 8-K exhibit.
+    (re.compile(r"\b8-?ks?\b|\bcurrent\s+reports?\b|\b(press|earnings)\s+releases?\b|"
+                r"báo\s+cáo\s+(hiện\s+hành|bất\s+thường)\b|thông\s+cáo",
+                re.IGNORECASE), "8-K"),
+)  # fmt: skip
+
+
+def _named_forms(question: str) -> tuple[str, ...]:
+    """In order of mention."""
+
+    found = sorted(
+        (match.start(), form)
+        for pattern, form in _NAMED_FORMS
+        if (match := pattern.search(question))
+    )
+    return tuple(form for _, form in found)

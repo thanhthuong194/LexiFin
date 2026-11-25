@@ -180,6 +180,7 @@ def _retrieve(
     *,
     reranker: Any = None,
     settings: RetrieverSettings | None = None,
+    today: date = TODAY,
 ) -> RetrievalResult:
     if analysis is not None and not json.loads(analysis)["searches"]:
         # The schema requires an English text; the question is English.
@@ -189,7 +190,7 @@ def _retrieve(
         client,
         Models(FakeEmbedder(), chat, reranker or FakeReranker()),
         settings=settings or RetrieverSettings(min_results=1),
-        today=TODAY,
+        today=today,
     )
     return retriever.retrieve(question)
 
@@ -453,3 +454,26 @@ def test_latest_release_follows_the_ex99_topic_not_the_newest_8k(
         f.startswith("latest: filed since 2025-01-30")
         for f in result.filters["sec_filings"]
     )
+
+
+def test_fiscal_year_offsets_follow_each_company_calendar(client: QdrantClient) -> None:
+    on = date(2025, 3, 15)
+    # Alpha's newest filing is its fiscal Q1 2025 10-Q (ended 2024-12-28):
+    # fiscal 2025 is running. The model's year for "this fiscal year" is a guess.
+    result = _retrieve(
+        client,
+        "Alpha net sales this fiscal year versus a year earlier",
+        _analysis(fiscal_years=[2030]),
+        today=on,
+    )
+    assert result.plan.fiscal_years == (2024, 2025)
+    assert not result.plan.calendar
+    # Beta's newest is its FY2024 10-K (ended 2024-12-31): 2024 has ended.
+    result = _retrieve(
+        client,
+        "Beta liquidity in its last fiscal year",
+        _analysis(companies=[{"name": "Beta Inc", "ticker": "BET"}]),
+        today=on,
+    )
+    assert result.plan.fiscal_years == (2024,)
+    assert {p.cik for p in result.passages} == {BETA}

@@ -130,6 +130,11 @@ TICKERS = CompanyIndex(
         _row("0001126328", "Principal Financial Group Inc", ["PFG"]),
         _row("0001045810", "NVIDIA CORP", ["NVDA"]),
         _row("0000860731", "Tyler Technologies Inc", ["TYL"]),
+        _row("0000352915", "UNIVERSAL HEALTH SERVICES, INC.", ["UHS"]),
+        _row("0000731766", "UNITEDHEALTH GROUP INCORPORATED", ["UNH"]),
+        _row("0000079282", "BROWN & BROWN, INC.", ["BRO"]),
+        _row("0002005951", "Smurfit WestRock plc", ["SW"]),
+        _row("0000811156", "CMS ENERGY CORP", ["CMS"]),
     ]
 )
 
@@ -159,6 +164,24 @@ TICKERS = CompanyIndex(
          ["0000711404"], []),
         ("Who is Valero's COO?", [("Valero Energy Corporation", "VLO")],
          ["0001035002"], []),
+        # The model's only mention, unwritten, is a misread of the one
+        # ticker written (x0047); not when the question names it.
+        ("Who is the trustee for the notes UHS issued in August?",
+         [("UnitedHealth Group Incorporated", "UNH")], ["0000352915"], []),
+        ("Who is the trustee for the notes UnitedHealth issued, per UHS?",
+         [("UnitedHealth Group Incorporated", "UNH")], ["0000731766"], []),
+        # No company from the model: every written ticker is the user's,
+        # a word ticker too when possessive (x0050, x0101).
+        ("How much cash did BRO hold at June 30?", [], ["0000079282"], []),
+        ("BRO nắm giữ bao nhiêu tiền vào cuối quý 2?", [("Broadcom Inc.", "AVGO")],
+         ["0000079282"], []),
+        ("How did SW's earnings presentation wording change?", [],
+         ["0002005951"], []),
+        ("How did SW wording change?", [], [], []),
+        # Agencies, not companies; brands are no misread of another ticker.
+        ("How did CMS's 2026 rate notice affect insurers?", [], [], []),
+        ("What did Google say about UHS?", [("Alphabet Inc.", None)],
+         [], ["Alphabet Inc."]),
         # Mentions the model resolved stay, whatever their names' wording.
         ("Compare Disney's and RCL's capex", [("The Walt Disney Company", "DIS")],
          ["0001744489", "0000884887"], []),
@@ -218,7 +241,7 @@ def _analysis(**overrides: Any) -> QueryAnalysis:
 
 def test_checked_plan_keeps_known_values_only() -> None:
     plan = checked_plan(
-        "q",
+        "What was Apple's revenue in its Q2 2024 10-Q?",
         _analysis(
             corpora=["sec_filings", "vn_law"],
             topics=["financial_statements", "weather"],
@@ -672,10 +695,30 @@ def test_checked_plan_reads_dates() -> None:
         assert (plan.fiscal_years, plan.fiscal_periods) == ((2021, 2022), ("Q3",))
         assert plan.calendar, question  # a date is a calendar one
         assert any("dates" in note for note in plan.notes)
-    # The model's own quarter wins over the dates.
-    analysis = _analysis(fiscal_years=[2021, 2022], fiscal_periods=["Q3"])
+    # Dates overrule the model's reading: a June filer's quarter ended
+    # September 30 is its fiscal Q1, found by period end.
+    analysis = _analysis(fiscal_years=[2021, 2022], fiscal_periods=["Q1"])
     plan = checked_plan(GOODWILL_EN, analysis, CORPORA)
-    assert plan.fiscal_periods == ("Q3",) and not plan.calendar
+    assert plan.fiscal_periods == ("Q3",) and plan.calendar
+    # A quarter the question names keeps the model's reading, with the
+    # fiscal years the question writes (x0096: the model shifted them).
+    plan = checked_plan(
+        "Gen Digital's Q1 fiscal 2026 10-Q (ended July 4, 2025) vs Q1 fiscal 2027",
+        _analysis(fiscal_years=[2025, 2026], fiscal_periods=["Q1"]),
+        CORPORA,
+    )
+    assert plan.fiscal_periods == ("Q1",) and not plan.calendar
+    assert {2026, 2027} <= set(plan.fiscal_years)
+    plan = checked_plan(
+        "Microsoft revenue in Q4 fiscal 2025, the quarter ended June 30, 2025",
+        _analysis(fiscal_years=[2025], fiscal_periods=["Q4"]),
+        CORPORA,
+    )
+    assert (plan.fiscal_years, plan.fiscal_periods, plan.calendar) == (
+        (2025,),
+        ("Q4",),
+        False,
+    )
     # A year the model missed comes from the dates.
     plan = checked_plan(
         "Apple cash at 3/31/2024?", _analysis(fiscal_years=[], fiscal_periods=[]),
@@ -921,3 +964,127 @@ def test_ranking_marks_pre_rank_and_selected() -> None:
 def test_rule_plan_reads_plural_forms() -> None:
     plan = rule_plan("What did Apple's 8-Ks and 10-Qs in 2023 say?", CORPORA)
     assert plan.forms == ("8-K", "10-Q")
+
+
+TODAY_REL = date(2026, 11, 24)
+
+
+@pytest.mark.parametrize(
+    ("question", "years", "periods", "calendar", "filed", "offsets"),
+    [
+        # Calendar years written into the question, then read as usual.
+        ("Steel Dynamics operating income in this year's second quarter",
+         (2026,), ("Q2",), True, (), ()),
+        ("Discovery goodwill at the end of June this year", (2026,), ("Q2",), True,
+         (), ()),
+        ("Disney segment income for the nine months to the end of June this year",
+         (2026,), ("Q2",), True, (), ()),
+        (("Corning cost of sales in this year's second quarter vs the same "
+          "quarter last year"), (2025, 2026), ("Q2",), True, (), ()),
+        ("Tổng nợ dài hạn của KMI vào cuối tháng 6 năm nay", (2026,), ("Q2",), True,
+         (), ()),
+        (("Doanh thu của Seagate trong quý 3 năm tài chính năm nay so với "
+          "cùng quý năm ngoái"), (2025, 2026), ("Q3",), False, (), ()),
+        # A yearless month takes the one year written.
+        ("Notes UHS issued in its August 8-K this year", (), (), False,
+         ("2026-08",), ()),
+        ("Trái phiếu UHS phát hành theo 8-K tháng 8 năm nay", (), (), False,
+         ("2026-08",), ()),
+        # Months counted back, with a month on each side.
+        ("Which bonds did AIG sell about two months ago?", (), (), False,
+         ("2026-08", "2026-09", "2026-10"), ()),
+        ("AIG bán trái phiếu nào cách đây hai tháng?", (), (), False,
+         ("2026-08", "2026-09", "2026-10"), ()),
+        # Fiscal years: offsets for the retriever.
+        ("STZ stock comp in the first quarter of this fiscal year vs a year earlier",
+         (), ("Q1",), False, (), (-1, 0)),
+        ("SNDK opex in the fiscal year that just ended vs the year before", (), (),
+         False, (), (-2, -1)),
+        ("Lợi nhuận ròng của DHI trong năm tài chính vừa rồi", (), ("FY",), False,
+         (), (-1,)),
+        # A question naming its own year: relative words are left to it.
+        ("Revenue in 2023 compared with the prior year", (2023,), (), True, (), ()),
+        # Capitalized months only: "may" is a verb.
+        ("What may affect revenue this year?", (2026,), (), True, (), ()),
+        ("May Apple terminate its credit facility this year?", (2026,), (), True,
+         (), ()),
+        # Comparison bases are no asked year.
+        ("How did Apple's revenue compare with the prior year in its latest 10-K?",
+         (), (), False, (), ()),
+        ("Doanh thu quý gần nhất của Apple tăng bao nhiêu so với năm trước?", (),
+         (), False, (), ()),
+        ("Apple revenue in the quarter ended in September compared with last year",
+         (), (), False, (), ()),
+        ("Public Storage profit last year", (2025,), (), True, (), ()),
+        ("Năm trước khi sáp nhập, công ty có doanh thu bao nhiêu?", (), (), False,
+         (), ()),
+        # "The last month of" a period and "6 months before that" count nothing.
+        ("Apple repurchases in the last month of Q3 2025", (2025,), ("Q3",), False,
+         (), ()),
+        ("Apple có bao nhiêu nhân viên 6 tháng trước đó?", (), (), False, (), ()),
+        ("Apple đã nộp 8-K nào vào tháng trước?", (), (), False,
+         ("2026-09", "2026-10", "2026-11"), ()),
+    ],
+)  # fmt: skip
+def test_rule_plan_reads_relative_time(
+    question: str,
+    *,
+    years: tuple[int, ...],
+    periods: tuple[str, ...],
+    calendar: bool,
+    filed: tuple[str, ...],
+    offsets: tuple[int, ...],
+) -> None:
+    plan = rule_plan(question, CORPORA, today=TODAY_REL)
+    assert (
+        plan.fiscal_years,
+        plan.fiscal_periods,
+        plan.calendar,
+        plan.filed_months,
+        plan.fiscal_offsets,
+    ) == (years, periods, calendar, filed, offsets)
+    assert rule_plan(question, CORPORA).fiscal_offsets == ()  # no today
+
+
+def test_checked_plan_overrules_the_model_on_relative_years() -> None:
+    plan = checked_plan(
+        "How much goodwill did Discovery carry at the end of June this year?",
+        _analysis(fiscal_years=[2024], fiscal_periods=["Q2"], forms=[]),
+        CORPORA,
+        TODAY_REL,
+    )
+    assert (plan.fiscal_years, plan.fiscal_periods, plan.calendar) == (
+        (2026,),
+        ("Q2",),
+        True,
+    )
+    plan = checked_plan(
+        "Why did STZ's stock comp drop in the first quarter of this fiscal year "
+        "versus the first quarter a year earlier?",
+        _analysis(fiscal_years=[2025, 2026], fiscal_periods=["Q1"], forms=[]),
+        CORPORA,
+        TODAY_REL,
+    )
+    assert (plan.fiscal_years, plan.fiscal_offsets) == ((), (-1, 0))
+    assert plan.has_period and not plan.wants_latest
+
+
+def test_checked_plan_drops_forms_the_question_does_not_name() -> None:
+    question = (
+        "How did Iron Mountain's IT asset lifecycle wording change between its "
+        "Q1 2024 and Q1 2026 supplemental financial information?"
+    )
+    plan = checked_plan(question, _analysis(forms=["10-Q"]), CORPORA)
+    assert plan.forms == ()
+    assert any("does not name" in note for note in plan.notes)
+    # An event's 8-K stays (t0123: a vote at an annual meeting).
+    plan = checked_plan(
+        "How did shareholders vote at Gallagher's May 2026 meeting?",
+        _analysis(forms=["8-K"], fiscal_years=[2026], fiscal_periods=["Q2"]),
+        CORPORA,
+    )
+    assert plan.forms == ("8-K",) and plan.filed_months == ("2026-05",)
+    for named, form in (("annual report", "10-K"), ("báo cáo quý", "10-Q"),
+                        ("current report", "8-K")):  # fmt: skip
+        plan = checked_plan(f"Apple {named} 2024", _analysis(forms=[form]), CORPORA)
+        assert plan.forms == (form,)
