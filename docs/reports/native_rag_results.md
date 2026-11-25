@@ -1,6 +1,6 @@
-# Native RAG: kết quả (24/11/2026)
+# Native RAG: kết quả (25/11/2026)
 
-Trạng thái: chunk, embedding, Qdrant, retrieval, sinh câu trả lời và eval đã có code (commit `e59baad` → `ca091ed`, 16–24/11/2026). Kết quả đo trên `data/` (5 công ty). Ở 500 công ty mới xong chunk và embedding; Qdrant đang nạp.
+Trạng thái: chunk, embedding, Qdrant, retrieval, sinh câu trả lời và eval đã có code (commit `e59baad` → `aba868b`, 16–25/11/2026). Bộ v1.x đo trên `data/` (5 công ty); bộ v2 đo trên 500 công ty (homepc, Qdrant 3.737.715 điểm).
 
 Nguồn số liệu: `evals/runs/<run>/report.md` (gitignored, máy local), `docs/data/native_rag_model.md`, `AGENTS.md`, `evals/sets/v1*/`. Dự đoán trước đó: mục B2, B3, B4 của `silver_improvements_report.html` (07–13/11/2026, "ước tính, chưa đo"). Số đánh dấu "ước tính" là suy ra, không phải đo.
 
@@ -12,7 +12,8 @@ Nguồn số liệu: `evals/runs/<run>/report.md` (gitignored, máy local), `doc
 - Một phần "lỗi retrieval" là lỗi của bộ eval: bằng chứng chỉ gắn một filing trong khi cùng dòng bảng có ở filing khác (10-Q/10-K lặp bảng của thông cáo). Bộ v1.2 mở rộng bằng chứng theo luật; chấm lại cùng run: lỗi 15 → 13.
 - Sinh câu trả lời: thử 10 câu × 2 ngôn ngữ: đúng giá trị 6/6, từ chối đúng 2/2, từ chối nhầm 0/18, có trích dẫn 18/18, trích dẫn chứa bằng chứng 17/18, đúng ngôn ngữ 20/20. Chưa có judge (key NVIDIA bị 401).
 - 500 công ty: 3.737.715 chunk, 3.737.715 vector (Qwen3-Embedding-0.6B, 1024 chiều), audit embedding toàn PASS. Số chunk cao hơn dự đoán ~2,5 tr khoảng 50%.
-- Chưa đo: chất lượng ở 500 công ty, độ chính xác câu trả lời bằng judge, faithfulness, baseline chunk cố định, thí nghiệm chunking A–E.
+- 500 công ty, bộ v2 (140 câu, chia dev 49 / test 91): test `hit@8` en 0,810, vi 0,810; `mrr@10` 0,546 / 0,545 (run `20261125-093610_s500_v2_test_b3`, con số chính thức). Dev sau đợt sửa 3 đạt 0,935 / 0,935; khoảng chênh là do dev đã dùng để sửa và mẫu nhỏ (mục 4.3). Yếu nhất: calc, false_premise, ranking, aggregation.
+- Chưa đo: độ chính xác câu trả lời bằng judge, faithfulness, baseline chunk cố định, thí nghiệm chunking A–E.
 
 ## 2. Pipeline và cấu hình
 
@@ -112,6 +113,24 @@ Bộ câu hỏi: 100 task lấy mẫu theo ô phủ (công ty, form, section, n�
 - Query model p95 ~57 s ở batch 2 (Cerebras; có thêm lời gọi dịch dự phòng); nguyên nhân chưa tách.
 - Không tính query model, batch 2 mất ~3,4 s trung bình, phần lớn là rerank (p95 rerank một mình 4,0–4,2 s). Dự đoán B3 "< 3 s p95" chưa đạt; rerank đang chạy trên T4 qua tunnel.
 
+### 4.3 500 công ty, bộ v2
+
+Bộ v2 (`evals/sets/v2/`, spec `docs/plans/eval_v2_spec.md`): 150 task lấy mẫu trên 500 công ty theo ngành GICS, cỡ công ty, form, năm, loại câu (16 loại, thêm calc, ranking, temporal_change, event_8k, relation, aggregation, false_premise); 10 bị bỏ, còn 140. Chia theo hash câu hỏi: dev 49, test 91. Chỉ sửa theo dev; test chạy một lần để báo cáo.
+
+v1.2 trên 500 công ty cho đúng số của 5 công ty (0,976 / 0,976, cùng 4 lỗi): câu hỏi v1 nêu tên công ty, lọc theo CIK loại 495 công ty còn lại.
+
+| Run | Thay đổi | Split | hit@8 en / vi | mrr@10 en / vi | recall@8 en / vi | Đúng công ty en / vi | Lỗi |
+|---|---|---|---|---|---|---|---|
+| `20261125-035116_s500_v2_dev` | Như batch 2 | dev | 0,870 / 0,891 | 0,602 / 0,636 | 0,793 / 0,866 | 0,898 / 0,959 | 11 |
+| `20261125-082441_s500_v2_dev_b3` | Đợt 3: mã chứng khoán viết trong câu thắng đoán của query model; tháng + năm → quý chứa tháng | dev | 0,913 / 0,913 | 0,667 / 0,664 | 0,848 / 0,888 | 0,980 / 0,980 | 8 |
+| `20261125-092400_s500_v2_dev_b3b` | Tháng của thương vụ/mua lại là tháng nộp 8-K; "8-Ks" số nhiều | dev | 0,935 / 0,935 | 0,672 / 0,670 | 0,870 / 0,909 | 0,980 / 0,980 | 6 |
+| `20261125-093610_s500_v2_test_b3` | Như dòng trên | test | **0,810 / 0,810** | **0,546 / 0,545** | 0,745 / 0,750 | 0,945 / 0,956 | 32 |
+
+- Dev hơn test ~0,12: dev đã dùng để tìm và sửa lỗi; mỗi split ~45–85 câu có bằng chứng, khoảng tin cậy ±0,08. Dev trước đợt 3 (0,870 / 0,891) cũng cao hơn test.
+- Theo loại trên test (hit@8 en / vi): calc 0,556 / 0,556; false_premise 0,400 / 0,800; compare_periods 0,800 / 0,400; table_lookup 0,667 / 0,833; ranking 0,800 / 0,800 (recall 0,450 / 0,433); aggregation recall 0,167 / 0,167. Tốt: summary, multi_hop, temporal_change, relation, event_8k (0,83–1,0). Mỗi loại 2–9 câu.
+- 5 lỗi dev còn lại (ngoài t0099 vi "COO") đã đúng công ty, năm và form; đoạn đúng không vào top 8 (bảng XBRL, MD&A của câu aggregation).
+- Không mở từng câu test để sửa. Lỗi để sửa tiếp phải tìm trên dev; dev còn 6 lỗi, không đủ. Hướng: sinh thêm câu dev cho các loại yếu (mục 8).
+
 ## 5. Sinh câu trả lời (thử 10 câu)
 
 Code: `src/rag_engine/generation/answer.py` (một lời gọi structured tới `chat.generator`, trích dẫn `[n]`, chuẩn hoá `【n†…】` và khoảng `[1-3]`, bỏ số ngoài phạm vi), `scripts/rag/ask.py`; eval `src/evals/answer_eval.py`, `answer_judge.py`, `numbers.py`.
@@ -157,9 +176,12 @@ Lưu ý: dự đoán tính cho 500 công ty và ~300 câu; thực tế là 5 cô
 | 5 | Bảng bị tách mất tiêu đề ở phần sau (t0077) | Các phần sau của một bảng tách theo hàng không giữ tiêu đề bảng | Cần đổi luật chunk và build lại; hoãn | Còn lỗi |
 | 6 | Dòng `degraded` giữa eval | Groq free hết 200k token/ngày/key | Eval có `--resume` chạy lại dòng lỗi/degraded; chuyển query model sang Cerebras | v1.1 baseline chạy xong bằng Cerebras, 0 dòng degraded |
 | 7 | Không gọi được Cerebras | Gõ sai host trong base URL | Sửa base URL | Chạy được |
-| 8 | Qdrant không lưu được trên ổ DATA | Ổ exFAT không giữ được storage của Qdrant | Đặt storage trên NVMe ext4 | Đang nạp 500 công ty |
+| 8 | Qdrant không lưu được trên ổ DATA | Ổ exFAT không giữ được storage của Qdrant | Đặt storage trên NVMe ext4 | Nạp xong: 3.737.715 điểm, nạp 61 phút, audit PASS, `ann_recall` 1,000 |
 | 9 | Audit chunk 500 công ty FAIL `block_in_one_chunk` | Bảng ghi chú sau bảng bị tách giữa hai chunk (v6); dấu `(ii)` đứng riêng nhận hàng đầu của bảng bố cục (v7, 2 block) | Rules v7 (`dd520d4`), v8 (`cb441db`) | Chunk `data/` giống hệt qua v6–v8; 500 công ty v8: 3.737.715 chunk |
 | 10 | Judge không chạy | Key NVIDIA bị từ chối (401) | Chưa sửa; đang chọn mô hình judge | 20/20 dòng chờ chấm lại (`--rejudge`) |
+| 11 | Sai công ty khi câu chỉ ghi mã (500 công ty): EXE → Exelon, MKC → McKesson, bỏ sót RCL và 4 mã ngân hàng | Query model đoán tên từ mã; tên thắng mã khi tra danh mục | `resolve_in_question`: mã viết trong câu thắng; mã lệch 1 chữ so với mã viết trong câu và câu không nhắc tên → đọc nhầm; chỉ thêm mã rõ là mã (`$`, sở hữu, ngoặc sau tên, danh sách, từ 2 mã); từ viết tắt trùng mã (COO, RF, FICO…) cần `$` hoặc query model xác nhận. Agent review 2 vòng (`32200be`) | Dev: đúng công ty en 0,898 → 0,980; COO vẫn trượt (cố ý) |
+| 12 | "February 2022" không ra kỳ (t0067) | Tháng + năm không gắn sự kiện bị bỏ qua | Tháng + năm → quý dương lịch chứa tháng, chỉ khi câu không hỏi năm/ngày khác; bỏ qua sau since/from/due/maturing… (`32200be`) | t0067 qua. Công ty có quý kết thúc tháng 1/4/7/10 có thể trượt tháng đầu quý |
+| 13 | "January 2026 deal" đọc thành Q1 2026 (t0078) | Thương vụ không nằm trong từ chỉ sự kiện | deal/acquisition/merger/thương vụ/sáp nhập: tháng là tháng nộp 8-K; nhận "8-Ks", "10-Qs" (`aba868b`) | Dev lỗi 8 → 6 |
 
 ## 7. Đã thử và loại bỏ
 
@@ -176,11 +198,10 @@ Lưu ý: dự đoán tính cho 500 công ty và ~300 câu; thực tế là 5 cô
 
 | Việc | Ghi chú |
 |---|---|
-| Nạp xong Qdrant 500 công ty, audit, chuyển alias | Đang chạy; đo RAM int8, thời gian HNSW, `ann_recall` |
-| Eval retrieval trên 500 công ty | Chạy v1.2 trước (bằng chứng có trong Silver 500 công ty): đo mức nhiễu khi thêm 495 công ty; rồi bộ v2 lấy mẫu từ cả 500 |
-| Bộ eval v2 | Lớn hơn 97 câu; người hoặc LLM không phải Claude review mẫu với đoạn đầy đủ; kiểm số/ngày trong đáp án có trong đoạn |
-| Chọn judge, chạy eval câu trả lời đầy đủ | Judge khác họ với gpt-oss và Claude; `--rejudge` dùng lại câu trả lời đã lưu |
-| 4 lỗi còn lại | t0042 en (30/9 bị đọc là 10-K, thật ra là Q3), t0042 vi và t0060 vi (xếp hạng), t0077 en (bảng tách mất tiêu đề) |
+| Thêm câu dev cho loại yếu | calc, ranking, aggregation, false_premise, compare_periods, thời gian tương đối; chỉ vào dev, test giữ nguyên; rồi sửa theo đợt và chạy test một lần |
+| Review bộ v2 trước khi đóng băng | LLM không phải Claude đọc cả 140 câu với đoạn đầy đủ; người review ~30 câu |
+| Chọn judge, chạy eval câu trả lời đầy đủ | Judge khác họ với gpt-oss và Claude (dự kiến Gemini Flash, bản free); `--rejudge` dùng lại câu trả lời đã lưu |
+| 4 lỗi còn lại (v1.2) | t0042 en (30/9 bị đọc là 10-K, thật ra là Q3), t0042 vi và t0060 vi (xếp hạng), t0077 en (bảng tách mất tiêu đề) |
 | Tiêu đề bảng ở các phần sau | Đổi luật chunk → bump rules version → build lại chunk, embedding, Qdrant |
 | Độ trễ | Rerank ~3 s/câu trên T4 qua tunnel; query model p95 ~57 s khi phải dịch |
 | Baseline và thí nghiệm chunking (B4: A, B+O, C, D, E) | Chưa làm; cần để chứng minh lợi ích của chunk theo cấu trúc |
