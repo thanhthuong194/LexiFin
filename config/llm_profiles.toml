@@ -41,9 +41,19 @@ effort = "low"
 timeout_s = 60
 
 # Grades answers. Must be another model family than the generator (and
-# not Claude, which writes the eval sets). Gemini free tier: rate-limited,
-# so runs resume from the cache.
+# not Claude, which writes the eval sets). Cerebras (generous free quota);
+# Gemini 3.6 Flash free allows only 20 requests/day (2 per answer).
 [chat.judge]
+provider = "openai_compat"
+model = "qwen/qwen-3.8-27b"
+served_model = "qwen-3.8-27b"
+# Its reasoning counts against max_tokens (8192 cut 2/50 verdicts).
+max_tokens = 16384
+temperature = 0.0
+timeout_s = 300
+
+# Gemini judge kept for spot checks (`--judge-profile judge_gemini`).
+[chat.judge_gemini]
 provider = "gemini"
 model = "gemini-3.6-flash"
 max_tokens = 8192
