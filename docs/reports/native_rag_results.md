@@ -1,6 +1,6 @@
-# Native RAG: kết quả (25/11/2026)
+# Native RAG: kết quả (26/11/2026)
 
-Trạng thái: chunk, embedding, Qdrant, retrieval, sinh câu trả lời và eval đã có code (commit `e59baad` → `aba868b`, 16–25/11/2026). Bộ v1.x đo trên `data/` (5 công ty); bộ v2 đo trên 500 công ty (homepc, Qdrant 3.737.715 điểm).
+Trạng thái: chunk, embedding, Qdrant, retrieval, sinh câu trả lời và eval đã có code (commit `e59baad` → `b4e358e`, 16–26/11/2026). Bộ v1.x đo trên `data/` (5 công ty); bộ v2 đo trên 500 công ty (homepc, Qdrant 3.737.715 điểm).
 
 Nguồn số liệu: `evals/runs/<run>/report.md` (gitignored, máy local), `docs/data/native_rag_model.md`, `AGENTS.md`, `evals/sets/v1*/`. Dự đoán trước đó: mục B2, B3, B4 của `silver_improvements_report.html` (07–13/11/2026, "ước tính, chưa đo"). Số đánh dấu "ước tính" là suy ra, không phải đo.
 
@@ -12,8 +12,10 @@ Nguồn số liệu: `evals/runs/<run>/report.md` (gitignored, máy local), `doc
 - Một phần "lỗi retrieval" là lỗi của bộ eval: bằng chứng chỉ gắn một filing trong khi cùng dòng bảng có ở filing khác (10-Q/10-K lặp bảng của thông cáo). Bộ v1.2 mở rộng bằng chứng theo luật; chấm lại cùng run: lỗi 15 → 13.
 - Sinh câu trả lời: thử 10 câu × 2 ngôn ngữ: đúng giá trị 6/6, từ chối đúng 2/2, từ chối nhầm 0/18, có trích dẫn 18/18, trích dẫn chứa bằng chứng 17/18, đúng ngôn ngữ 20/20. Judge chưa chạy (đã chọn Gemini 3.6 Flash, 26/11).
 - 500 công ty: 3.737.715 chunk, 3.737.715 vector (Qwen3-Embedding-0.6B, 1024 chiều), audit embedding toàn PASS. Số chunk cao hơn dự đoán ~2,5 tr khoảng 50%.
-- 500 công ty, bộ v2 (140 câu, chia dev 49 / test 91): test `hit@8` en 0,810, vi 0,810; `mrr@10` 0,546 / 0,545 (run `20261125-093610_s500_v2_test_b3`, con số chính thức). Dev sau đợt sửa 3 đạt 0,935 / 0,935; khoảng chênh là do dev đã dùng để sửa và mẫu nhỏ (mục 4.3). Yếu nhất: calc, false_premise, ranking, aggregation.
-- Chưa đo: độ chính xác câu trả lời bằng judge, faithfulness, baseline chunk cố định, thí nghiệm chunking A–E.
+- 500 công ty, bộ v2 (246 câu: dev 155 gồm 106 câu dev bổ sung, test 91): test `hit@8` en 0,905, vi 0,869; `mrr@10` 0,748 / 0,696 (run `20261126-033541_s500_v2_test_b5_rr4b`, con số chính thức; lần test trước 0,810 / 0,810). Dev sau đợt 4–5 và reranker 4B: 0,811 / 0,804 → 0,912 / 0,905 (mục 4.3).
+- Reranker 4B thay 0.6B (cùng code, dev): hit@8 0,885 / 0,858 → 0,912 / 0,905, `mrr@10` có ý nghĩa; rerank 2,5 → 8,8 s/câu.
+- Câu trả lời (500 công ty, dev, judge Qwen 3.8 27B): 116/310 dòng sạch, đúng 80%, đúng một phần 12%, sai 8%, faithful 76% (mục 5.2). Phần còn lại chờ hạn mức token ngày của Groq/Cerebras.
+- Chưa đo: eval câu trả lời đủ dev và test, baseline chunk cố định, thí nghiệm chunking A–E.
 
 ## 2. Pipeline và cấu hình
 
@@ -29,7 +31,7 @@ câu hỏi → query model → danh bạ công ty → hybrid (RRF) → gộp tr�
 |---|---|---|---|
 | `chat.query` | gpt-oss-120b, `effort = low` | Cerebras (Groq sáng 26/11: hết 200k token/ngày giữa eval) | Groq free: 8k token/phút (câu chậm ~50 s là chờ 429), 200k token/ngày |
 | `chat.generator` | gpt-oss-120b, `temperature 0` | Cerebras | Cerebras cần `served_model = "gpt-oss-120b"` |
-| `chat.judge` | Gemini 3.6 Flash (`gemini-3.6-flash`) | Gemini API (free tier) | Khác họ model với generator; chạy chậm theo giới hạn, resume từ cache |
+| `chat.judge` | Qwen 3.8 27B (`qwen-3.8-27b`), `max_tokens` 16384 | Cerebras | Khác họ model với generator. Gemini 3.6 Flash giữ ở `chat.judge_gemini` để soi mẫu (free: 20 lượt/ngày); trên 25 câu hai judge khớp 8/8 dòng soi |
 | `embedding.default` | Qwen3-Embedding-0.6B, 1024 chiều | vLLM Kaggle 2×T4, Cloudflare tunnel | Cùng tokenizer dùng để giới hạn chunk |
 | `rerank.default` | Qwen3-Reranker-4B (0.6B đến 25/11), `prompt_format = "qwen3"` | vLLM Kaggle 2×T4, fp16 | Không có chat template thì điểm gần ngẫu nhiên (0,32 vs 0,26; có template: 0,995 vs 0,0006) |
 
@@ -131,6 +133,20 @@ v1.2 trên 500 công ty cho đúng số của 5 công ty (0,976 / 0,976, cùng 4
 - 5 lỗi dev còn lại (ngoài t0099 vi "COO") đã đúng công ty, năm và form; đoạn đúng không vào top 8 (bảng XBRL, MD&A của câu aggregation).
 - Không mở từng câu test để sửa. Lỗi để sửa tiếp phải tìm trên dev; dev còn 6 lỗi, không đủ. Hướng: sinh thêm câu dev cho các loại yếu (mục 8).
 
+Dev bổ sung (25/11, `evals/sets/v2/extra`, chỉ vào dev): 106 câu cho loại yếu, ≥ 20 câu thời gian tương đối, không dùng lại công ty/chunk của test. Dev thành 155 câu (148 dòng có bằng chứng mỗi ngôn ngữ).
+
+| Run | Thay đổi | Split | hit@8 en / vi | mrr@10 en / vi | recall@8 en / vi | Đúng công ty en / vi | Lỗi |
+|---|---|---|---|---|---|---|---|
+| `20261125-142636_s500_v2dev_extra` | Như đợt 3 | dev 155 | 0,811 / 0,804 | 0,562 / 0,544 | 0,713 / 0,721 | 0,948 / 0,974 | 57 |
+| `20261125-160055_s500_v2dev_b4c` | Đợt 4: thời gian tương đối (năm nay, năm ngoái, năm tài chính này theo lịch từng công ty, N tháng trước); ngày viết trong câu thắng kỳ của model; bỏ form câu không nhắc; mã đọc nhầm (UHS, BRO, REG/REGN) | dev 155 | 0,872 / 0,851 | 0,614 / 0,581 | 0,771 / 0,768 | 0,981 / 0,987 | 41 |
+| `20261125-165557_s500_v2dev_b5b` | Đợt 5: năm lấy từ câu khi model không trả năm; CAGR/thay đổi bao nhiêu chỉ giữ 2 năm đầu–cuối; thêm `context.answer_figures` | dev 155 | 0,885 / 0,858 | 0,619 / 0,593 | 0,781 / 0,775 | 0,981 / 0,987 | 38 |
+| `20261126-022741_s500_v2dev_b5_rr4b` | Reranker Qwen3-Reranker-4B | dev 155 | 0,912 / 0,905 | 0,682 / 0,686 | 0,819 / 0,822 | 0,981 / 0,987 | 27 |
+| `20261126-033541_s500_v2_test_b5_rr4b` | Như dòng trên | test | **0,905 / 0,869** | **0,748 / 0,696** | 0,848 / 0,829 | 0,978 / 0,989 | 19 |
+
+- `context.answer_figures` (ngữ cảnh chứa số của đáp án, ở bất kỳ đoạn nào, không chỉ đoạn bằng chứng): dev 0,875 / 0,911 (0.6B) → 0,938 / 0,922 (4B); test 0,862 / 0,847.
+- 4B so với 0.6B trên dev: sửa 17 dòng, hỏng 6; 5/6 dòng hỏng là trượt giả (top 8 vẫn có đoạn trả lời được, chỉ không trùng đoạn bằng chứng đã ghi).
+- Hai agent độc lập soi các lỗi còn lại: khoảng 12–15 lỗi là trượt giả; tìm riêng theo từng kỳ (A) không giúp; nhãn dòng bảng (B) đúng một phần, hoãn.
+
 ## 5. Sinh câu trả lời (thử 10 câu)
 
 Code: `src/rag_engine/generation/answer.py` (một lời gọi structured tới `chat.generator`, trích dẫn `[n]`, chuẩn hoá `【n†…】` và khoảng `[1-3]`, bỏ số ngoài phạm vi), `scripts/rag/ask.py`; eval `src/evals/answer_eval.py`, `answer_judge.py`, `numbers.py`.
@@ -152,18 +168,37 @@ Run `20261124-105158_answers_try10` (10 câu đầu v1.2 × en/vi; retrieval tì
 
 ### 5.1 Chỉ số dự đoán và thực tế
 
-| Chỉ số | Dự đoán B3 | Dự đoán B4 | Thực tế (5 công ty, v1.2) |
+| Chỉ số | Dự đoán B3 | Dự đoán B4 | Thực tế (5 công ty, v1.2; câu trả lời: 500 công ty, mục 5.2) |
 |---|---|---|---|
 | Recall@10 hybrid + rerank | ≥ 0,85 | 0,89 | Không đo đúng chỉ số này. Gần nhất: `post.recall@8` en 0,952, vi 0,946 |
 | Recall@10 hybrid không rerank | 0,75 | – | `post.recall@8` en 0,867, vi 0,639 (v1, run no_rerank) |
 | Recall@10 dense / BM25 riêng | 0,65 / 0,55 | – | Chưa đo |
 | MRR@10 | ≥ 0,70 | 0,775 | en 0,682, vi 0,718 |
-| Trả lời đúng | ≥ 80% | 87,5% | 6/6 giá trị số (10 câu); judge chưa chạy |
-| Faithfulness | ≥ 90% | 92% | Chưa đo; trích dẫn chứa bằng chứng 17/18 |
+| Trả lời đúng | ≥ 80% | 87,5% | Judge: 80% đúng, 12% đúng một phần (116 dòng dev sạch, 500 công ty) |
+| Faithfulness | ≥ 90% | 92% | Judge: 76% (105 dòng không từ chối); trích dẫn chứa bằng chứng 82% |
 | Trễ truy hồi p95 (không LLM) | < 3 s | – | ~4 s chỉ riêng rerank (batch 2) |
 | Trễ trả lời p95 | < 10 s | – | Chưa đo; retrieval p95 kể cả query model 61 s |
 
-Lưu ý: dự đoán tính cho 500 công ty và ~300 câu; thực tế là 5 công ty, 97 câu. Kết quả 500 công ty sẽ thấp hơn (nhiều văn bản giống nhau giữa công ty, nhiều kỳ hơn).
+Lưu ý: dự đoán tính cho 500 công ty và ~300 câu; retrieval ở bảng này là 5 công ty, 97 câu (500 công ty: mục 4.3).
+
+### 5.2 Eval câu trả lời, 500 công ty, dev
+
+Run `20261126-051638_answers_s500_v2dev_answers` (155 câu × en/vi; generator gpt-oss-120b, judge Qwen 3.8 27B, cả hai trên Cerebras). Chưa xong: Groq hết 200k token/ngày ở khoảng dòng 100 (query model rơi về luật), Cerebras hết token/ngày ở dòng 254; dòng hỏng chạy lại bằng `--resume`. Số dưới đây chỉ tính 116 dòng sạch (en 60, vi 56), chấm lại bằng `answer.value` đã sửa.
+
+| Chỉ số | en | vi | Tổng |
+|---|---|---|---|
+| `judge.correct` | 0,783 | 0,821 | 0,802 |
+| `judge.partial` | 0,133 | 0,107 | 0,121 |
+| `judge.incorrect` | 0,083 | 0,071 | 0,078 |
+| `judge.faithful` | 0,764 | 0,760 | 0,762 |
+| `answer.value` | 0,812 (16) | 0,929 (14) | 0,867 (30) |
+| `answer.false_refusal` | 0,000 | 0,038 | 0,019 |
+| `answer.citation_evidence` | 0,800 | 0,840 | 0,819 |
+
+- Dòng chỉ dùng luật đọc câu hỏi (Groq hết hạn mức, 145 dòng): đúng 57%, so với 79% ở dòng sạch; query model đáng giá với câu trả lời, không chỉ với retrieval.
+- Theo retrieval (cả 256 dòng có chấm): đúng 84–85% khi top 8 có đủ bằng chứng, 17–22% khi thiếu.
+- Rubric judge (26/11): "đúng" khi trả lời mọi điều câu hỏi hỏi; ngữ cảnh thêm của đáp án mẫu mà câu không hỏi được phép thiếu. Trên 25 câu thử: đúng 0,80, khớp Gemini 8/8 dòng soi.
+- `answer.value` sửa 26/11: bỏ số lượng cổ phiếu khi câu không hỏi "bao nhiêu cổ phiếu" (t0051, t0067 hỏi giá nhưng đáp án ghi số cổ phiếu trước); phần trăm được làm tròn như câu trả lời viết (7% cho 7,4%). 116 dòng sạch: 0,667 → 0,867; 4 dòng còn trượt đều bị judge chấm sai.
 
 ## 6. Lỗi gặp phải và cách khắc phục
 
@@ -182,6 +217,13 @@ Lưu ý: dự đoán tính cho 500 công ty và ~300 câu; thực tế là 5 cô
 | 11 | Sai công ty khi câu chỉ ghi mã (500 công ty): EXE → Exelon, MKC → McKesson, bỏ sót RCL và 4 mã ngân hàng | Query model đoán tên từ mã; tên thắng mã khi tra danh mục | `resolve_in_question`: mã viết trong câu thắng; mã lệch 1 chữ so với mã viết trong câu và câu không nhắc tên → đọc nhầm; chỉ thêm mã rõ là mã (`$`, sở hữu, ngoặc sau tên, danh sách, từ 2 mã); từ viết tắt trùng mã (COO, RF, FICO…) cần `$` hoặc query model xác nhận. Agent review 2 vòng (`32200be`) | Dev: đúng công ty en 0,898 → 0,980; COO vẫn trượt (cố ý) |
 | 12 | "February 2022" không ra kỳ (t0067) | Tháng + năm không gắn sự kiện bị bỏ qua | Tháng + năm → quý dương lịch chứa tháng, chỉ khi câu không hỏi năm/ngày khác; bỏ qua sau since/from/due/maturing… (`32200be`) | t0067 qua. Công ty có quý kết thúc tháng 1/4/7/10 có thể trượt tháng đầu quý |
 | 13 | "January 2026 deal" đọc thành Q1 2026 (t0078) | Thương vụ không nằm trong từ chỉ sự kiện | deal/acquisition/merger/thương vụ/sáp nhập: tháng là tháng nộp 8-K; nhận "8-Ks", "10-Qs" (`aba868b`) | Dev lỗi 8 → 6 |
+| 14 | Thời gian tương đối, form và kỳ do model tự thêm (dev bổ sung) | Model đoán năm/form; "năm ngoái", "năm tài chính này" phụ thuộc ngày hỏi và lịch từng công ty | Đợt 4 (`673766e`): đọc thời gian tương đối từ câu, năm tài chính theo filing mới nhất của công ty, bỏ form câu không nhắc (giữ 8-K cho chủ đề sự kiện) | Dev lỗi 57 → 41 |
+| 15 | CAGR/thay đổi lọc cả các năm giữa; model không trả năm | Model trả dải năm hoặc bỏ năm | Đợt 5 (`533f994`): chỉ giữ năm đầu–cuối; năm lấy từ câu (bỏ năm sau since/until/due và năm của sự kiện) | Dev lỗi 41 → 38 |
+| 16 | Query model có câu chậm ~50–57 s | Groq free 8k token/phút: thời gian chờ retry sau 429 | `requests_per_minute` cho profile chat (`cc8fdbb`) | Hiểu nguyên nhân; chưa bật cho Groq |
+| 17 | Judge Gemini dừng giữa chừng | Gemini 3.6 Flash free chỉ 20 lượt/ngày | Judge chính sang Qwen 3.8 27B trên Cerebras (`b4e358e`) | 2/50 dòng bị cắt ở 8192 token → `max_tokens` 16384; chấm đủ 50 |
+| 18 | Judge chấm "đúng một phần" khi câu trả lời đúng điều được hỏi | Rubric đòi đủ mọi chi tiết của đáp án mẫu | Rubric chấm theo điều câu hỏi hỏi (`b4e358e`) | 25 câu: đúng 0,80 |
+| 19 | `answer.value` trượt khi câu trả lời đúng | Lấy số đầu tiên của đáp án (số cổ phiếu thay vì giá); phần trăm phải đúng 1 chữ số thập phân | Bỏ số cổ phiếu khi câu không hỏi số lượng; phần trăm theo độ làm tròn của câu trả lời | 0,667 → 0,867, khớp judge |
+| 20 | 199/310 dòng eval câu trả lời hỏng | Groq 200k token/ngày, Cerebras hết token/ngày cho gpt-oss-120b | `--resume` khi hạn mức hồi; query và generator dùng hai nhà cung cấp khác nhau | Chờ |
 
 ## 7. Đã thử và loại bỏ
 
@@ -198,10 +240,10 @@ Lưu ý: dự đoán tính cho 500 công ty và ~300 câu; thực tế là 5 cô
 
 | Việc | Ghi chú |
 |---|---|
-| Thêm câu dev cho loại yếu | calc, ranking, aggregation, false_premise, compare_periods, thời gian tương đối; chỉ vào dev, test giữ nguyên; rồi sửa theo đợt và chạy test một lần |
 | Review bộ v2 trước khi đóng băng | LLM không phải Claude đọc cả 140 câu với đoạn đầy đủ; người review ~30 câu |
-| Chạy eval câu trả lời đầy đủ | Judge Gemini 3.6 Flash (bản free, giới hạn theo ngày: chạy nhiều ngày bằng cache/`--resume`); `--rejudge` dùng lại câu trả lời đã lưu |
+| Chạy eval câu trả lời đầy đủ | Dev: `--resume` run `20261126-051638_answers_s500_v2dev_answers` khi hạn mức hồi (cần embedding + reranker); sau đó test. Nếu thiếu bằng chứng là nguyên nhân chính: nới bằng chứng theo luật (bản sao 8-K EX-99, câu MD&A) |
+| Build lại index | BM25 có tách gốc từ; sửa nhãn mục sai; nhãn dòng bảng (B); tra XBRL (D) |
 | 4 lỗi còn lại (v1.2) | t0042 en (30/9 bị đọc là 10-K, thật ra là Q3), t0042 vi và t0060 vi (xếp hạng), t0077 en (bảng tách mất tiêu đề) |
 | Tiêu đề bảng ở các phần sau | Đổi luật chunk → bump rules version → build lại chunk, embedding, Qdrant |
-| Độ trễ | Rerank ~3 s/câu trên T4 qua tunnel; query model p95 ~57 s khi phải dịch |
+| Độ trễ | Rerank 4B ~8,8 s/câu trên 2×T4 qua tunnel (0.6B: 2,5 s); query model chậm khi Groq trả 429 |
 | Baseline và thí nghiệm chunking (B4: A, B+O, C, D, E) | Chưa làm; cần để chứng minh lợi ích của chunk theo cấu trúc |

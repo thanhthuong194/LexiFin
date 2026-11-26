@@ -9,10 +9,11 @@ applicable):
 
 - `answer.value`: numeric/table_lookup/calc/false_premise non-refusals
   state the expected value: the XBRL fact (any sign), a computed value
-  (`Computed`: a percent within half its first decimal; a growth, CAGR or
-  difference with its direction, `checks.states_computed_answer`), else
-  the first amount of the reference answer, at least as precisely as it
-  shows it (`numbers`); a false_premise answer without a computed value
+  (`Computed`: a percent within half its first decimal, or as rounded as
+  the answer writes it; a growth, CAGR or difference with its direction,
+  `checks.states_computed_answer`), else the first amount of the reference
+  answer, skipping a share count the question does not ask for, at least
+  as precisely as it shows it (`numbers`); a false_premise answer without a computed value
   must also deny the premise (`checks.denies_premise`), and with no amount
   only that is checked.
 - `answer.order`: ranking non-refusals name the companies of
@@ -256,18 +257,31 @@ def is_vietnamese(text: str) -> bool:
     return marked >= max(VI_MIN_LETTERS, VI_MIN_SHARE * letters)
 
 
+# A share count in a reference answer, and an English question asking a count.
+_SHARE_COUNT = re.compile(
+    r"\d[\d,.]*\s*(?:(?:thousand|million|billion)\s+)?shares\b", re.IGNORECASE
+)
+_ASKS_COUNT = re.compile(r"\bhow many\b|\bnumber of\b", re.IGNORECASE)
+
+
 def states_value(question: EvalQuestion, text: str) -> bool | None:
     """Whether `text` states the question's value (None: no value to check):
-    the fact to its shown rounding, else the reference's first amount, at
-    least as precisely as the reference shows it."""
+    the fact to its shown rounding, a computed value (a percent as rounded
+    as `text` writes it), else the reference's first amount, at least as
+    precisely as the reference shows it; a share count is skipped unless
+    the question asks how many ("repurchased 3,046 shares at an average
+    price of $53.80": the price)."""
 
     text = _CITATION.sub(" ", text)
     if question.fact is not None:
         return text_states(text, question.fact.value, question.fact.decimals)
     computed = question.computed
     if computed is not None and computed.value is not None:
-        return states_computed_answer(computed, text)
-    expected = expected_amount(question.reference_answer)
+        return states_computed_answer(computed, text, rounded=True)
+    reference = question.reference_answer
+    if not _ASKS_COUNT.search(question.question_en):
+        reference = _SHARE_COUNT.sub(" ", reference)
+    expected = expected_amount(reference)
     return None if expected is None else states_expected(text, expected)
 
 

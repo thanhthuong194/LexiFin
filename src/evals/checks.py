@@ -1041,13 +1041,16 @@ def denies_premise(text: str) -> bool:
     return PREMISE_DENIAL.search(text) is not None
 
 
-def states_computed_answer(computed: Computed, text: str) -> bool | None:
+def states_computed_answer(
+    computed: Computed, text: str, *, rounded: bool = False
+) -> bool | None:
     """`text` states a computed value (None for a ranking), with the sign of
-    a growth, CAGR or difference (`states_direction`)."""
+    a growth, CAGR or difference (`states_direction`); `rounded` as in
+    `states_computed`."""
 
     if computed.value is None:
         return None
-    if not states_computed(text, computed.value, computed.unit):
+    if not states_computed(text, computed.value, computed.unit, rounded=rounded):
         return False
     signed = computed.operation in SIGNED_OPERATIONS
     return not signed or states_direction(text, computed.value)

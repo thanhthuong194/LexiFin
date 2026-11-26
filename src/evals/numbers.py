@@ -321,11 +321,14 @@ def states_expected(text: str, expected: Expected) -> bool:
     )
 
 
-def states_computed(text: str, value: str, unit: str | None) -> bool:
+def states_computed(
+    text: str, value: str, unit: str | None, *, rounded: bool = False
+) -> bool:
     """`text` states a computed answer (`testset.Computed`) in any sign: a
-    percent within PERCENT_HALF points, written with `%` or `percent`; any
-    other unit as `text_states`, or rounded to at least COMPUTED_MIN_DIGITS
-    significant digits (`$5.0 billion` for 5,042 million). The sign is
+    percent within PERCENT_HALF points (`rounded`: or as rounded as `text`
+    writes it, `7%` for 7.4), written with `%` or `percent`; any other unit
+    as `text_states`, or rounded to at least COMPUTED_MIN_DIGITS significant
+    digits (`$5.0 billion` for 5,042 million). The sign is
     `states_direction`'s."""
 
     target = abs(Decimal(value))
@@ -340,7 +343,9 @@ def states_computed(text: str, value: str, unit: str | None) -> bool:
             if n.value
         )
     return any(
-        n.scale == _SCALES["%"] and abs(n.value - target) <= PERCENT_HALF
+        n.scale == _SCALES["%"]
+        and abs(n.value - target)
+        <= (max(PERCENT_HALF, _half(n) / n.scale) if rounded else PERCENT_HALF)
         for t in _readings(text)
         for n in numbers(t)
     )

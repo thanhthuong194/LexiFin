@@ -98,8 +98,9 @@ t0077 split table loses its title).
    `chat.generator` and scores `answers.jsonl` (metrics in the
    `src/evals/answer_eval.py` docstring): the expected value stated (XBRL
    fact exactly, else the reference's first amount at its precision, any
-   sign; `calc` and computed `false_premise`: the computed value with the
-   direction of a change; other `false_premise`: the premise denied and the
+   sign, skipping a share count the question does not ask for; `calc` and
+   computed `false_premise`: the computed value with the direction of a
+   change, a percent within 0.05 points or as rounded as the answer writes it; other `false_premise`: the premise denied and the
    reference amount stated), `answer.order` (`ranking`: companies in order,
    reversed only when the question or answer asks for the lowest), refusals of unanswerable questions, false refusals, citations,
    a cited passage holding evidence, answer language; split by whether

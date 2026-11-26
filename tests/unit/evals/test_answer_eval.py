@@ -238,6 +238,18 @@ def test_metrics_by_question_kind() -> None:
     assert metrics(no_amount, answer("Smith, 64 [1]."))["answer.value"] is None
     lookup = make_question("t2", "table_lookup", "Net income was 56.6% of revenue.")
     assert metrics(lookup, answer("It was 56.6% [1]."))["answer.value"] == 1.0
+    # A share count is not the asked value unless the question asks how many.
+    price = make_question(
+        "t4",
+        "table_lookup",
+        "It repurchased 3,046 shares at an average price of $53.80.",
+    )
+    assert metrics(price, answer("The price was $53.80 [1]."))["answer.value"] == 1.0
+    assert metrics(price, answer("It bought 3,046 shares [1]."))["answer.value"] == 0.0
+    count = EvalQuestion.model_validate(
+        price.model_dump() | {"question_en": "How many shares did it buy back?"}
+    )
+    assert metrics(count, answer("It bought 3,046 shares [1]."))["answer.value"] == 1.0
     # A citation marker is not a stated value.
     assert metrics(lookup, answer("Not stated [56]."))["answer.value"] == 0.0
     wrong_language = metrics(make_question("q"), answer("$33,712 million [1]."), "vi")
@@ -408,7 +420,10 @@ def test_computed_order_and_false_premise_metrics() -> None:
     )
     assert metric(growth, "It grew 12.3% [1].", "answer.value") == 1.0
     assert metric(growth, "Tăng 12,35% [1].", "answer.value") == 1.0
-    assert metric(growth, "It grew 12% [1].", "answer.value") == 0.0
+    # An answer may round the percent coarser, never wrongly.
+    assert metric(growth, "It grew 12% [1].", "answer.value") == 1.0
+    assert metric(growth, "It grew 13% [1].", "answer.value") == 0.0
+    assert metric(growth, "It grew 12.5% [1].", "answer.value") == 0.0
     assert metric(growth, "It fell 12.3% [1].", "answer.value") == 0.0
     assert metric(growth, "It moved 12.3% [1].", "answer.value") == 0.0
     assert metric(growth, "It grew 12.3% [1].", "answer.order") is None
