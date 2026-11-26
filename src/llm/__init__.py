@@ -104,7 +104,11 @@ def get_chat(
     chat = build_chat(profile)
     if cache_dir is None:
         return chat
-    settings = profile.model_dump_json(exclude={"timeout_s", "max_retries"})
+    # The model id, not the name one server gives it (Groq and Cerebras serve
+    # gpt-oss-120b under different names): a provider swap keeps the cache.
+    settings = profile.model_dump_json(
+        exclude={"timeout_s", "max_retries", "served_model"}
+    )
     return CachedChatModel(chat, cache_dir, settings)
 
 

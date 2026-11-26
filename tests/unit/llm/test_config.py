@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from src.llm import build_chat, get_chat, get_embedder, get_reranker
+from src.llm import (
+    ChatOptions,
+    Message,
+    build_chat,
+    get_chat,
+    get_embedder,
+    get_reranker,
+)
 from src.llm.cache import CachedChatModel
 from src.llm.config import (
     DEFAULT_PROFILES_PATH,
@@ -208,3 +215,14 @@ def test_registry_wraps_cached_chat_and_builds_gemini_embedder(
     assert isinstance(cached, CachedChatModel)
     assert (cached.provider, cached.model) == ("anthropic", "claude-opus-5-5")
     assert isinstance(get_embedder("gemini", profiles=profiles), GeminiEmbedding)
+
+
+def test_cache_key_ignores_the_served_name(tmp_path: Path) -> None:
+    base = "[chat.query]\nprovider = 'openai_compat'\nmodel = 'openai/gpt-oss-120b'\n"
+    keys = []
+    for served in ("", "served_model = 'gpt-oss-120b'\n"):
+        profiles = load_profiles(write(tmp_path, base + served))
+        cached = get_chat("query", profiles=profiles, cache_dir=tmp_path / "cache")
+        assert isinstance(cached, CachedChatModel)
+        keys.append(cached._key([Message.user("q")], ChatOptions()))
+    assert keys[0] == keys[1]

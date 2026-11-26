@@ -10,7 +10,7 @@ Nguồn số liệu: `evals/runs/<run>/report.md` (gitignored, máy local), `doc
 - Cải thiện lớn nhất không đến từ mô hình mà từ việc sửa lỗi im lặng: gpt-oss trả câu tìm kiếm tiếng Việt cho 77/81 câu hỏi tiếng Việt, nên chunk tiếng Anh bị tìm bằng tiếng Việt. Sửa schema + dịch dự phòng: vi `hit_rate@8` 0,880 → 0,976 (khác biệt có ý nghĩa, paired t-test p < 0,05).
 - Reranker là thành phần đáng giá nhất: tắt reranker làm vi `hit_rate@8` 0,843 → 0,651, `mrr@10` (all) 0,646 → 0,544 (bộ v1).
 - Một phần "lỗi retrieval" là lỗi của bộ eval: bằng chứng chỉ gắn một filing trong khi cùng dòng bảng có ở filing khác (10-Q/10-K lặp bảng của thông cáo). Bộ v1.2 mở rộng bằng chứng theo luật; chấm lại cùng run: lỗi 15 → 13.
-- Sinh câu trả lời: thử 10 câu × 2 ngôn ngữ: đúng giá trị 6/6, từ chối đúng 2/2, từ chối nhầm 0/18, có trích dẫn 18/18, trích dẫn chứa bằng chứng 17/18, đúng ngôn ngữ 20/20. Chưa có judge (key NVIDIA bị 401).
+- Sinh câu trả lời: thử 10 câu × 2 ngôn ngữ: đúng giá trị 6/6, từ chối đúng 2/2, từ chối nhầm 0/18, có trích dẫn 18/18, trích dẫn chứa bằng chứng 17/18, đúng ngôn ngữ 20/20. Judge chưa chạy (đã chọn Gemini 3.6 Flash, 26/11).
 - 500 công ty: 3.737.715 chunk, 3.737.715 vector (Qwen3-Embedding-0.6B, 1024 chiều), audit embedding toàn PASS. Số chunk cao hơn dự đoán ~2,5 tr khoảng 50%.
 - 500 công ty, bộ v2 (140 câu, chia dev 49 / test 91): test `hit@8` en 0,810, vi 0,810; `mrr@10` 0,546 / 0,545 (run `20261125-093610_s500_v2_test_b3`, con số chính thức). Dev sau đợt sửa 3 đạt 0,935 / 0,935; khoảng chênh là do dev đã dùng để sửa và mẫu nhỏ (mục 4.3). Yếu nhất: calc, false_premise, ranking, aggregation.
 - Chưa đo: độ chính xác câu trả lời bằng judge, faithfulness, baseline chunk cố định, thí nghiệm chunking A–E.
@@ -27,11 +27,11 @@ câu hỏi → query model → danh bạ công ty → hybrid (RRF) → gộp tr�
 
 | Vai trò | Mô hình | Chạy ở đâu | Ghi chú |
 |---|---|---|---|
-| `chat.query` | gpt-oss-120b, `effort = low` | Cerebras (từ 24/11) | Trước đó Groq free, 200k token/ngày/key: hết quota giữa eval |
-| `chat.generator` | gpt-oss-120b, `temperature 0` | Cerebras | Key riêng với query |
-| `chat.judge` | Mistral Large (`mistral-large-4-1t-a52b`) | NVIDIA API | Key bị 401; đang chọn judge khác |
+| `chat.query` | gpt-oss-120b, `effort = low` | Groq (từ 26/11; Cerebras 24–25/11) | Groq free: 8k token/phút, câu chậm ~50 s là chờ giới hạn/phút (429), không phải mô hình chậm |
+| `chat.generator` | gpt-oss-120b, `temperature 0` | Groq | Key riêng với query; Cerebras cần `served_model = "gpt-oss-120b"` |
+| `chat.judge` | Gemini 3.6 Flash (`gemini-3.6-flash`) | Gemini API (free tier) | Khác họ model với generator; chạy chậm theo giới hạn, resume từ cache |
 | `embedding.default` | Qwen3-Embedding-0.6B, 1024 chiều | vLLM Kaggle 2×T4, Cloudflare tunnel | Cùng tokenizer dùng để giới hạn chunk |
-| `rerank.default` | Qwen3-Reranker-0.6B, `prompt_format = "qwen3"` | vLLM Kaggle | Không có chat template thì điểm gần ngẫu nhiên (0,32 vs 0,26; có template: 0,995 vs 0,0006) |
+| `rerank.default` | Qwen3-Reranker-4B (0.6B đến 25/11), `prompt_format = "qwen3"` | vLLM Kaggle 2×T4, fp16 | Không có chat template thì điểm gần ngẫu nhiên (0,32 vs 0,26; có template: 0,995 vs 0,0006) |
 
 Claude viết câu hỏi eval, nên không bao giờ là mô hình trả lời hay judge.
 
@@ -145,7 +145,7 @@ Run `20261124-105158_answers_try10` (10 câu đầu v1.2 × en/vi; retrieval tì
 | `answer.cited` | 9/9 | 9/9 | 18/18 |
 | `answer.citation_evidence` | 9/9 | 8/9 | 17/18 |
 | `answer.language` | 10/10 | 10/10 | 20/20 |
-| `judge.correct`, `judge.faithful` | – | – | Chưa đo (401) |
+| `judge.correct`, `judge.faithful` | – | – | Chưa đo |
 
 - Dòng lỗi duy nhất: t0006 vi trả đúng số ($14.728 tr so với Q3 FY2022) nhưng đoạn được trích không chứa nhóm bằng chứng.
 - 10 câu quá ít để kết luận; chưa đo độ trễ sinh câu trả lời. Dự đoán B3/B4 (đúng ≥ 80–87,5%, faithfulness ≥ 90–92%, trễ p95 < 10 s): chưa đo.
@@ -178,7 +178,7 @@ Lưu ý: dự đoán tính cho 500 công ty và ~300 câu; thực tế là 5 cô
 | 7 | Không gọi được Cerebras | Gõ sai host trong base URL | Sửa base URL | Chạy được |
 | 8 | Qdrant không lưu được trên ổ DATA | Ổ exFAT không giữ được storage của Qdrant | Đặt storage trên NVMe ext4 | Nạp xong: 3.737.715 điểm, nạp 61 phút, audit PASS, `ann_recall` 1,000 |
 | 9 | Audit chunk 500 công ty FAIL `block_in_one_chunk` | Bảng ghi chú sau bảng bị tách giữa hai chunk (v6); dấu `(ii)` đứng riêng nhận hàng đầu của bảng bố cục (v7, 2 block) | Rules v7 (`dd520d4`), v8 (`cb441db`) | Chunk `data/` giống hệt qua v6–v8; 500 công ty v8: 3.737.715 chunk |
-| 10 | Judge không chạy | Key NVIDIA bị từ chối (401) | Chưa sửa; đang chọn mô hình judge | 20/20 dòng chờ chấm lại (`--rejudge`) |
+| 10 | Judge không chạy | Key NVIDIA bị từ chối (401) | Đổi judge sang Gemini 3.6 Flash (26/11) | 20/20 dòng chờ chấm lại (`--rejudge`) |
 | 11 | Sai công ty khi câu chỉ ghi mã (500 công ty): EXE → Exelon, MKC → McKesson, bỏ sót RCL và 4 mã ngân hàng | Query model đoán tên từ mã; tên thắng mã khi tra danh mục | `resolve_in_question`: mã viết trong câu thắng; mã lệch 1 chữ so với mã viết trong câu và câu không nhắc tên → đọc nhầm; chỉ thêm mã rõ là mã (`$`, sở hữu, ngoặc sau tên, danh sách, từ 2 mã); từ viết tắt trùng mã (COO, RF, FICO…) cần `$` hoặc query model xác nhận. Agent review 2 vòng (`32200be`) | Dev: đúng công ty en 0,898 → 0,980; COO vẫn trượt (cố ý) |
 | 12 | "February 2022" không ra kỳ (t0067) | Tháng + năm không gắn sự kiện bị bỏ qua | Tháng + năm → quý dương lịch chứa tháng, chỉ khi câu không hỏi năm/ngày khác; bỏ qua sau since/from/due/maturing… (`32200be`) | t0067 qua. Công ty có quý kết thúc tháng 1/4/7/10 có thể trượt tháng đầu quý |
 | 13 | "January 2026 deal" đọc thành Q1 2026 (t0078) | Thương vụ không nằm trong từ chỉ sự kiện | deal/acquisition/merger/thương vụ/sáp nhập: tháng là tháng nộp 8-K; nhận "8-Ks", "10-Qs" (`aba868b`) | Dev lỗi 8 → 6 |
@@ -200,7 +200,7 @@ Lưu ý: dự đoán tính cho 500 công ty và ~300 câu; thực tế là 5 cô
 |---|---|
 | Thêm câu dev cho loại yếu | calc, ranking, aggregation, false_premise, compare_periods, thời gian tương đối; chỉ vào dev, test giữ nguyên; rồi sửa theo đợt và chạy test một lần |
 | Review bộ v2 trước khi đóng băng | LLM không phải Claude đọc cả 140 câu với đoạn đầy đủ; người review ~30 câu |
-| Chọn judge, chạy eval câu trả lời đầy đủ | Judge khác họ với gpt-oss và Claude (dự kiến Gemini Flash, bản free); `--rejudge` dùng lại câu trả lời đã lưu |
+| Chạy eval câu trả lời đầy đủ | Judge Gemini 3.6 Flash (bản free, giới hạn theo ngày: chạy nhiều ngày bằng cache/`--resume`); `--rejudge` dùng lại câu trả lời đã lưu |
 | 4 lỗi còn lại (v1.2) | t0042 en (30/9 bị đọc là 10-K, thật ra là Q3), t0042 vi và t0060 vi (xếp hạng), t0077 en (bảng tách mất tiêu đề) |
 | Tiêu đề bảng ở các phần sau | Đổi luật chunk → bump rules version → build lại chunk, embedding, Qdrant |
 | Độ trễ | Rerank ~3 s/câu trên T4 qua tunnel; query model p95 ~57 s khi phải dịch |

@@ -19,33 +19,34 @@ provider = "gemini"
 model = "gemini-3.6-flash"
 max_tokens = 16000
 
-# Writes RAG answers. Cerebras (Groq: drop served_model).
+# Writes RAG answers. Groq (Cerebras: add served_model = "gpt-oss-120b").
 [chat.generator]
 provider = "openai_compat"
 model = "openai/gpt-oss-120b"
-served_model = "gpt-oss-120b"
 max_tokens = 8192
 temperature = 0.0
 timeout_s = 300
 
 # Reads a question before retrieval (language, translation, companies,
-# filters). Same Cerebras model, own key (quota per key).
+# filters). Same model, own key (quota per key). The cache ignores
+# `served_model`, so switching Groq/Cerebras keeps it.
 [chat.query]
 provider = "openai_compat"
 model = "openai/gpt-oss-120b"
-served_model = "gpt-oss-120b"
 max_tokens = 4096
 temperature = 0.0
 effort = "low"
 timeout_s = 60
 
-# Grades answers. Must be another model family than the generator.
-# NVIDIA API catalog free tier (40 req/min).
+# Grades answers. Must be another model family than the generator (and
+# not Claude, which writes the eval sets). Gemini free tier: rate-limited,
+# so runs resume from the cache.
 [chat.judge]
-provider = "openai_compat"
-model = "mistralai/mistral-large-4-1t-a52b"
+provider = "gemini"
+model = "gemini-3.6-flash"
 max_tokens = 8192
-temperature = 0.0
+# Thinking counts against max_tokens; Gemini 3 advises default temperature.
+effort = "low"
 timeout_s = 300
 
 
@@ -63,14 +64,9 @@ query_instruction = "Given a question about SEC filings, retrieve passages that 
 
 # vLLM /rerank. prompt_format "qwen3": without its chat template
 # Qwen3-Reranker scores almost at random.
+# 4B over 0.6B (v2 dev, 26/11): hit@8 0.872 -> 0.909, MRR 0.606 -> 0.684;
+# rerank ~8.8 s vs 2.5 s per question on Kaggle 2x T4 (fp16).
 [rerank.default]
-provider = "http_rerank"
-model = "Qwen/Qwen3-Reranker-0.6B"
-prompt_format = "qwen3"
-instruction = "Given a question about SEC filings, judge whether the passage helps answer it"
-
-# Trial of the larger reranker (eval `--rerank-profile large`).
-[rerank.large]
 provider = "http_rerank"
 model = "Qwen/Qwen3-Reranker-4B"
 prompt_format = "qwen3"
