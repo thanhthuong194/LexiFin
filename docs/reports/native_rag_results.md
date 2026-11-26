@@ -27,8 +27,8 @@ câu hỏi → query model → danh bạ công ty → hybrid (RRF) → gộp tr�
 
 | Vai trò | Mô hình | Chạy ở đâu | Ghi chú |
 |---|---|---|---|
-| `chat.query` | gpt-oss-120b, `effort = low` | Groq (từ 26/11; Cerebras 24–25/11) | Groq free: 8k token/phút, câu chậm ~50 s là chờ giới hạn/phút (429), không phải mô hình chậm |
-| `chat.generator` | gpt-oss-120b, `temperature 0` | Groq | Key riêng với query; Cerebras cần `served_model = "gpt-oss-120b"` |
+| `chat.query` | gpt-oss-120b, `effort = low` | Cerebras (Groq sáng 26/11: hết 200k token/ngày giữa eval) | Groq free: 8k token/phút (câu chậm ~50 s là chờ 429), 200k token/ngày |
+| `chat.generator` | gpt-oss-120b, `temperature 0` | Cerebras | Cerebras cần `served_model = "gpt-oss-120b"` |
 | `chat.judge` | Gemini 3.6 Flash (`gemini-3.6-flash`) | Gemini API (free tier) | Khác họ model với generator; chạy chậm theo giới hạn, resume từ cache |
 | `embedding.default` | Qwen3-Embedding-0.6B, 1024 chiều | vLLM Kaggle 2×T4, Cloudflare tunnel | Cùng tokenizer dùng để giới hạn chunk |
 | `rerank.default` | Qwen3-Reranker-4B (0.6B đến 25/11), `prompt_format = "qwen3"` | vLLM Kaggle 2×T4, fp16 | Không có chat template thì điểm gần ngẫu nhiên (0,32 vs 0,26; có template: 0,995 vs 0,0006) |
