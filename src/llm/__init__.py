@@ -25,6 +25,7 @@ from src.llm.config import (
     load_profiles,
 )
 from src.llm.structured import generate_structured, strict_json_schema, tool_from_model
+from src.llm.throttle import ThrottledChatModel
 from src.llm.types import (
     ChatOptions,
     ChatResult,
@@ -101,13 +102,15 @@ def get_chat(
 
     loaded = _profiles(profiles)
     profile = _lookup(loaded.chat, "chat", name, loaded.source)
-    chat = build_chat(profile)
+    chat: ChatModel = build_chat(profile)
+    if profile.requests_per_minute is not None:
+        chat = ThrottledChatModel(chat, profile.requests_per_minute)
     if cache_dir is None:
         return chat
     # The model id, not the name one server gives it (Groq and Cerebras serve
     # gpt-oss-120b under different names): a provider swap keeps the cache.
     settings = profile.model_dump_json(
-        exclude={"timeout_s", "max_retries", "served_model"}
+        exclude={"timeout_s", "max_retries", "served_model", "requests_per_minute"}
     )
     return CachedChatModel(chat, cache_dir, settings)
 

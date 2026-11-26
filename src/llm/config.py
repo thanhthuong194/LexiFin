@@ -67,6 +67,9 @@ class ChatProfile(_Profile):
     # Anthropic output_config.effort, OpenAI reasoning_effort,
     # Gemini thinking_level.
     effort: str | None = None
+    # Calls are spaced to stay under this rate (free tiers); cache hits
+    # are not.
+    requests_per_minute: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _check_temperature(self) -> ChatProfile:

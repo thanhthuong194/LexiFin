@@ -24,7 +24,9 @@ from src.llm.providers.anthropic import AnthropicChat
 from src.llm.providers.gemini import GeminiChat, GeminiEmbedding
 from src.llm.providers.http_rerank import HttpReranker
 from src.llm.providers.openai_compat import OpenAIChat, OpenAIEmbedding
+from src.llm.throttle import ThrottledChatModel
 from src.llm.types import LLMConfigError
+from tests.llm_support import FakeChat, reply
 
 pytestmark = pytest.mark.unit
 
@@ -226,3 +228,28 @@ def test_cache_key_ignores_the_served_name(tmp_path: Path) -> None:
         assert isinstance(cached, CachedChatModel)
         keys.append(cached._key([Message.user("q")], ChatOptions()))
     assert keys[0] == keys[1]
+
+
+def test_throttle_spaces_calls_and_skips_cache_hits(tmp_path: Path) -> None:
+    now = [0.0]
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    inner = FakeChat([reply("a"), reply("b"), reply("c")])
+    throttled = ThrottledChatModel(inner, 6, clock=lambda: now[0], sleep=sleep)
+    throttled.generate([Message.user("1")])
+    now[0] += 4.0
+    throttled.generate([Message.user("2")])
+    throttled.generate([Message.user("3")])
+    assert slept == [6.0, 10.0]  # 10 s apart at 6 per minute
+    text = (
+        "[chat.judge]\nprovider = 'openai_compat'\nmodel = 'm'\n"
+        "requests_per_minute = 6\n"
+    )
+    profiles = load_profiles(write(tmp_path, text))
+    cached = get_chat("judge", profiles=profiles, cache_dir=tmp_path / "cache")
+    assert isinstance(cached, CachedChatModel)
+    assert isinstance(cached._inner, ThrottledChatModel)

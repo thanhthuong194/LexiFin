@@ -19,10 +19,12 @@ provider = "gemini"
 model = "gemini-3.6-flash"
 max_tokens = 16000
 
-# Writes RAG answers. Groq (Cerebras: add served_model = "gpt-oss-120b").
+# Writes RAG answers. Cerebras (Groq free is too small for ~7k-token
+# prompts; on Groq drop served_model).
 [chat.generator]
 provider = "openai_compat"
 model = "openai/gpt-oss-120b"
+served_model = "gpt-oss-120b"
 max_tokens = 8192
 temperature = 0.0
 timeout_s = 300
@@ -48,6 +50,8 @@ max_tokens = 8192
 # Thinking counts against max_tokens; Gemini 3 advises default temperature.
 effort = "low"
 timeout_s = 300
+# Free tier; 2 calls per answer (correctness, faithfulness).
+requests_per_minute = 5
 
 
 # ----------------------------------------------------------- embedding ----
